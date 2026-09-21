@@ -1,0 +1,7 @@
+import { increment } from "./logic.ax";
+
+page Counter {
+    state count: number = 0;
+    show count;
+    button "더하기" updates count with increment(count);
+}

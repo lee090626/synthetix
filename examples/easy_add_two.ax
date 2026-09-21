@@ -1,0 +1,4 @@
+// Add two inputs together.
+program add_two(first: number, second: number) -> number {
+    gives answer equals first plus second;
+}

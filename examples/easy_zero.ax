@@ -1,0 +1,4 @@
+// Always return zero.
+program zero() -> number {
+    gives answer equals 0;
+}

@@ -1,0 +1,10 @@
+[package]
+name = "axiom-synth"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axiom-ami = { path = "../axiom-ami" }
+axiom-parser = { path = "../axiom-parser" }
+axiom-verify = { path = "../axiom-verify" }
+axiom-wasm = { path = "../axiom-wasm" }

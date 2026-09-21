@@ -1,0 +1,4 @@
+// Multiply the input by seventeen.
+program multiply_seventeen(x: number) -> number {
+    gives answer equals x times 17;
+}

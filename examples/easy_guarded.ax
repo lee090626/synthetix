@@ -1,0 +1,5 @@
+// Only accept inputs other than zero and one.
+program guarded(x: number) -> number {
+    when x is_not 0 and x is_not 1;
+    gives answer equals x;
+}

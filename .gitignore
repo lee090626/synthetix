@@ -1,0 +1,16 @@
+.synthetix/
+dist/
+
+# Rust build output
+target/
+
+# Generated verification and WebAssembly output
+**/.z3-trace
+*.wasm
+
+# Local machine files
+.DS_Store
+
+# Scratch files from the old editor demo
+/editors/.ax
+/editors/test.ax

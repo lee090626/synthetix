@@ -1,0 +1,4 @@
+// Axiom specification: Multiply by 8 with modulo 2^32 wrap-around
+contract mul8(x: u32) -> u32 {
+    ensures result == x *% 8;
+}

@@ -1,0 +1,63 @@
+{
+  "program": {
+    "prefix": "program",
+    "body": [
+      "program ${1:name}(${2:x}: number) -> number {",
+      "\tgives answer equals ${2} plus ${3:1};",
+      "}"
+    ],
+    "description": "Create an easy-word Axiom program"
+  },
+  "contract": {
+    "prefix": "contract",
+    "body": [
+      "contract ${1:name}(${2:x: u32}) -> u32 {",
+      "\tensures result == ${3}${2/(.*):.*/$1/};",
+      "}"
+    ],
+    "description": "Create an Axiom contract"
+  },
+  "ensures": {
+    "prefix": "ensures",
+    "body": "ensures result == ${1:x};",
+    "description": "Add an ensures clause"
+  },
+  "requires": {
+    "prefix": "requires",
+    "body": "requires ${1:x != 0};",
+    "description": "Add a requires clause"
+  },
+  "when": {
+    "prefix": "when",
+    "body": "when ${1:x is_not 0};",
+    "description": "Add an easy-word precondition"
+  },
+  "gives": {
+    "prefix": "gives",
+    "body": "gives answer equals ${1:x};",
+    "description": "Add an easy-word result clause"
+  },
+  "minimum": {
+    "prefix": "minimum",
+    "body": "gives answer equals if ${1:a} < ${2:b} { ${1} } else { ${2} };",
+    "description": "Add a conditional result expression"
+  },
+  "let": {
+    "prefix": "let",
+    "body": "gives answer equals let ${1:value} = ${2:x} in ${1};",
+    "description": "Add a named intermediate expression"
+  },
+  "web-counter": {
+    "prefix": "web-counter",
+    "body": [
+      "import { ${1:increment} } from \"./${2:logic.ax}\";",
+      "",
+      "page ${3:Counter} {",
+      "\tstate ${4:count}: number = 0;",
+      "\tshow ${4};",
+      "\tbutton \"${5:더하기}\" updates ${4} with ${1}(${4});",
+      "}"
+    ],
+    "description": "Create a small Synthetix web page"
+  }
+}

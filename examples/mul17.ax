@@ -1,0 +1,4 @@
+// Multiply by seventeen with modulo 2^32 wrap-around.
+contract mul17(x: u32) -> u32 {
+    ensures result == x *% 17;
+}

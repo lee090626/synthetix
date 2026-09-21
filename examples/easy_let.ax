@@ -1,0 +1,4 @@
+// A named intermediate value is still part of the mathematical contract.
+program double_with_name(x: number) -> number {
+    gives answer equals let doubled = x plus x in doubled;
+}

@@ -1,0 +1,3 @@
+program mul8(x: number) -> number {
+    gives answer equals x times 8;
+}
