@@ -1,0 +1,4 @@
+// Return the input unchanged.
+program identity(x: number) -> number {
+    gives answer equals x;
+}

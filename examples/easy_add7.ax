@@ -1,0 +1,4 @@
+// Add seven to the input.
+program add_seven(x: number) -> number {
+    gives answer equals x plus 7;
+}

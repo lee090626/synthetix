@@ -1,0 +1,4 @@
+// Add two u32 values with modulo 2^32 wrap-around.
+contract add(x: u32, y: u32) -> u32 {
+    ensures result == x +% y;
+}

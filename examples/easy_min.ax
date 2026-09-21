@@ -1,0 +1,4 @@
+// Choose the smaller number without writing implementation code.
+program minimum(first: number, second: number) -> number {
+    gives answer equals if first < second { first } else { second };
+}

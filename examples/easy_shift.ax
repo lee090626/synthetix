@@ -1,0 +1,4 @@
+// Shift left by three, which is the same as multiplying by eight.
+program multiply_eight(x: number) -> number {
+    gives answer equals x shift_left 3;
+}

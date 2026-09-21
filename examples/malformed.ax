@@ -1,0 +1,3 @@
+contract malformed(x: u32) -> u32 {
+    ensures result == ;
+}

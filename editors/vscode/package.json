@@ -1,0 +1,97 @@
+{
+  "name": "synthetix-vscode",
+  "displayName": "Synthetix",
+  "description": "Build and run Synthetix .ax web projects with verified logic.",
+  "version": "0.11.0",
+  "publisher": "synthetix",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:axiom"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "axiom",
+        "aliases": [
+          "Axiom",
+          "axiom"
+        ],
+        "extensions": [
+          ".ax"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "axiom",
+        "scopeName": "source.axiom",
+        "path": "./syntaxes/axiom.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "axiom",
+        "path": "./snippets/axiom.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "synthetix.run",
+        "title": "Synthetix: Run Contract",
+        "category": "Synthetix",
+        "icon": "$(play)"
+      },
+      {
+        "command": "synthetix.dev",
+        "title": "Synthetix: Start Web Dev Server",
+        "category": "Synthetix",
+        "icon": "$(globe)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "synthetix.run",
+          "when": "editorLangId == axiom",
+          "group": "navigation",
+          "icon": "$(play)"
+        },
+        {
+          "command": "synthetix.dev",
+          "when": "editorLangId == axiom",
+          "group": "navigation@1",
+          "icon": "$(globe)"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "synthetix.run",
+          "when": "editorLangId == axiom",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Synthetix",
+      "properties": {
+        "synthetix.axiomPath": {
+          "type": "string",
+          "default": "axiom",
+          "description": "Path to the axiom executable. The bundled CLI is preferred; the workspace CLI is used as fallback."
+        },
+        "synthetix.runInput": {
+          "type": "string",
+          "default": "5",
+          "description": "Default u32 input shown by the Run Contract command."
+        }
+      }
+    }
+  }
+}

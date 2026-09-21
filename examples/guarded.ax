@@ -1,0 +1,5 @@
+// Identity contract on every input except zero and one.
+contract guarded(x: u32) -> u32 {
+    requires x != 0 && x != 1;
+    ensures result == x;
+}

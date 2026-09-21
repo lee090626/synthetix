@@ -1,0 +1,4 @@
+// Add seven with modulo 2^32 wrap-around.
+contract add7(x: u32) -> u32 {
+    ensures result == x +% 7;
+}

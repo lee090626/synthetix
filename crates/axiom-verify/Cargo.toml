@@ -1,0 +1,9 @@
+[package]
+name = "axiom-verify"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axiom-ami = { path = "../axiom-ami" }
+axiom-parser = { path = "../axiom-parser" }
+z3 = { version = "0.21", features = ["bundled"] }

@@ -1,0 +1,4 @@
+// Double a number with wrapping arithmetic.
+program double(x: number) -> number {
+    gives answer equals x plus x;
+}

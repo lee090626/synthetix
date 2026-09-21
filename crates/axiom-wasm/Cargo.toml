@@ -1,0 +1,8 @@
+[package]
+name = "axiom-wasm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axiom-ami = { path = "../axiom-ami" }
+wasmi = { version = "2.0", default-features = false, features = ["std", "validate"] }

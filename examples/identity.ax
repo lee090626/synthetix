@@ -1,0 +1,4 @@
+// Return the input unchanged.
+contract identity(x: u32) -> u32 {
+    ensures result == x;
+}
