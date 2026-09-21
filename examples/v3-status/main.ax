@@ -1,0 +1,12 @@
+import { increment, is_ready } from "./logic.ax";
+
+page Status {
+    state value: number = 0;
+    state ready: bool = false;
+
+    show value;
+    show ready;
+    when ready show "준비됨";
+    button "더하기" updates value with increment(value);
+    button "준비 확인" updates ready with is_ready(value);
+}

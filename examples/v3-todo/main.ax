@@ -1,0 +1,23 @@
+import { toggle } from "./logic.ax";
+
+page Todo {
+    state docs_done: bool = false;
+    state exercise_done: bool = false;
+    state plan_done: bool = false;
+
+    show "오늘 할 일";
+    show "v3 문서 작성";
+    show docs_done;
+    when docs_done show "완료됨";
+    button "문서 완료" updates docs_done with toggle(docs_done);
+
+    show "운동하기";
+    show exercise_done;
+    when exercise_done show "완료됨";
+    button "운동 완료" updates exercise_done with toggle(exercise_done);
+
+    show "내일 계획하기";
+    show plan_done;
+    when plan_done show "완료됨";
+    button "계획 완료" updates plan_done with toggle(plan_done);
+}

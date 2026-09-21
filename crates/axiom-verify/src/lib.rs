@@ -24,16 +24,16 @@ enum Value {
 
 /// Proves that `candidate` satisfies every `ensures` clause under `requires`.
 pub fn verify(contract: &Contract, candidate: &Expr) -> Result<VerificationResult, String> {
-    if contract.return_type != Type::U32 {
-        return Err("only u32 return types are supported".to_string());
+    if !matches!(contract.return_type, Type::U32 | Type::Bool) {
+        return Err("unsupported contract return type".to_string());
     }
 
     let args: Vec<BV> = contract
         .params
         .iter()
         .map(|param| {
-            if param.ty != Type::U32 {
-                return Err(format!("parameter {} is not u32", param.name));
+            if !matches!(param.ty, Type::U32 | Type::Bool) {
+                return Err(format!("unsupported parameter type: {}", param.name));
             }
             Ok(BV::new_const(param.name.as_str(), 32))
         })
@@ -76,6 +76,13 @@ pub fn verify(contract: &Contract, candidate: &Expr) -> Result<VerificationResul
     let violation = requires & Bool::and(&refs).not();
 
     let solver = Solver::new();
+    for (index, param) in contract.params.iter().enumerate() {
+        if param.ty == Type::Bool {
+            let zero = args[index].eq(BV::from_u64(0, 32));
+            let one = args[index].eq(BV::from_u64(1, 32));
+            solver.assert(Bool::or(&[&zero, &one]));
+        }
+    }
     solver.assert(&violation);
     match solver.check() {
         SatResult::Unsat => Ok(VerificationResult::Verified),
@@ -160,17 +167,35 @@ fn spec_to_value(
     locals: &HashMap<String, Value>,
 ) -> Result<Value, String> {
     match expr {
-        SpecExpr::Ident(name) if name == "result" => Ok(Value::U32(result.clone())),
+        SpecExpr::Ident(name) if name == "result" => {
+            if contract.return_type == Type::Bool {
+                Ok(Value::Bool(result.ne(BV::from_u64(0, 32))))
+            } else {
+                Ok(Value::U32(result.clone()))
+            }
+        }
         SpecExpr::Ident(name) if locals.contains_key(name) => Ok(locals[name].clone()),
-        SpecExpr::Ident(name) => contract
-            .params
-            .iter()
-            .position(|param| param.name == *name)
-            .and_then(|index| args.get(index).cloned())
-            .map(Value::U32)
-            .ok_or_else(|| format!("unknown identifier: {name}")),
+        SpecExpr::Ident(name) => {
+            let index = contract
+                .params
+                .iter()
+                .position(|param| param.name == *name)
+                .ok_or_else(|| format!("unknown identifier: {name}"))?;
+            let value = args
+                .get(index)
+                .cloned()
+                .ok_or_else(|| format!("missing argument: {name}"))?;
+            if contract.params[index].ty == Type::Bool {
+                Ok(Value::Bool(value.ne(BV::from_u64(0, 32))))
+            } else {
+                Ok(Value::U32(value))
+            }
+        }
         SpecExpr::Number(value) => Ok(Value::U32(BV::from_u64(*value as u64, 32))),
         SpecExpr::Bool(value) => Ok(Value::Bool(Bool::from_bool(*value))),
+        SpecExpr::Text(_) | SpecExpr::List(_) | SpecExpr::Record { .. } | SpecExpr::Field(_, _) => {
+            Err("non-scalar expressions cannot be verified as contracts".to_string())
+        }
         SpecExpr::Let(name, value, body) => {
             let value = spec_to_value(value, contract, args, result, locals)?;
             let mut nested = locals.clone();
@@ -212,6 +237,8 @@ fn spec_to_value(
                 }
                 (BinaryOp::Eq, Value::U32(lhs), Value::U32(rhs)) => Ok(Value::Bool(lhs.eq(rhs))),
                 (BinaryOp::Ne, Value::U32(lhs), Value::U32(rhs)) => Ok(Value::Bool(lhs.ne(rhs))),
+                (BinaryOp::Eq, Value::Bool(lhs), Value::Bool(rhs)) => Ok(Value::Bool(lhs.eq(rhs))),
+                (BinaryOp::Ne, Value::Bool(lhs), Value::Bool(rhs)) => Ok(Value::Bool(lhs.ne(rhs))),
                 (BinaryOp::Lt, Value::U32(lhs), Value::U32(rhs)) => {
                     Ok(Value::Bool(lhs.bvult(&rhs)))
                 }
@@ -267,6 +294,19 @@ mod tests {
             then_branch: Box::new(Expr::Arg(0)),
             else_branch: Box::new(Expr::Arg(1)),
         };
+
+        assert_eq!(
+            verify(&contract, &candidate).unwrap(),
+            VerificationResult::Verified
+        );
+    }
+
+    #[test]
+    fn proves_bool_result_contract() {
+        let contract =
+            parse("program is_ready(value: number) -> bool { gives answer equals value > 0; }")
+                .unwrap();
+        let candidate = Expr::Gt(Box::new(Expr::Arg(0)), Box::new(Expr::Const(0)));
 
         assert_eq!(
             verify(&contract, &candidate).unwrap(),

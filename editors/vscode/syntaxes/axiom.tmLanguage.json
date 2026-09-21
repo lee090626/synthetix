@@ -8,11 +8,11 @@
     },
     {
       "name": "keyword.control.axiom",
-      "match": "\\b(import|export|from|contract|program|requires|when|ensures|gives|if|else|let|in|page|state|show|button|updates|with)\\b"
+      "match": "\\b(import|export|from|contract|program|requires|when|ensures|gives|if|else|let|in|page|record|component|use|state|show|button|updates|adds|runs|reducer|input|placeholder|persist|list|as|with)\\b"
     },
     {
       "name": "storage.type.axiom",
-      "match": "\\b(u32|number|bool)\\b"
+      "match": "\\b(u32|number|bool|text)\\b"
     },
     {
       "name": "constant.numeric.axiom",

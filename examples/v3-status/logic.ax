@@ -1,0 +1,7 @@
+export program increment(value: number) -> number {
+    gives answer equals value plus 1;
+}
+
+export program is_ready(value: number) -> bool {
+    gives answer equals value > 0;
+}

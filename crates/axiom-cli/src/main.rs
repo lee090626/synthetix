@@ -160,12 +160,20 @@ fn run_command(args: &[String]) -> Result<(), String> {
     } else {
         println!("inputs: {:?}", options.values);
     }
-    println!("result: {result}");
+    println!("result: {}", display_result(&contract.return_type, result));
     println!("wrote: {}", options.output.display());
     if let Some(report) = options.report {
         println!("report: {}", report.display());
     }
     Ok(())
+}
+
+fn display_result(ty: &axiom_parser::Type, result: u32) -> String {
+    match ty {
+        axiom_parser::Type::Bool => (result != 0).to_string(),
+        axiom_parser::Type::U32 => result.to_string(),
+        _ => result.to_string(),
+    }
 }
 
 fn synthesize(

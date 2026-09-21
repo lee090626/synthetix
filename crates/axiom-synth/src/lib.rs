@@ -6,7 +6,7 @@ use std::{
 };
 
 use axiom_ami::Expr;
-use axiom_parser::{BinaryOp, Contract, SpecExpr};
+use axiom_parser::{BinaryOp, Contract, SpecExpr, Type};
 use axiom_verify::{VerificationResult, verify};
 
 #[derive(Debug, Clone, Copy)]
@@ -35,7 +35,7 @@ pub fn synthesize_with_options(
     options: SynthesisOptions,
 ) -> Result<Expr, String> {
     let started = Instant::now();
-    let mut samples = sample_inputs(contract.params.len());
+    let mut samples = sample_inputs(contract);
     let batches = [
         base_candidates(contract.params.len()),
         depth_one_candidates(contract.params.len()),
@@ -44,7 +44,8 @@ pub fn synthesize_with_options(
     let mut checked = 0;
     let mut last_counterexample = None;
 
-    if contract.ensures.iter().any(contains_conditional_construct)
+    if (contract.return_type == Type::Bool
+        || contract.ensures.iter().any(contains_conditional_construct))
         && let Some(candidate) = candidate_from_contract(contract)?
         && matches_samples(contract, &candidate, &samples)
     {
@@ -188,14 +189,19 @@ fn timeout_message(timeout: Option<Duration>) -> String {
     }
 }
 
-fn sample_inputs(argument_count: usize) -> Vec<Vec<u32>> {
+fn sample_inputs(contract: &Contract) -> Vec<Vec<u32>> {
     const VALUES: [u32; 7] = [0, 1, 2, 3, 7, 8, u32::MAX];
     let mut samples = vec![Vec::new()];
-    for _ in 0..argument_count {
+    for param in &contract.params {
+        let values: &[u32] = if param.ty == Type::Bool {
+            &[0, 1]
+        } else {
+            &VALUES
+        };
         samples = samples
             .into_iter()
             .flat_map(|prefix| {
-                VALUES.iter().map(move |value| {
+                values.iter().map(move |value| {
                     let mut args = prefix.clone();
                     args.push(*value);
                     args
@@ -239,17 +245,35 @@ fn eval_spec(
     locals: &HashMap<String, Value>,
 ) -> Result<Value, String> {
     match expr {
-        SpecExpr::Ident(name) if name == "result" => Ok(Value::U32(result)),
+        SpecExpr::Ident(name) if name == "result" => {
+            if contract.return_type == Type::Bool {
+                Ok(Value::Bool(result != 0))
+            } else {
+                Ok(Value::U32(result))
+            }
+        }
         SpecExpr::Ident(name) if locals.contains_key(name) => Ok(locals[name].clone()),
-        SpecExpr::Ident(name) => contract
-            .params
-            .iter()
-            .position(|param| param.name == *name)
-            .and_then(|index| args.get(index).copied())
-            .map(Value::U32)
-            .ok_or_else(|| format!("unknown identifier: {name}")),
+        SpecExpr::Ident(name) => {
+            let index = contract
+                .params
+                .iter()
+                .position(|param| param.name == *name)
+                .ok_or_else(|| format!("unknown identifier: {name}"))?;
+            let value = args
+                .get(index)
+                .copied()
+                .ok_or_else(|| format!("missing argument: {name}"))?;
+            if contract.params[index].ty == Type::Bool {
+                Ok(Value::Bool(value != 0))
+            } else {
+                Ok(Value::U32(value))
+            }
+        }
         SpecExpr::Number(value) => Ok(Value::U32(*value)),
         SpecExpr::Bool(value) => Ok(Value::Bool(*value)),
+        SpecExpr::Text(_) | SpecExpr::List(_) | SpecExpr::Record { .. } | SpecExpr::Field(_, _) => {
+            Err("non-scalar expressions cannot be synthesized".to_string())
+        }
         SpecExpr::Let(name, value, body) => {
             let value = eval_spec(value, contract, args, result, locals)?;
             let mut nested = locals.clone();
@@ -285,6 +309,8 @@ fn eval_spec(
                 }
                 (BinaryOp::Eq, Value::U32(lhs), Value::U32(rhs)) => Ok(Value::Bool(lhs == rhs)),
                 (BinaryOp::Ne, Value::U32(lhs), Value::U32(rhs)) => Ok(Value::Bool(lhs != rhs)),
+                (BinaryOp::Eq, Value::Bool(lhs), Value::Bool(rhs)) => Ok(Value::Bool(lhs == rhs)),
+                (BinaryOp::Ne, Value::Bool(lhs), Value::Bool(rhs)) => Ok(Value::Bool(lhs != rhs)),
                 (BinaryOp::Lt, Value::U32(lhs), Value::U32(rhs)) => Ok(Value::Bool(lhs < rhs)),
                 (BinaryOp::Le, Value::U32(lhs), Value::U32(rhs)) => Ok(Value::Bool(lhs <= rhs)),
                 (BinaryOp::Gt, Value::U32(lhs), Value::U32(rhs)) => Ok(Value::Bool(lhs > rhs)),
@@ -303,7 +329,12 @@ fn contains_conditional_construct(expr: &SpecExpr) -> bool {
         SpecExpr::Binary(_, lhs, rhs) => {
             contains_conditional_construct(lhs) || contains_conditional_construct(rhs)
         }
-        SpecExpr::Ident(_) | SpecExpr::Number(_) | SpecExpr::Bool(_) => false,
+        SpecExpr::Ident(_) | SpecExpr::Number(_) | SpecExpr::Bool(_) | SpecExpr::Text(_) => false,
+        SpecExpr::List(values) => values.iter().any(contains_conditional_construct),
+        SpecExpr::Record { fields, .. } => fields
+            .iter()
+            .any(|(_, value)| contains_conditional_construct(value)),
+        SpecExpr::Field(value, _) => contains_conditional_construct(value),
         SpecExpr::Call(_, args) => args.iter().any(contains_conditional_construct),
     }
 }
@@ -339,6 +370,9 @@ fn lower_spec_expr(
             .ok_or_else(|| format!("unknown identifier: {name}")),
         SpecExpr::Number(value) => Ok(Expr::Const(*value)),
         SpecExpr::Bool(value) => Ok(Expr::Const(u32::from(*value))),
+        SpecExpr::Text(_) | SpecExpr::List(_) | SpecExpr::Record { .. } | SpecExpr::Field(_, _) => {
+            Err("non-scalar expressions cannot be lowered to WASM".to_string())
+        }
         SpecExpr::Let(name, value, body) => {
             let value = lower_spec_expr(value, contract, locals)?;
             let mut nested = locals.clone();
@@ -459,5 +493,31 @@ mod tests {
         let candidate = synthesize(&contract).unwrap();
 
         assert_eq!(candidate.eval(&[21]), 42);
+    }
+
+    #[test]
+    fn synthesizes_and_runs_bool_contract() {
+        let contract =
+            parse("program is_ready(value: number) -> bool { gives answer equals value > 0; }")
+                .unwrap();
+        let (candidate, module) = synthesize_wasm(&contract).unwrap();
+
+        assert_eq!(candidate.eval(&[0]), 0);
+        assert_eq!(candidate.eval(&[4]), 1);
+        assert_eq!(axiom_wasm::run_with_args(&module, &[0]).unwrap(), 0);
+        assert_eq!(axiom_wasm::run_with_args(&module, &[4]).unwrap(), 1);
+    }
+
+    #[test]
+    fn synthesizes_bool_parameter_contract() {
+        let contract =
+            parse("program toggle(done: bool) -> bool { gives answer equals (done != true); }")
+                .unwrap();
+        let (candidate, module) = synthesize_wasm(&contract).unwrap();
+
+        assert_eq!(candidate.eval(&[0]), 1);
+        assert_eq!(candidate.eval(&[1]), 0);
+        assert_eq!(axiom_wasm::run_with_args(&module, &[0]).unwrap(), 1);
+        assert_eq!(axiom_wasm::run_with_args(&module, &[1]).unwrap(), 0);
     }
 }

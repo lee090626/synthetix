@@ -24,8 +24,8 @@ pub fn parse_module(input: &str) -> Result<Module, String> {
 
 /// Validates the subset supported by the first end-to-end pipeline.
 pub fn validate(contract: &Contract) -> Result<(), String> {
-    if contract.return_type != Type::U32 {
-        return Err("type error: the initial pipeline supports only u32 return values".to_string());
+    if !is_scalar(&contract.return_type) {
+        return Err("type error: contracts can only return number or bool".to_string());
     }
     if contract.ensures.is_empty() {
         return Err("type error: contract must have at least one ensures clause".to_string());
@@ -33,8 +33,11 @@ pub fn validate(contract: &Contract) -> Result<(), String> {
 
     let mut names = std::collections::HashMap::new();
     for param in &contract.params {
-        if param.ty != Type::U32 {
-            return Err(format!("type error: parameter {} must be u32", param.name));
+        if !is_scalar(&param.ty) {
+            return Err(format!(
+                "type error: contract parameter {} must be number or bool",
+                param.name
+            ));
         }
         if names.insert(param.name.clone(), param.ty.clone()).is_some() {
             return Err(format!("type error: duplicate parameter: {}", param.name));
@@ -42,7 +45,7 @@ pub fn validate(contract: &Contract) -> Result<(), String> {
     }
 
     for (index, expr) in contract.requires.iter().enumerate() {
-        if spec_type(expr, &names, false)
+        if type_of_expr(expr, &names, None)
             .map_err(|error| type_error(contract.requires_spans.get(index).copied(), error))?
             != Type::Bool
         {
@@ -53,7 +56,7 @@ pub fn validate(contract: &Contract) -> Result<(), String> {
         }
     }
     for (index, expr) in contract.ensures.iter().enumerate() {
-        if spec_type(expr, &names, true)
+        if type_of_expr(expr, &names, Some(&contract.return_type))
             .map_err(|error| type_error(contract.ensures_spans.get(index).copied(), error))?
             != Type::Bool
         {
@@ -66,6 +69,10 @@ pub fn validate(contract: &Contract) -> Result<(), String> {
     Ok(())
 }
 
+fn is_scalar(ty: &Type) -> bool {
+    matches!(ty, Type::U32 | Type::Bool)
+}
+
 fn type_error(span: Option<Span>, message: impl std::fmt::Display) -> String {
     match span {
         Some(span) => format!("{}:{}: type error: {message}", span.line, span.column),
@@ -73,32 +80,46 @@ fn type_error(span: Option<Span>, message: impl std::fmt::Display) -> String {
     }
 }
 
-fn spec_type(
+pub fn type_of_expr(
     expr: &SpecExpr,
     names: &std::collections::HashMap<String, Type>,
-    allow_result: bool,
+    result_type: Option<&Type>,
 ) -> Result<Type, String> {
     match expr {
-        SpecExpr::Ident(name) if name == "result" && allow_result => Ok(Type::U32),
-        SpecExpr::Ident(name) if name == "result" => {
-            Err("result is only available in ensures clauses".to_string())
-        }
+        SpecExpr::Ident(name) if name == "result" => result_type
+            .cloned()
+            .ok_or_else(|| "result is only available in ensures clauses".to_string()),
         SpecExpr::Ident(name) if names.contains_key(name) => Ok(names[name].clone()),
         SpecExpr::Ident(name) => Err(format!("unknown identifier: {name}")),
         SpecExpr::Number(_) => Ok(Type::U32),
         SpecExpr::Bool(_) => Ok(Type::Bool),
+        SpecExpr::Text(_) => Ok(Type::Text),
+        SpecExpr::List(values) => {
+            let Some(first) = values.first() else {
+                return Ok(Type::List(Box::new(Type::Unknown)));
+            };
+            let item_type = type_of_expr(first, names, result_type)?;
+            for value in &values[1..] {
+                if type_of_expr(value, names, result_type)? != item_type {
+                    return Err("list values must have the same type".to_string());
+                }
+            }
+            Ok(Type::List(Box::new(item_type)))
+        }
+        SpecExpr::Record { name, .. } => Ok(Type::Record(name.clone())),
+        SpecExpr::Field(_, _) => Err("field access requires a page record context".to_string()),
         SpecExpr::Let(name, value, body) => {
-            let value_type = spec_type(value, names, allow_result)?;
+            let value_type = type_of_expr(value, names, result_type)?;
             let mut nested = names.clone();
             nested.insert(name.clone(), value_type);
-            spec_type(body, &nested, allow_result)
+            type_of_expr(body, &nested, result_type)
         }
         SpecExpr::If(condition, then_branch, else_branch) => {
-            if spec_type(condition, names, allow_result)? != Type::Bool {
+            if type_of_expr(condition, names, result_type)? != Type::Bool {
                 return Err("if condition must be boolean".to_string());
             }
-            let then_type = spec_type(then_branch, names, allow_result)?;
-            let else_type = spec_type(else_branch, names, allow_result)?;
+            let then_type = type_of_expr(then_branch, names, result_type)?;
+            let else_type = type_of_expr(else_branch, names, result_type)?;
             if then_type != else_type {
                 return Err("if branches must have the same type".to_string());
             }
@@ -108,8 +129,8 @@ fn spec_type(
             "unresolved contract call: {name}; use project mode"
         )),
         SpecExpr::Binary(op, lhs, rhs) => {
-            let lhs_type = spec_type(lhs, names, allow_result)?;
-            let rhs_type = spec_type(rhs, names, allow_result)?;
+            let lhs_type = type_of_expr(lhs, names, result_type)?;
+            let rhs_type = type_of_expr(rhs, names, result_type)?;
             match op {
                 BinaryOp::AddWrap | BinaryOp::MulWrap | BinaryOp::Shl
                     if lhs_type == Type::U32 && rhs_type == Type::U32 =>
@@ -299,5 +320,64 @@ mod tests {
             module.pages[0].elements[1],
             PageElement::Button { .. }
         ));
+    }
+
+    #[test]
+    fn parses_bool_contracts_and_conditional_page_text() {
+        let contract =
+            parse("program is_ready(value: number) -> bool { gives answer equals value > 0; }")
+                .unwrap();
+
+        assert_eq!(contract.return_type, Type::Bool);
+        let module = parse_module(
+            r#"
+            page Status {
+                state ready: bool = false;
+                when ready show "준비됨";
+            }
+            "#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            module.pages[0].elements[0],
+            PageElement::WhenShow { .. }
+        ));
+    }
+
+    #[test]
+    fn parses_v31_records_lists_inputs_reducers_and_components() {
+        let module = parse_module(
+            r#"
+            record Todo { title: text; done: bool; }
+            component Help { show "도움말"; }
+            page Todo {
+                state todos: list<Todo> = [];
+                state draft: text = "";
+                persist todos;
+                input draft placeholder "할 일";
+                use Help;
+                button "추가" adds todos with Todo { title: draft, done: false };
+                list todos as todo {
+                    show todo.title;
+                    when todo.done show "완료";
+                }
+                reducer refresh { updates todos with toggle(todos); }
+                button "갱신" runs refresh;
+            }
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(module.records[0].name, "Todo");
+        assert_eq!(module.components[0].name, "Help");
+        assert_eq!(module.pages[0].persisted, vec!["todos"]);
+        assert!(
+            module.pages[0]
+                .elements
+                .iter()
+                .any(|element| matches!(element, PageElement::List { .. }))
+        );
+        assert_eq!(module.pages[0].reducers[0].name, "refresh");
     }
 }

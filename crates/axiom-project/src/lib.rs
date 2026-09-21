@@ -4,7 +4,9 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use axiom_parser::{Contract, Import, Module, Page, PageElement, SpecExpr};
+use axiom_parser::{
+    Component, Contract, Import, Module, Page, PageElement, RecordDef, Reducer, SpecExpr, Type,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectConfig {
@@ -208,8 +210,34 @@ fn canonical(path: &Path) -> Result<PathBuf, String> {
 fn link_project(config: ProjectConfig, modules: Vec<ModuleInfo>) -> Result<Project, String> {
     let mut definitions = HashMap::<ContractKey, Definition>::new();
     let mut module_paths = HashSet::new();
+    let mut records = HashMap::<String, RecordDef>::new();
+    let mut components = HashMap::<String, Component>::new();
     for module in &modules {
         module_paths.insert(module.path.clone());
+        for record in &module.module.records {
+            if records
+                .insert(record.name.clone(), record.clone())
+                .is_some()
+            {
+                return Err(format!(
+                    "{}: duplicate record: {}",
+                    module.path.display(),
+                    record.name
+                ));
+            }
+        }
+        for component in &module.module.components {
+            if components
+                .insert(component.name.clone(), component.clone())
+                .is_some()
+            {
+                return Err(format!(
+                    "{}: duplicate component: {}",
+                    module.path.display(),
+                    component.name
+                ));
+            }
+        }
         for contract in &module.module.contracts {
             let key = (module.path.clone(), contract.name.clone());
             if definitions
@@ -293,10 +321,18 @@ fn link_project(config: ProjectConfig, modules: Vec<ModuleInfo>) -> Result<Proje
     let mut pages = Vec::new();
     for module in &modules {
         for page in &module.module.pages {
-            validate_page(page, &module.path, scopes.get(&module.path), &definitions)?;
+            let mut page = page.clone();
+            expand_components(&mut page, &components, &module.path)?;
+            validate_page(
+                &page,
+                &module.path,
+                scopes.get(&module.path),
+                &definitions,
+                &records,
+            )?;
             pages.push(LinkedPage {
                 source: module.path.clone(),
-                page: page.clone(),
+                page,
             });
         }
     }
@@ -354,7 +390,38 @@ fn expand_expr(
     stack: &mut Vec<ContractKey>,
 ) -> Result<SpecExpr, String> {
     match expr {
-        SpecExpr::Ident(_) | SpecExpr::Number(_) | SpecExpr::Bool(_) => Ok(expr.clone()),
+        SpecExpr::Ident(_) | SpecExpr::Number(_) | SpecExpr::Bool(_) | SpecExpr::Text(_) => {
+            Ok(expr.clone())
+        }
+        SpecExpr::List(values) => Ok(SpecExpr::List(
+            values
+                .iter()
+                .map(|value| expand_expr(value, scope, definitions, scopes, cache, stack))
+                .collect::<Result<_, _>>()?,
+        )),
+        SpecExpr::Record { name, fields } => Ok(SpecExpr::Record {
+            name: name.clone(),
+            fields: fields
+                .iter()
+                .map(|(field, value)| {
+                    Ok((
+                        field.clone(),
+                        expand_expr(value, scope, definitions, scopes, cache, stack)?,
+                    ))
+                })
+                .collect::<Result<_, String>>()?,
+        }),
+        SpecExpr::Field(value, field) => Ok(SpecExpr::Field(
+            Box::new(expand_expr(
+                value,
+                scope,
+                definitions,
+                scopes,
+                cache,
+                stack,
+            )?),
+            field.clone(),
+        )),
         SpecExpr::Let(name, value, body) => Ok(SpecExpr::Let(
             name.clone(),
             Box::new(expand_expr(
@@ -485,7 +552,63 @@ fn substitute(expr: &SpecExpr, values: &HashMap<String, SpecExpr>) -> SpecExpr {
             name.clone(),
             args.iter().map(|arg| substitute(arg, values)).collect(),
         ),
+        SpecExpr::Text(_) | SpecExpr::List(_) | SpecExpr::Record { .. } | SpecExpr::Field(_, _) => {
+            expr.clone()
+        }
     }
+}
+
+fn expand_components(
+    page: &mut Page,
+    components: &HashMap<String, Component>,
+    source: &Path,
+) -> Result<(), String> {
+    page.elements = expand_elements(&page.elements, components, &mut Vec::new(), source)?;
+    Ok(())
+}
+
+fn expand_elements(
+    elements: &[PageElement],
+    components: &HashMap<String, Component>,
+    stack: &mut Vec<String>,
+    source: &Path,
+) -> Result<Vec<PageElement>, String> {
+    let mut expanded = Vec::new();
+    for element in elements {
+        match element {
+            PageElement::Use { name } => {
+                if stack.contains(name) {
+                    return Err(format!(
+                        "{}: circular component use: {}",
+                        source.display(),
+                        name
+                    ));
+                }
+                let component = components
+                    .get(name)
+                    .ok_or_else(|| format!("{}: unknown component: {name}", source.display()))?;
+                stack.push(name.clone());
+                expanded.extend(expand_elements(
+                    &component.elements,
+                    components,
+                    stack,
+                    source,
+                )?);
+                stack.pop();
+            }
+            PageElement::List {
+                state,
+                item,
+                elements,
+            } => expanded.push(PageElement::List {
+                state: state.clone(),
+                item: item.clone(),
+                elements: expand_elements(elements, components, stack, source)?,
+            }),
+            other => expanded.push(other.clone()),
+        }
+    }
+    Ok(expanded)
 }
 
 fn validate_page(
@@ -493,6 +616,7 @@ fn validate_page(
     source: &Path,
     scope: Option<&HashMap<String, ContractKey>>,
     definitions: &HashMap<ContractKey, Definition>,
+    records: &HashMap<String, RecordDef>,
 ) -> Result<(), String> {
     let mut states = HashMap::new();
     for state in &page.states {
@@ -508,17 +632,369 @@ fn validate_page(
         }
     }
     for state in &page.states {
-        validate_page_expr(&state.initial, &states, source)?;
+        let initial_type =
+            page_expr_type(&state.initial, &states, records, &HashMap::new(), source)?;
+        if !types_compatible(&initial_type, &state.ty) {
+            return Err(format!(
+                "{}: state {} initial value has type {:?}, expected {:?}",
+                source.display(),
+                state.name,
+                initial_type,
+                state.ty
+            ));
+        }
     }
 
-    for element in &page.elements {
+    for name in &page.persisted {
+        if !states.contains_key(name) {
+            return Err(format!(
+                "{}: persist references unknown state: {name}",
+                source.display()
+            ));
+        }
+    }
+
+    let mut reducer_names = HashSet::new();
+    for reducer in &page.reducers {
+        if !reducer_names.insert(reducer.name.as_str()) {
+            return Err(format!(
+                "{}: duplicate reducer: {}",
+                source.display(),
+                reducer.name
+            ));
+        }
+        for update in &reducer.updates {
+            validate_call(
+                &update.state,
+                &update.function,
+                &update.args,
+                &states,
+                records,
+                &HashMap::new(),
+                scope,
+                definitions,
+                source,
+            )?;
+        }
+    }
+
+    validate_elements(
+        &page.elements,
+        &states,
+        records,
+        &HashMap::new(),
+        scope,
+        definitions,
+        &page.reducers,
+        source,
+    )?;
+    Ok(())
+}
+
+fn page_expr_type(
+    expr: &SpecExpr,
+    states: &HashMap<String, axiom_parser::Type>,
+    records: &HashMap<String, RecordDef>,
+    locals: &HashMap<String, Type>,
+    source: &Path,
+) -> Result<axiom_parser::Type, String> {
+    match expr {
+        SpecExpr::Ident(name) => locals
+            .get(name)
+            .or_else(|| states.get(name))
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "{}: page expression references unknown state: {name}",
+                    source.display()
+                )
+            }),
+        SpecExpr::Number(_) => Ok(Type::U32),
+        SpecExpr::Bool(_) => Ok(Type::Bool),
+        SpecExpr::Text(_) => Ok(Type::Text),
+        SpecExpr::List(values) => {
+            let Some(first) = values.first() else {
+                return Ok(Type::List(Box::new(Type::Unknown)));
+            };
+            let item = page_expr_type(first, states, records, locals, source)?;
+            for value in &values[1..] {
+                let value_type = page_expr_type(value, states, records, locals, source)?;
+                if !types_compatible(&value_type, &item) {
+                    return Err(format!(
+                        "{}: list values have incompatible types",
+                        source.display()
+                    ));
+                }
+            }
+            Ok(Type::List(Box::new(item)))
+        }
+        SpecExpr::Record { name, fields } => {
+            let definition = records
+                .get(name)
+                .ok_or_else(|| format!("{}: unknown record: {name}", source.display()))?;
+            if fields.len() != definition.fields.len() {
+                return Err(format!(
+                    "{}: record {} expects {} fields, got {}",
+                    source.display(),
+                    name,
+                    definition.fields.len(),
+                    fields.len()
+                ));
+            }
+            for field in &definition.fields {
+                let Some((_, value)) = fields.iter().find(|(name, _)| name == &field.name) else {
+                    return Err(format!(
+                        "{}: record {} is missing field {}",
+                        source.display(),
+                        name,
+                        field.name
+                    ));
+                };
+                let actual = page_expr_type(value, states, records, locals, source)?;
+                if !types_compatible(&actual, &field.ty) {
+                    return Err(format!(
+                        "{}: field {} has type {:?}, expected {:?}",
+                        source.display(),
+                        field.name,
+                        actual,
+                        field.ty
+                    ));
+                }
+            }
+            Ok(Type::Record(name.clone()))
+        }
+        SpecExpr::Field(value, field) => {
+            let Type::Record(record_name) = page_expr_type(value, states, records, locals, source)?
+            else {
+                return Err(format!("{}: only records have fields", source.display()));
+            };
+            let definition = records
+                .get(&record_name)
+                .ok_or_else(|| format!("{}: unknown record: {record_name}", source.display()))?;
+            definition
+                .fields
+                .iter()
+                .find(|candidate| candidate.name == *field)
+                .map(|candidate| candidate.ty.clone())
+                .ok_or_else(|| {
+                    format!(
+                        "{}: unknown field {}.{}",
+                        source.display(),
+                        record_name,
+                        field
+                    )
+                })
+        }
+        SpecExpr::Let(name, value, body) => {
+            let value_type = page_expr_type(value, states, records, locals, source)?;
+            let mut nested = locals.clone();
+            nested.insert(name.clone(), value_type);
+            page_expr_type(body, states, records, &nested, source)
+        }
+        SpecExpr::If(condition, then_branch, else_branch) => {
+            if page_expr_type(condition, states, records, locals, source)? != Type::Bool {
+                return Err(format!(
+                    "{}: if condition must be boolean",
+                    source.display()
+                ));
+            }
+            let then_type = page_expr_type(then_branch, states, records, locals, source)?;
+            let else_type = page_expr_type(else_branch, states, records, locals, source)?;
+            if !types_compatible(&then_type, &else_type) {
+                return Err(format!(
+                    "{}: if branches must have the same type",
+                    source.display()
+                ));
+            }
+            Ok(then_type)
+        }
+        SpecExpr::Binary(op, lhs, rhs) => {
+            let lhs_type = page_expr_type(lhs, states, records, locals, source)?;
+            let rhs_type = page_expr_type(rhs, states, records, locals, source)?;
+            match op {
+                axiom_parser::BinaryOp::Eq | axiom_parser::BinaryOp::Ne
+                    if types_compatible(&lhs_type, &rhs_type) =>
+                {
+                    Ok(Type::Bool)
+                }
+                axiom_parser::BinaryOp::And | axiom_parser::BinaryOp::Or
+                    if lhs_type == Type::Bool && rhs_type == Type::Bool =>
+                {
+                    Ok(Type::Bool)
+                }
+                axiom_parser::BinaryOp::AddWrap
+                | axiom_parser::BinaryOp::MulWrap
+                | axiom_parser::BinaryOp::Shl
+                    if lhs_type == Type::U32 && rhs_type == Type::U32 =>
+                {
+                    Ok(Type::U32)
+                }
+                axiom_parser::BinaryOp::Lt
+                | axiom_parser::BinaryOp::Le
+                | axiom_parser::BinaryOp::Gt
+                | axiom_parser::BinaryOp::Ge
+                    if lhs_type == Type::U32 && rhs_type == Type::U32 =>
+                {
+                    Ok(Type::Bool)
+                }
+                _ => Err(format!(
+                    "{}: invalid page expression types",
+                    source.display()
+                )),
+            }
+        }
+        SpecExpr::Call(name, _) => Err(format!(
+            "{}: page expressions cannot call contract {name}",
+            source.display()
+        )),
+    }
+}
+
+fn types_compatible(actual: &Type, expected: &Type) -> bool {
+    if actual == &Type::Unknown || expected == &Type::Unknown {
+        return true;
+    }
+    match (actual, expected) {
+        (Type::List(actual), Type::List(expected)) => types_compatible(actual, expected),
+        _ => actual == expected,
+    }
+}
+
+fn path_type(
+    path: &str,
+    states: &HashMap<String, Type>,
+    records: &HashMap<String, RecordDef>,
+    locals: &HashMap<String, Type>,
+    source: &Path,
+) -> Result<Type, String> {
+    let mut parts = path.split('.');
+    let root = parts.next().unwrap_or_default();
+    let mut current = locals
+        .get(root)
+        .or_else(|| states.get(root))
+        .cloned()
+        .ok_or_else(|| format!("{}: unknown state or item: {root}", source.display()))?;
+    for field in parts {
+        let Type::Record(record_name) = current else {
+            return Err(format!(
+                "{}: {} has no field {}",
+                source.display(),
+                root,
+                field
+            ));
+        };
+        let definition = records
+            .get(&record_name)
+            .ok_or_else(|| format!("{}: unknown record: {record_name}", source.display()))?;
+        current = definition
+            .fields
+            .iter()
+            .find(|candidate| candidate.name == field)
+            .map(|candidate| candidate.ty.clone())
+            .ok_or_else(|| {
+                format!(
+                    "{}: unknown field {}.{}",
+                    source.display(),
+                    record_name,
+                    field
+                )
+            })?;
+    }
+    Ok(current)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_call(
+    state: &str,
+    function: &str,
+    args: &[SpecExpr],
+    states: &HashMap<String, Type>,
+    records: &HashMap<String, RecordDef>,
+    locals: &HashMap<String, Type>,
+    scope: Option<&HashMap<String, ContractKey>>,
+    definitions: &HashMap<ContractKey, Definition>,
+    source: &Path,
+) -> Result<(), String> {
+    let state_type = path_type(state, states, records, locals, source)?;
+    let Some(scope) = scope else {
+        return Err(format!("{}: missing module scope", source.display()));
+    };
+    let Some(key) = scope.get(function) else {
+        return Err(format!(
+            "{}: page calls unknown contract: {function}",
+            source.display()
+        ));
+    };
+    let definition = definitions
+        .get(key)
+        .ok_or_else(|| format!("{}: contract not found: {function}", source.display()))?;
+    if definition.contract.params.len() != args.len() {
+        return Err(format!(
+            "{}: page call {} expects {} arguments, got {}",
+            source.display(),
+            function,
+            definition.contract.params.len(),
+            args.len()
+        ));
+    }
+    if !types_compatible(&definition.contract.return_type, &state_type) {
+        return Err(format!(
+            "{}: target {} and contract {} have different types",
+            source.display(),
+            state,
+            function
+        ));
+    }
+    for (index, arg) in args.iter().enumerate() {
+        let actual_type = page_expr_type(arg, states, records, locals, source)?;
+        let expected_type = &definition.contract.params[index].ty;
+        if !types_compatible(&actual_type, expected_type) {
+            return Err(format!(
+                "{}: argument {} of {} has type {:?}, expected {:?}",
+                source.display(),
+                index + 1,
+                function,
+                actual_type,
+                expected_type
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_elements(
+    elements: &[PageElement],
+    states: &HashMap<String, Type>,
+    records: &HashMap<String, RecordDef>,
+    locals: &HashMap<String, Type>,
+    scope: Option<&HashMap<String, ContractKey>>,
+    definitions: &HashMap<ContractKey, Definition>,
+    reducers: &[Reducer],
+    source: &Path,
+) -> Result<(), String> {
+    for element in elements {
         match element {
             PageElement::Show { state } => {
-                if !states.contains_key(state) {
+                path_type(state, states, records, locals, source)?;
+            }
+            PageElement::ShowExpr { value } => {
+                page_expr_type(value, states, records, locals, source)?;
+            }
+            PageElement::ShowText { .. } => {}
+            PageElement::WhenShow { condition, .. } => {
+                if page_expr_type(condition, states, records, locals, source)? != Type::Bool {
                     return Err(format!(
-                        "{}: page {} shows unknown state: {state}",
-                        source.display(),
-                        page.name
+                        "{}: conditional show requires a bool expression",
+                        source.display()
+                    ));
+                }
+            }
+            PageElement::Input { state, .. } => {
+                if path_type(state, states, records, locals, source)? != Type::Text {
+                    return Err(format!(
+                        "{}: input state must be text: {state}",
+                        source.display()
                     ));
                 }
             }
@@ -528,79 +1004,75 @@ fn validate_page(
                 args,
                 ..
             } => {
-                let Some(state_type) = states.get(state) else {
+                validate_call(
+                    state,
+                    function,
+                    args,
+                    states,
+                    records,
+                    locals,
+                    scope,
+                    definitions,
+                    source,
+                )?;
+            }
+            PageElement::RunReducer { reducer, .. } => {
+                if !reducers.iter().any(|candidate| candidate.name == *reducer) {
+                    return Err(format!("{}: unknown reducer: {reducer}", source.display()));
+                }
+            }
+            PageElement::Add { state, value, .. } => {
+                let Type::List(item_type) = path_type(state, states, records, locals, source)?
+                else {
                     return Err(format!(
-                        "{}: button updates unknown state: {state}",
+                        "{}: adds target must be a list: {state}",
                         source.display()
                     ));
                 };
-                let Some(scope) = scope else {
-                    return Err(format!("{}: missing module scope", source.display()));
-                };
-                let Some(key) = scope.get(function) else {
+                let value_type = page_expr_type(value, states, records, locals, source)?;
+                if !types_compatible(&value_type, &item_type) {
                     return Err(format!(
-                        "{}: page calls unknown contract: {function}",
+                        "{}: list item has type {:?}, expected {:?}",
+                        source.display(),
+                        value_type,
+                        item_type
+                    ));
+                }
+            }
+            PageElement::List {
+                state,
+                item,
+                elements,
+            } => {
+                let Type::List(item_type) = path_type(state, states, records, locals, source)?
+                else {
+                    return Err(format!(
+                        "{}: list element needs a list state: {state}",
                         source.display()
                     ));
                 };
-                let definition = definitions.get(key).ok_or_else(|| {
-                    format!("{}: contract not found: {function}", source.display())
-                })?;
-                if definition.contract.params.len() != args.len() {
-                    return Err(format!(
-                        "{}: page call {} expects {} arguments, got {}",
-                        source.display(),
-                        function,
-                        definition.contract.params.len(),
-                        args.len()
-                    ));
-                }
-                if &definition.contract.return_type != state_type {
-                    return Err(format!(
-                        "{}: page state {} and contract {} have different types",
-                        source.display(),
-                        state,
-                        function
-                    ));
-                }
-                for arg in args {
-                    validate_page_expr(arg, &states, source)?;
-                }
+                let mut nested = locals.clone();
+                nested.insert(item.clone(), *item_type);
+                validate_elements(
+                    elements,
+                    states,
+                    records,
+                    &nested,
+                    scope,
+                    definitions,
+                    reducers,
+                    source,
+                )?;
+            }
+            PageElement::Use { name } => {
+                return Err(format!(
+                    "{}: unresolved component: {name}",
+                    source.display()
+                ));
             }
         }
     }
     Ok(())
-}
-
-fn validate_page_expr(
-    expr: &SpecExpr,
-    states: &HashMap<String, axiom_parser::Type>,
-    source: &Path,
-) -> Result<(), String> {
-    match expr {
-        SpecExpr::Ident(name) if !states.contains_key(name) => Err(format!(
-            "{}: page expression references unknown state: {name}",
-            source.display()
-        )),
-        SpecExpr::Ident(_) | SpecExpr::Number(_) | SpecExpr::Bool(_) => Ok(()),
-        SpecExpr::Let(_, value, body) => {
-            validate_page_expr(value, states, source)?;
-            validate_page_expr(body, states, source)
-        }
-        SpecExpr::If(condition, then_branch, else_branch) => {
-            validate_page_expr(condition, states, source)?;
-            validate_page_expr(then_branch, states, source)?;
-            validate_page_expr(else_branch, states, source)
-        }
-        SpecExpr::Binary(_, lhs, rhs) => {
-            validate_page_expr(lhs, states, source)?;
-            validate_page_expr(rhs, states, source)
-        }
-        SpecExpr::Call(name, _) => Err(format!(
-            "{}: page expressions cannot call contract {name}",
-            source.display()
-        )),
-    }
 }
 
 #[cfg(test)]
@@ -649,6 +1121,64 @@ mod tests {
             SpecExpr::Binary(axiom_parser::BinaryOp::AddWrap, _, _)
         ));
         assert_eq!(project.files.len(), 2);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn validates_v31_page_data_and_component_usage() {
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-project-v31-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("logic.ax"),
+            "export program toggle(done: bool) -> bool { gives answer equals (done != true); }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("entry.ax"),
+            r#"
+            import { toggle } from "./logic.ax";
+            record Todo { title: text; done: bool; }
+            component Help { show "도움말"; }
+            page Todo {
+                state todos: list<Todo> = [];
+                state draft: text = "";
+                persist todos;
+                input draft placeholder "할 일";
+                use Help;
+                button "추가" adds todos with Todo { title: draft, done: false };
+                list todos as todo {
+                    show todo.title;
+                    button "완료" updates todo.done with toggle(todo.done);
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("synthetix.toml"),
+            "[project]\nentry = \"entry.ax\"\ntarget = \"web\"\n",
+        )
+        .unwrap();
+
+        let project = load(root.join("synthetix.toml")).unwrap();
+        let page = &project.pages[0].page;
+        assert!(
+            page.elements
+                .iter()
+                .all(|element| { !matches!(element, PageElement::Use { .. }) })
+        );
+        assert!(
+            page.elements
+                .iter()
+                .any(|element| matches!(element, PageElement::List { .. }))
+        );
 
         fs::remove_dir_all(root).unwrap();
     }

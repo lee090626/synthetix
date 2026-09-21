@@ -4,6 +4,10 @@
 pub enum Type {
     U32,
     Bool,
+    Text,
+    Record(String),
+    List(Box<Type>),
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +42,13 @@ pub enum SpecExpr {
     Ident(String),
     Number(u32),
     Bool(bool),
+    Text(String),
+    List(Vec<SpecExpr>),
+    Record {
+        name: String,
+        fields: Vec<(String, SpecExpr)>,
+    },
+    Field(Box<SpecExpr>, String),
     Binary(BinaryOp, Box<SpecExpr>, Box<SpecExpr>),
     Let(String, Box<SpecExpr>, Box<SpecExpr>),
     If(Box<SpecExpr>, Box<SpecExpr>, Box<SpecExpr>),
@@ -71,9 +82,44 @@ pub struct State {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordDef {
+    pub name: String,
+    pub fields: Vec<Param>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reducer {
+    pub name: String,
+    pub updates: Vec<ReducerUpdate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReducerUpdate {
+    pub state: String,
+    pub function: String,
+    pub args: Vec<SpecExpr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Component {
+    pub name: String,
+    pub elements: Vec<PageElement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PageElement {
     Show {
         state: String,
+    },
+    ShowExpr {
+        value: SpecExpr,
+    },
+    ShowText {
+        text: String,
+    },
+    WhenShow {
+        condition: SpecExpr,
+        text: String,
     },
     Button {
         label: String,
@@ -81,18 +127,43 @@ pub enum PageElement {
         function: String,
         args: Vec<SpecExpr>,
     },
+    RunReducer {
+        label: String,
+        reducer: String,
+    },
+    Input {
+        state: String,
+        placeholder: String,
+    },
+    List {
+        state: String,
+        item: String,
+        elements: Vec<PageElement>,
+    },
+    Add {
+        label: String,
+        state: String,
+        value: SpecExpr,
+    },
+    Use {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Page {
     pub name: String,
     pub states: Vec<State>,
+    pub persisted: Vec<String>,
+    pub reducers: Vec<Reducer>,
     pub elements: Vec<PageElement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Module {
     pub imports: Vec<Import>,
+    pub records: Vec<RecordDef>,
+    pub components: Vec<Component>,
     pub contracts: Vec<Contract>,
     pub pages: Vec<Page>,
 }

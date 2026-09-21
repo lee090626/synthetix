@@ -1,0 +1,36 @@
+import { toggle, increment, is_ready } from "./logic.ax";
+
+record Todo {
+    title: text;
+    done: bool;
+}
+
+component Help {
+    show "v3.1 동적 Todo — 입력하고, 완료하고, 새로고침해도 유지됩니다.";
+}
+
+page Todo {
+    state todos: list<Todo> = [];
+    state draft: text = "";
+    state count: number = 0;
+    state ready: bool = false;
+
+    persist todos;
+    persist draft;
+
+    use Help;
+    input draft placeholder "할 일을 입력하세요";
+    button "추가" adds todos with Todo { title: draft, done: false };
+
+    list todos as todo {
+        show todo.title;
+        when todo.done show "완료됨";
+        button "완료 전환" updates todo.done with toggle(todo.done);
+    }
+
+    reducer refresh {
+        updates count with increment(count);
+        updates ready with is_ready(count);
+    }
+    button "검증된 상태 갱신" runs refresh;
+}

@@ -39,6 +39,18 @@ function activate(context) {
     ..."abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_"
   );
   context.subscriptions.push(completionProvider);
+  context.subscriptions.push(
+    vscode.languages.registerHoverProvider(
+      { language: "axiom" },
+      { provideHover: (document, position) => hoverFor(document, position) }
+    )
+  );
+  context.subscriptions.push(
+    vscode.languages.registerDocumentFormattingEditProvider(
+      { language: "axiom" },
+      { provideDocumentFormattingEdits: (document) => formatDocument(document) }
+    )
+  );
   const scheduleValidation = (document) => {
     if (document.languageId !== "axiom" || document.isDirty) return;
     const key = document.uri.toString();
@@ -96,14 +108,26 @@ function completionItems(document) {
     completion("let", vscode.CompletionItemKind.Keyword),
     completion("in", vscode.CompletionItemKind.Keyword),
     completion("page", vscode.CompletionItemKind.Keyword),
+    completion("record", vscode.CompletionItemKind.Keyword),
+    completion("component", vscode.CompletionItemKind.Keyword),
+    completion("use", vscode.CompletionItemKind.Keyword),
     completion("state", vscode.CompletionItemKind.Keyword),
     completion("show", vscode.CompletionItemKind.Keyword),
     completion("button", vscode.CompletionItemKind.Keyword),
     completion("updates", vscode.CompletionItemKind.Keyword),
+    completion("adds", vscode.CompletionItemKind.Keyword),
+    completion("runs", vscode.CompletionItemKind.Keyword),
+    completion("reducer", vscode.CompletionItemKind.Keyword),
+    completion("input", vscode.CompletionItemKind.Keyword),
+    completion("placeholder", vscode.CompletionItemKind.Keyword),
+    completion("persist", vscode.CompletionItemKind.Keyword),
+    completion("list", vscode.CompletionItemKind.Keyword),
+    completion("as", vscode.CompletionItemKind.Keyword),
     completion("with", vscode.CompletionItemKind.Keyword),
     completion("u32", vscode.CompletionItemKind.TypeParameter),
     completion("number", vscode.CompletionItemKind.TypeParameter),
     completion("bool", vscode.CompletionItemKind.TypeParameter),
+    completion("text", vscode.CompletionItemKind.TypeParameter),
     completion("result", vscode.CompletionItemKind.Variable, "u32 result"),
     completion("answer", vscode.CompletionItemKind.Variable, "u32 result"),
     completion("true", vscode.CompletionItemKind.Value),
@@ -217,6 +241,20 @@ function completionItems(document) {
   );
   items.push(letValue);
 
+  for (const snippet of [
+    ["record template", "record ${1:Todo} {\n\t${2:title}: text;\n\t${3:done}: bool;\n}"],
+    ["list template", "list ${1:items} as ${2:item} {\n\tshow ${2};\n}"],
+    ["input template", "input ${1:draft} placeholder \"${2:입력하세요}\";"],
+    ["reducer template", "reducer ${1:refresh} {\n\tupdates ${2:count} with ${3:increment}(${2});\n}"],
+  ]) {
+    const item = new vscode.CompletionItem(
+      snippet[0],
+      vscode.CompletionItemKind.Snippet
+    );
+    item.insertText = new vscode.SnippetString(snippet[1]);
+    items.push(item);
+  }
+
   return items;
 }
 
@@ -225,6 +263,62 @@ function completion(label, kind, detail) {
   item.detail = detail;
   item.insertText = label;
   return item;
+}
+
+const hoverDocs = new Map([
+  ["number", "32비트 부호 없는 정수입니다. WASM에서는 i32로 실행됩니다."],
+  ["u32", "number의 원래 타입 이름입니다. 모든 연산은 2^32에서 감쌉니다."],
+  ["bool", "true 또는 false입니다. 검증 계약에서는 0 또는 1로 방출됩니다."],
+  ["text", "웹 입력과 화면 문구에 사용하는 문자열입니다."],
+  ["record", "여러 필드를 하나로 묶는 화면 데이터 타입입니다."],
+  ["list", "같은 타입의 값을 여러 개 담는 화면 데이터 타입입니다."],
+  ["reducer", "검증된 순수 계약 여러 개로 상태를 함께 갱신합니다."],
+  ["persist", "해당 상태를 브라우저 localStorage에 저장합니다."],
+  ["input", "text 상태와 연결되는 브라우저 입력창입니다."],
+]);
+
+function hoverFor(document, position) {
+  const range = document.getWordRangeAtPosition(position, /[A-Za-z_][A-Za-z0-9_]*/);
+  if (!range) return undefined;
+  const word = document.getText(range);
+  const source = document.getText();
+  let detail = hoverDocs.get(word);
+  const contract = source.match(
+    new RegExp(`\\b(?:contract|program)\\s+${escapeRegExp(word)}\\s*\\(([^)]*)\\)\\s*->\\s*([A-Za-z_][A-Za-z0-9_]*)`)
+  );
+  if (contract) detail = `검증된 순수 계약: (${contract[1] || "인자 없음"}) → ${contract[2]}`;
+  const state = source.match(
+    new RegExp(`\\bstate\\s+${escapeRegExp(word)}\\s*:\\s*([A-Za-z_][A-Za-z0-9_]*(?:<[^>]+>)?)`)
+  );
+  if (state) detail = `페이지 상태: ${state[1]}`;
+  if (!detail) return undefined;
+  return new vscode.Hover(new vscode.MarkdownString(`**${word}**  \n${detail}`), range);
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function formatDocument(document) {
+  const edits = [];
+  let indent = 0;
+  for (let index = 0; index < document.lineCount; index += 1) {
+    const line = document.lineAt(index);
+    const trimmed = line.text.trim();
+    if (!trimmed) {
+      edits.push(vscode.TextEdit.replace(line.range, ""));
+      continue;
+    }
+    if (trimmed.startsWith("}")) indent = Math.max(0, indent - 1);
+    edits.push(
+      vscode.TextEdit.replace(
+        line.range,
+        `${"  ".repeat(indent)}${trimmed}`
+      )
+    );
+    if (trimmed.endsWith("{")) indent += 1;
+  }
+  return edits;
 }
 
 function validateDocument(document, diagnostics) {
