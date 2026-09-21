@@ -52,13 +52,17 @@ then executes its `run` export. For example,
 `.synthetix/build/examples/easy_mul8.wasm`.
 
 Typing in an `.ax` file opens completion suggestions for Axiom keywords,
-types, parameters, `result`, operators, and contract snippets.
+types, parameters, `result`, operators, records, lists, inputs, reducers,
+Todo snippets, and conditional web-state snippets. Hover explains common
+types, contracts, and page states, and the built-in formatter applies a small
+two-space indentation style.
 
 If you run the binary manually from `editors`, use `../target/debug/axiom`; from
 the repository root, use `./target/debug/axiom`.
 
 ## Deliberate boundary
 
-The extension intentionally does not implement a Language Server. It provides
-static completion and snippets for the current bounded grammar; signature-help
-and project-wide semantic completion remain deferred.
+The extension intentionally does not implement a full Language Server. It
+provides static completion, hover, formatting, and snippets for the current
+bounded grammar; signature-help and project-wide semantic completion remain
+deferred.

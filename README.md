@@ -91,7 +91,10 @@ synthetix/
 │   └── vscode/             # Initial: .ax syntax and Run command
 └── examples/
     ├── mul8.ax
-    └── web-counter/       # v2: multi-file browser example
+    ├── web-counter/       # v2: multi-file browser example
+    ├── v3-status/         # v3: typed state and conditional UI
+    ├── v3-todo/           # v3: state-based checklist
+    └── v3-todo-v31/       # v3.1: input, records, lists, reducer, persistence
 ```
 
 ---
@@ -127,7 +130,9 @@ Extension Development Host. In the host, open an `.ax` file and click the play
 button. The command asks for a `u32` input, runs the generated WASM, and shows
 the result in `Output → Synthetix`. See [the VSCode guide](docs/vscode.md).
 
-The current proof core is limited to pure `u32` expressions and finite conditional values. See [the v2 specification](docs/v2.md) and [the roadmap](docs/roadmap.md) for the web build boundary.
+The v3 proof core supports pure `u32`/`bool` values and finite conditional values.
+v3.1 adds verified scalar reducers around browser-side records, lists, text
+inputs, components, and explicit localStorage persistence. See [the v2 specification](docs/v2.md), [the v3 specification](docs/v3.md), and [the roadmap](docs/roadmap.md) for the web build boundary.
 
 For the browser workflow:
 
@@ -136,8 +141,26 @@ cd examples/web-counter
 cargo run -p axiom-cli -- dev
 ```
 
+For the v3.1 dynamic Todo workflow:
+
+```bash
+cd examples/v3-todo-v31
+cargo run -p axiom-cli -- dev
+```
+
 The dev command opens a local page, verifies the imported contract, and
 rebuilds the page when an `.ax` file is saved.
+
+For the v3 typed-state example:
+
+```bash
+cd examples/v3-status
+cargo run -p axiom-cli -- dev
+```
+
+This example uses a verified `bool` contract to conditionally show a message.
+
+The state-based checklist example is in `examples/v3-todo`.
 
 ## Easy-word syntax
 

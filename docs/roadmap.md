@@ -2,9 +2,10 @@
 
 ## Product definition
 
-Synthetix is a verified program synthesizer, not a general-purpose language.
-Users write an `.ax` contract, Synthetix searches for an implementation, proves
-it with Z3, emits WebAssembly, and can execute the generated `run` export.
+Synthetix is a verified program synthesizer and application language, not a
+general-purpose language. Users write `.ax` contracts, Synthetix searches for
+implementations, proves them with Z3, emits WebAssembly, and can assemble them
+into executable web applications.
 
 The v1 target is:
 
@@ -111,7 +112,7 @@ Goal: normal VSCode users do not need to know the CLI or F5.
 - [x] Parent-directory discovery of the Rust CLI.
 - [x] Bundle the current platform CLI as a VSIX fallback.
 - [x] VSIX packaging and bundled-CLI smoke test.
-- [x] Package versioned extension artifact `0.11.0`.
+- [x] Package versioned extension artifact `0.13.0`.
 - [ ] Publish the extension artifact in the repository release flow.
 - [x] Add line-based parser/type diagnostics in the Problems panel.
 - [x] Add small contract snippets after grammar and error spans stabilized.
@@ -143,7 +144,29 @@ the dev loop uses Live Reload rather than state-preserving HMR.
 
 The full v2 boundary is documented in [v2.md](v2.md).
 
-## Phase 8: Future expansion — deferred
+## Phase 8: v3 verified application language — v3.1 complete
+
+Goal: keep the verified pure core while adding typed state and conditional web
+applications. The v3 specification is documented in [v3.md](v3.md).
+
+- [x] Define the v3 verification and effect boundary.
+- [x] Add `bool` contract parameters and return values.
+- [x] Preserve types through imported contract calls.
+- [x] Add conditional page elements driven by verified boolean state.
+- [x] Add v3 type and browser fixtures.
+- [x] Add a state-based application example.
+- [x] Add UI `record`, `list`, and `text` data types.
+- [x] Add input binding, list rendering, and record insertion.
+- [x] Add reducer actions that compose verified scalar contracts.
+- [x] Add explicit `persist` localStorage effects.
+- [x] Add reusable static components with `component` and `use`.
+- [x] Add VSCode hover, basic formatting, and v3.1 completion snippets.
+
+The v3.1 boundary still excludes network effects, databases, authentication,
+arbitrary JavaScript, and record-valued WASM contracts. Browser storage is the
+only implemented external effect and must be declared with `persist`.
+
+## Phase 9: v4 and later — deferred
 
 Only after the previous phases are stable:
 

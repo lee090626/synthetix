@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, UNIX_EPOCH};
 
 use axiom_ami::Expr;
-use axiom_parser::{BinaryOp, PageElement, SpecExpr};
+use axiom_parser::{BinaryOp, PageElement, Reducer, SpecExpr};
 use axiom_project::{LinkedPage, Project};
 
 #[derive(Debug, Clone)]
@@ -165,10 +165,227 @@ fn page_javascript(project: &Project) -> String {
         .first()
         .map(page_json)
         .unwrap_or_else(|| generic_page_json(project));
-    format!(
-        "const __page = {page};\n\nlet __exports = null;\nlet __state = {{}};\n\nfunction evaluate(expression, scope = __state) {{\n  switch (expression.kind) {{\n    case 'number': return expression.value >>> 0;\n    case 'bool': return expression.value;\n    case 'ident': return scope[expression.name];\n    case 'let': {{\n      const nested = {{ ...scope, [expression.name]: evaluate(expression.value, scope) }};\n      return evaluate(expression.body, nested);\n    }}\n    case 'if': return evaluate(expression.condition, scope)\n      ? evaluate(expression.then, scope)\n      : evaluate(expression.else, scope);\n    case 'binary': return binary(expression.op, evaluate(expression.left, scope), evaluate(expression.right, scope));\n    default: throw new Error(`Unknown expression kind: ${{expression.kind}}`);\n  }}\n}}\n\nfunction binary(op, left, right) {{\n  switch (op) {{\n    case 'add': return (left + right) >>> 0;\n    case 'mul': return Math.imul(left, right) >>> 0;\n    case 'shl': return (left << (right & 31)) >>> 0;\n    case 'eq': return left === right;\n    case 'ne': return left !== right;\n    case 'lt': return left < right;\n    case 'le': return left <= right;\n    case 'gt': return left > right;\n    case 'ge': return left >= right;\n    case 'and': return left && right;\n    case 'or': return left || right;\n    default: throw new Error(`Unknown operator: ${{op}}`);\n  }}\n}}\n\nfunction render() {{\n  const root = document.querySelector('#app');\n  root.replaceChildren();\n  const title = document.createElement('h1');\n  title.textContent = __page.name;\n  root.append(title);\n  for (const element of __page.elements) {{\n    if (element.kind === 'show') {{\n      const output = document.createElement('output');\n      output.dataset.state = element.state;\n      output.textContent = String(__state[element.state]);\n      root.append(output);\n      continue;\n    }}\n    const button = document.createElement('button');\n    button.type = 'button';\n    button.textContent = element.label;\n    button.addEventListener('click', () => {{\n      const fn = __exports[element.function];\n      if (typeof fn !== 'function') throw new Error(`Missing WASM export: ${{element.function}}`);\n      const args = element.args.map((arg) => evaluate(arg));\n      __state[element.state] = fn(...args);\n      render();\n    }});\n    root.append(button);\n  }}\n}}\n\nasync function boot() {{\n  const bytes = await fetch('./app.wasm').then((response) => response.arrayBuffer());\n  const {{ instance }} = await WebAssembly.instantiate(bytes, {{}});\n  __exports = instance.exports;\n  for (const state of __page.states) __state[state.name] = evaluate(state.initial);\n  window.synthetix = {{ exports: __exports, state: __state }};\n  render();\n}}\n\nboot().catch((error) => {{\n  const node = document.querySelector('#synthetix-error');\n  node.hidden = false;\n  node.textContent = error.message;\n}});\n\n// Local development uses polling instead of a WebSocket so the dev server stays dependency-free.\nlet __devVersion = null;\nsetInterval(async () => {{\n  try {{\n    const response = await fetch('/__synthetix/version', {{ cache: 'no-store' }});\n    if (!response.ok) return;\n    const next = await response.text();\n    if (__devVersion === null) __devVersion = next;\n    else if (next !== __devVersion) location.reload();\n    const errorResponse = await fetch('/__synthetix/error', {{ cache: 'no-store' }});\n    const errorNode = document.querySelector('#synthetix-error');\n    const error = await errorResponse.text();\n    errorNode.hidden = !error;\n    if (error) errorNode.textContent = error;\n  }} catch (_) {{}}\n}}, 500);\n",
-        page = page
-    )
+    let mut script = r#"const __page = __PAGE_JSON__;
+
+let __exports = null;
+let __state = {};
+const __storagePrefix = `synthetix:${__page.name}:`;
+
+function getPath(scope, path) {
+  return path.split('.').reduce((value, part) => value?.[part], scope);
+}
+
+function setPath(scope, path, value) {
+  const parts = path.split('.');
+  if (parts.length === 1) {
+    scope[parts[0]] = value;
+    return;
+  }
+  const owner = getPath(scope, parts.slice(0, -1).join('.'));
+  if (!owner) throw new Error(`Missing state path: ${path}`);
+  owner[parts.at(-1)] = value;
+}
+
+function evaluate(expression, scope = __state) {
+  switch (expression.kind) {
+    case 'number': return expression.value >>> 0;
+    case 'bool': return expression.value;
+    case 'text': return expression.value;
+    case 'ident': return scope[expression.name];
+    case 'field': return evaluate(expression.object, scope)?.[expression.name];
+    case 'list': return expression.values.map((value) => evaluate(value, scope));
+    case 'record': return Object.fromEntries(
+      Object.entries(expression.fields).map(([name, value]) => [name, evaluate(value, scope)]),
+    );
+    case 'let': {
+      const nested = { ...scope, [expression.name]: evaluate(expression.value, scope) };
+      return evaluate(expression.body, nested);
+    }
+    case 'if': return evaluate(expression.condition, scope)
+      ? evaluate(expression.then, scope)
+      : evaluate(expression.else, scope);
+    case 'binary': return binary(expression.op, evaluate(expression.left, scope), evaluate(expression.right, scope));
+    default: throw new Error(`Unknown expression kind: ${expression.kind}`);
+  }
+}
+
+function binary(op, left, right) {
+  switch (op) {
+    case 'add': return (left + right) >>> 0;
+    case 'mul': return Math.imul(left, right) >>> 0;
+    case 'shl': return (left << (right & 31)) >>> 0;
+    case 'eq': return left === right;
+    case 'ne': return left !== right;
+    case 'lt': return left < right;
+    case 'le': return left <= right;
+    case 'gt': return left > right;
+    case 'ge': return left >= right;
+    case 'and': return left && right;
+    case 'or': return left || right;
+    default: throw new Error(`Unknown operator: ${op}`);
+  }
+}
+
+function display(value) {
+  if (value === undefined) return '';
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
+function saveState() {
+  for (const state of __page.states) {
+    if (state.persisted) localStorage.setItem(__storagePrefix + state.name, JSON.stringify(__state[state.name]));
+  }
+}
+
+function callVerified(element, scope, target) {
+  const fn = __exports[element.function];
+  if (typeof fn !== 'function') throw new Error(`Missing WASM export: ${element.function}`);
+  setPath(scope, target, fn(...element.args.map((arg) => evaluate(arg, scope))));
+  saveState();
+  render();
+}
+
+function renderElement(element, root, scope) {
+  if (element.kind === 'show') {
+    const output = document.createElement('output');
+    output.dataset.state = element.state;
+    output.textContent = display(getPath(scope, element.state));
+    root.append(output);
+    return;
+  }
+  if (element.kind === 'show-expr') {
+    const output = document.createElement('output');
+    output.textContent = display(evaluate(element.value, scope));
+    root.append(output);
+    return;
+  }
+  if (element.kind === 'text') {
+    const text = document.createElement('p');
+    text.textContent = element.text;
+    root.append(text);
+    return;
+  }
+  if (element.kind === 'when-show') {
+    if (evaluate(element.condition, scope)) {
+      const message = document.createElement('p');
+      message.textContent = element.text;
+      root.append(message);
+    }
+    return;
+  }
+  if (element.kind === 'input') {
+    const input = document.createElement('input');
+    input.value = getPath(__state, element.state) ?? '';
+    input.placeholder = element.placeholder;
+    input.addEventListener('input', () => {
+      setPath(__state, element.state, input.value);
+      saveState();
+    });
+    root.append(input);
+    return;
+  }
+  if (element.kind === 'list') {
+    const list = document.createElement('ul');
+    for (const item of getPath(scope, element.state) ?? []) {
+      const row = document.createElement('li');
+      const rowScope = { ...scope, [element.item]: item };
+      for (const child of element.elements) renderElement(child, row, rowScope);
+      list.append(row);
+    }
+    root.append(list);
+    return;
+  }
+  if (element.kind === 'button') {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = element.label;
+    button.addEventListener('click', () => callVerified(element, scope, element.state));
+    root.append(button);
+    return;
+  }
+  if (element.kind === 'add') {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = element.label;
+    button.addEventListener('click', () => {
+      const list = getPath(__state, element.state);
+      if (!Array.isArray(list)) throw new Error(`State is not a list: ${element.state}`);
+      list.push(evaluate(element.value, __state));
+      saveState();
+      render();
+    });
+    root.append(button);
+    return;
+  }
+  if (element.kind === 'reducer') {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = element.label;
+    button.addEventListener('click', () => {
+      for (const update of element.updates) {
+        const fn = __exports[update.function];
+        if (typeof fn !== 'function') throw new Error(`Missing WASM export: ${update.function}`);
+        setPath(__state, update.state, fn(...update.args.map((arg) => evaluate(arg))));
+      }
+      saveState();
+      render();
+    });
+    root.append(button);
+  }
+}
+
+function render() {
+  const root = document.querySelector('#app');
+  root.replaceChildren();
+  const title = document.createElement('h1');
+  title.textContent = __page.name;
+  root.append(title);
+  for (const element of __page.elements) renderElement(element, root, __state);
+}
+
+async function boot() {
+  const bytes = await fetch('./app.wasm').then((response) => response.arrayBuffer());
+  const { instance } = await WebAssembly.instantiate(bytes, {});
+  __exports = instance.exports;
+  for (const state of __page.states) {
+    const saved = state.persisted && localStorage.getItem(__storagePrefix + state.name);
+    if (saved) {
+      try { __state[state.name] = JSON.parse(saved); continue; } catch (_) {}
+    }
+    __state[state.name] = evaluate(state.initial);
+  }
+  window.synthetix = { exports: __exports, state: __state };
+  render();
+}
+
+boot().catch((error) => {
+  const node = document.querySelector('#synthetix-error');
+  node.hidden = false;
+  node.textContent = error.message;
+});
+
+// Local development uses polling instead of a WebSocket so the dev server stays dependency-free.
+let __devVersion = null;
+setInterval(async () => {
+  try {
+    const response = await fetch('/__synthetix/version', { cache: 'no-store' });
+    if (!response.ok) return;
+    const next = await response.text();
+    if (__devVersion === null) __devVersion = next;
+    else if (next !== __devVersion) location.reload();
+    const errorResponse = await fetch('/__synthetix/error', { cache: 'no-store' });
+    const errorNode = document.querySelector('#synthetix-error');
+    const error = await errorResponse.text();
+    errorNode.hidden = !error;
+    if (error) errorNode.textContent = error;
+  } catch (_) {}
+}, 500);
+"#
+    .to_string();
+    script = script.replace("__PAGE_JSON__", &page);
+    script
 }
 
 fn page_json(linked: &LinkedPage) -> String {
@@ -178,46 +395,158 @@ fn page_json(linked: &LinkedPage) -> String {
         .iter()
         .map(|state| {
             format!(
-                "{{\"name\":{},\"initial\":{}}}",
+                "{{\"name\":{},\"initial\":{},\"persisted\":{}}}",
                 json_string(&state.name),
                 expr_json(&state.initial).unwrap_or_else(|error| {
                     format!("{{\"kind\":\"error\",\"message\":{}}}", json_string(&error))
-                })
+                }),
+                page.persisted.iter().any(|name| name == &state.name)
             )
         })
         .collect::<Vec<_>>();
     let elements = page
         .elements
         .iter()
-        .map(|element| match element {
-            PageElement::Show { state } => {
-                format!("{{\"kind\":\"show\",\"state\":{}}}", json_string(state))
-            }
-            PageElement::Button {
-                label,
-                state,
-                function,
-                args,
-            } => format!(
-                "{{\"kind\":\"button\",\"label\":{},\"state\":{},\"function\":{},\"args\":[{}]}}",
-                json_string(label),
-                json_string(state),
-                json_string(function),
-                args.iter()
-                    .map(|arg| expr_json(arg).unwrap_or_else(|error| {
-                        format!("{{\"kind\":\"error\",\"message\":{}}}", json_string(&error))
-                    }))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ),
+        .map(|element| element_json(element, &page.reducers))
+        .collect::<Vec<_>>();
+    let reducers = page
+        .reducers
+        .iter()
+        .map(|reducer| {
+            let updates = reducer
+                .updates
+                .iter()
+                .map(|update| {
+                    format!(
+                        "{{\"state\":{},\"function\":{},\"args\":[{}]}}",
+                        json_string(&update.state),
+                        json_string(&update.function),
+                        update
+                            .args
+                            .iter()
+                            .map(|arg| expr_json(arg).unwrap_or_else(|error| error_json(&error)))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )
+                })
+                .collect::<Vec<_>>();
+            format!(
+                "{{\"name\":{},\"updates\":[{}]}}",
+                json_string(&reducer.name),
+                updates.join(",")
+            )
         })
         .collect::<Vec<_>>();
     format!(
-        "{{\"name\":{},\"states\":[{}],\"elements\":[{}]}}",
+        "{{\"name\":{},\"states\":[{}],\"reducers\":[{}],\"elements\":[{}]}}",
         json_string(&page.name),
         states.join(","),
+        reducers.join(","),
         elements.join(",")
     )
+}
+
+fn element_json(element: &PageElement, reducers: &[Reducer]) -> String {
+    match element {
+        PageElement::Show { state } => {
+            format!("{{\"kind\":\"show\",\"state\":{}}}", json_string(state))
+        }
+        PageElement::ShowExpr { value } => format!(
+            "{{\"kind\":\"show-expr\",\"value\":{}}}",
+            expr_json(value).unwrap_or_else(|error| error_json(&error))
+        ),
+        PageElement::ShowText { text } => {
+            format!("{{\"kind\":\"text\",\"text\":{}}}", json_string(text))
+        }
+        PageElement::WhenShow { condition, text } => format!(
+            "{{\"kind\":\"when-show\",\"condition\":{},\"text\":{}}}",
+            expr_json(condition).unwrap_or_else(|error| error_json(&error)),
+            json_string(text)
+        ),
+        PageElement::Button {
+            label,
+            state,
+            function,
+            args,
+        } => format!(
+            "{{\"kind\":\"button\",\"label\":{},\"state\":{},\"function\":{},\"args\":[{}]}}",
+            json_string(label),
+            json_string(state),
+            json_string(function),
+            args.iter()
+                .map(|arg| expr_json(arg).unwrap_or_else(|error| error_json(&error)))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        PageElement::RunReducer { label, reducer } => {
+            let updates = reducers
+                .iter()
+                .find(|candidate| candidate.name == *reducer)
+                .map(|candidate| {
+                    candidate
+                        .updates
+                        .iter()
+                        .map(|update| {
+                            format!(
+                                "{{\"state\":{},\"function\":{},\"args\":[{}]}}",
+                                json_string(&update.state),
+                                json_string(&update.function),
+                                update
+                                    .args
+                                    .iter()
+                                    .map(|arg| expr_json(arg)
+                                        .unwrap_or_else(|error| error_json(&error)))
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default();
+            format!(
+                "{{\"kind\":\"reducer\",\"label\":{},\"updates\":[{}]}}",
+                json_string(label),
+                updates
+            )
+        }
+        PageElement::Input { state, placeholder } => format!(
+            "{{\"kind\":\"input\",\"state\":{},\"placeholder\":{}}}",
+            json_string(state),
+            json_string(placeholder)
+        ),
+        PageElement::List {
+            state,
+            item,
+            elements,
+        } => format!(
+            "{{\"kind\":\"list\",\"state\":{},\"item\":{},\"elements\":[{}]}}",
+            json_string(state),
+            json_string(item),
+            elements
+                .iter()
+                .map(|element| element_json(element, reducers))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        PageElement::Add {
+            label,
+            state,
+            value,
+        } => format!(
+            "{{\"kind\":\"add\",\"label\":{},\"state\":{},\"value\":{}}}",
+            json_string(label),
+            json_string(state),
+            expr_json(value).unwrap_or_else(|error| error_json(&error))
+        ),
+        PageElement::Use { name } => {
+            format!("{{\"kind\":\"text\",\"text\":{}}}", json_string(name))
+        }
+    }
+}
+
+fn error_json(error: &str) -> String {
+    format!("{{\"kind\":\"error\",\"message\":{}}}", json_string(error))
 }
 
 fn generic_page_json(project: &Project) -> String {
@@ -227,12 +556,16 @@ fn generic_page_json(project: &Project) -> String {
         .iter()
         .map(|param| {
             format!(
-                "{{\"name\":{},\"initial\":{{\"kind\":\"number\",\"value\":0}}}}",
-                json_string(&param.name)
+                "{{\"name\":{},\"initial\":{}}}",
+                json_string(&param.name),
+                initial_json(&param.ty)
             )
         })
         .collect::<Vec<_>>();
-    states.push("{\"name\":\"result\",\"initial\":{\"kind\":\"number\",\"value\":0}}".to_string());
+    states.push(format!(
+        "{{\"name\":\"result\",\"initial\":{}}}",
+        initial_json(&contract.return_type)
+    ));
     let args = contract
         .params
         .iter()
@@ -252,6 +585,17 @@ fn generic_page_json(project: &Project) -> String {
     )
 }
 
+fn initial_json(ty: &axiom_parser::Type) -> &'static str {
+    match ty {
+        axiom_parser::Type::Bool => "{\"kind\":\"bool\",\"value\":false}",
+        axiom_parser::Type::U32 => "{\"kind\":\"number\",\"value\":0}",
+        axiom_parser::Type::Text => "{\"kind\":\"text\",\"value\":\"\"}",
+        axiom_parser::Type::List(_) => "{\"kind\":\"list\",\"values\":[]}",
+        axiom_parser::Type::Record(_) => "{\"kind\":\"record\",\"fields\":{}}",
+        axiom_parser::Type::Unknown => "{\"kind\":\"null\"}",
+    }
+}
+
 fn expr_json(expr: &SpecExpr) -> Result<String, String> {
     match expr {
         SpecExpr::Ident(name) => Ok(format!(
@@ -260,6 +604,34 @@ fn expr_json(expr: &SpecExpr) -> Result<String, String> {
         )),
         SpecExpr::Number(value) => Ok(format!("{{\"kind\":\"number\",\"value\":{value}}}")),
         SpecExpr::Bool(value) => Ok(format!("{{\"kind\":\"bool\",\"value\":{value}}}")),
+        SpecExpr::Text(value) => Ok(format!(
+            "{{\"kind\":\"text\",\"value\":{}}}",
+            json_string(value)
+        )),
+        SpecExpr::List(values) => Ok(format!(
+            "{{\"kind\":\"list\",\"values\":[{}]}}",
+            values
+                .iter()
+                .map(expr_json)
+                .collect::<Result<Vec<_>, _>>()?
+                .join(",")
+        )),
+        SpecExpr::Record { name, fields } => Ok(format!(
+            "{{\"kind\":\"record\",\"name\":{},\"fields\":{{{}}}}}",
+            json_string(name),
+            fields
+                .iter()
+                .map(|(field, value)| {
+                    Ok(format!("{}:{}", json_string(field), expr_json(value)?))
+                })
+                .collect::<Result<Vec<_>, String>>()?
+                .join(",")
+        )),
+        SpecExpr::Field(value, field) => Ok(format!(
+            "{{\"kind\":\"field\",\"object\":{},\"name\":{}}}",
+            expr_json(value)?,
+            json_string(field)
+        )),
         SpecExpr::Let(name, value, body) => Ok(format!(
             "{{\"kind\":\"let\",\"name\":{},\"value\":{},\"body\":{}}}",
             json_string(name),
@@ -503,6 +875,10 @@ const DEFAULT_CSS: &str = r#":root { color-scheme: dark; font-family: system-ui,
 body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #111827; color: #f9fafb; }
 main { min-width: 18rem; padding: 2rem; display: grid; gap: 1rem; border: 1px solid #374151; border-radius: 1rem; background: #1f2937; }
 h1 { margin: 0; font-size: 1.5rem; }
+input { min-width: 16rem; border: 1px solid #4b5563; border-radius: .5rem; padding: .7rem; color: #f9fafb; background: #111827; }
+ul { margin: 0; padding: 0; display: grid; gap: .5rem; list-style: none; }
+li { display: flex; align-items: center; gap: .5rem; padding: .5rem; border-radius: .5rem; background: #111827; }
+p { margin: 0; color: #d1d5db; }
 output { font-size: 3rem; font-variant-numeric: tabular-nums; }
 button { border: 0; border-radius: .5rem; padding: .7rem 1rem; color: white; background: #2563eb; cursor: pointer; }
 button:hover { background: #1d4ed8; }

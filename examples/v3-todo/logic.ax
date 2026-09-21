@@ -1,0 +1,3 @@
+export program toggle(done: bool) -> bool {
+    gives answer equals (done != true);
+}

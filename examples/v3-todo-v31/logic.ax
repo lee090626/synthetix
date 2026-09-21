@@ -1,0 +1,11 @@
+export program toggle(done: bool) -> bool {
+    gives answer equals (done != true);
+}
+
+export program increment(value: number) -> number {
+    gives answer equals value +% 1;
+}
+
+export program is_ready(value: number) -> bool {
+    gives answer equals value > 0;
+}

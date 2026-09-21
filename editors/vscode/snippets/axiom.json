@@ -59,5 +59,52 @@
       "}"
     ],
     "description": "Create a small Synthetix web page"
+  },
+  "web-conditional": {
+    "prefix": "web-conditional",
+    "body": [
+      "state ${1:ready}: bool = false;",
+      "when ${1} show \"${2:준비됨}\";"
+    ],
+    "description": "Show text when a verified boolean state is true"
+  },
+  "record": {
+    "prefix": "record",
+    "body": [
+      "record ${1:Todo} {",
+      "\t${2:title}: text;",
+      "\t${3:done}: bool;",
+      "}"
+    ],
+    "description": "Define a small web data record"
+  },
+  "web-todo": {
+    "prefix": "web-todo",
+    "body": [
+      "state ${1:todos}: list<${2:Todo}> = [];",
+      "state ${3:draft}: text = \"\";",
+      "persist ${1};",
+      "input ${3} placeholder \"${4:할 일을 입력하세요}\";",
+      "button \"${5:추가}\" adds ${1} with ${2} { title: ${3}, done: false };",
+      "list ${1} as ${6:todo} {",
+      "\tshow ${6}.title;",
+      "\twhen ${6}.done show \"완료됨\";",
+      "}"
+    ],
+    "description": "Create a dynamic Todo list page"
+  },
+  "web-input": {
+    "prefix": "web-input",
+    "body": "input ${1:draft} placeholder \"${2:입력하세요}\";",
+    "description": "Connect a text state to an input"
+  },
+  "reducer": {
+    "prefix": "reducer",
+    "body": [
+      "reducer ${1:refresh} {",
+      "\tupdates ${2:count} with ${3:increment}(${2});",
+      "}"
+    ],
+    "description": "Group verified updates into one button action"
   }
 }

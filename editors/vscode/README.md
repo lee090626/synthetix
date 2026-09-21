@@ -23,5 +23,6 @@ macOS Apple Silicon (`darwin-arm64`).
 
 Saving an `.ax` file runs the project check when `synthetix.toml` is present
 and maps parser/type errors to the Problems panel. Typing opens completion
-suggestions for modules, pages, keywords, types, parameters, operators, and
-small snippets; it is not a full Language Server.
+suggestions for modules, pages, records, lists, reducers, keywords, types,
+parameters, operators, and small snippets. Hover and basic formatting are
+included; it is not a full Language Server.
