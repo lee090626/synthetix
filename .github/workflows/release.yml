@@ -95,11 +95,12 @@ jobs:
           cp release-artifacts/axiom-win32-x64.exe editors/vscode/bin/win32-x64/axiom.exe
           chmod +x editors/vscode/bin/darwin-arm64/axiom editors/vscode/bin/darwin-x64/axiom editors/vscode/bin/linux-x64/axiom
       - name: Package VSIX
+        working-directory: editors/vscode
         shell: bash
         run: |
-          mkdir -p release
-          version=$(node -p "require('./editors/vscode/package.json').version")
-          npx --yes @vscode/vsce package --out "release/synthetix-vscode-${version}.vsix"
+          mkdir -p ../../release
+          version=$(node -p "require('./package.json').version")
+          npx --yes @vscode/vsce package --out "../../release/synthetix-vscode-${version}.vsix"
       - uses: actions/upload-artifact@v4
         with:
           name: synthetix-vscode
