@@ -10,6 +10,14 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    name: Workspace tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run tests
+        run: cargo test --workspace
+
   build-cli:
     name: Build ${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
@@ -31,10 +39,19 @@ jobs:
             platform: darwin-x64
     steps:
       - uses: actions/checkout@v4
-      - name: Test and build
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-
+      - name: Build release CLI
         run: |
           rustup target add ${{ matrix.target }}
-          cargo test --workspace
           cargo build --release -p axiom-cli --target ${{ matrix.target }}
       - name: Package Unix binary
         if: runner.os != 'Windows'
@@ -91,7 +108,7 @@ jobs:
   create-release:
     name: Create GitHub Release
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [build-cli, package-vsix]
+    needs: [test, build-cli, package-vsix]
     runs-on: ubuntu-latest
     permissions:
       contents: write
