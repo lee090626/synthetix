@@ -11,6 +11,7 @@ cargo test --workspace
 cargo fmt --all -- --check
 cargo build --release -p axiom-cli
 ./target/release/axiom run examples/mul8.ax -- 5
+./target/release/axiom run examples/signed_min.ax -- -1 1
 ```
 
 Expected result:
@@ -18,6 +19,12 @@ Expected result:
 ```text
 result: 40
 ```
+
+The signed example should print `result: -1`.
+
+Published CLI archives and the all-platform VSCode extension are attached to
+GitHub Releases. The release workflow runs the workspace tests on Linux,
+Windows, and macOS before creating the release assets.
 
 To use the VSCode play button, build the CLI first, then package and install
 the local extension:

@@ -3,6 +3,7 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     U32,
+    I32,
     Bool,
     Text,
     Record(String),

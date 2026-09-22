@@ -130,7 +130,7 @@ Extension Development Host. In the host, open an `.ax` file and click the play
 button. The command asks for a `u32` input, runs the generated WASM, and shows
 the result in `Output → Synthetix`. See [the VSCode guide](docs/vscode.md).
 
-The v3 proof core supports pure `u32`/`bool` values and finite conditional values.
+The proof core supports pure `u32`, signed `i32`, and `bool` values with finite conditional values.
 v3.1 adds verified scalar reducers around browser-side records, lists, text
 inputs, components, and explicit localStorage persistence. See [the v2 specification](docs/v2.md), [the v3 specification](docs/v3.md), and [the roadmap](docs/roadmap.md) for the web build boundary.
 
@@ -162,6 +162,14 @@ This example uses a verified `bool` contract to conditionally show a message.
 
 The state-based checklist example is in `examples/v3-todo`.
 
+Signed contracts and conditional numeric examples are available in
+`examples/signed_min.ax`, `examples/easy_min.ax`, `examples/easy_max.ax`, and
+`examples/easy_clamp.ax`:
+
+```bash
+cargo run -p axiom-cli -- run examples/signed_min.ax -- -1 1
+```
+
 ## Easy-word syntax
 
 The original formal keywords remain supported, but beginners can use simpler
@@ -176,6 +184,9 @@ program mul8(x: number) -> number {
 `program`/`contract`, `when`/`requires`, `gives`/`ensures`,
 `answer`/`result`, `number`/`u32`, and word operators such as `plus`
 and `times` are equivalent.
+
+Use `i32` when comparisons should use signed WebAssembly semantics. The CLI
+accepts negative `i32` inputs and prints signed results.
 
 Conditional and named expressions stay inside the specification:
 

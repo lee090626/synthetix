@@ -125,6 +125,7 @@ function completionItems(document) {
     completion("as", vscode.CompletionItemKind.Keyword),
     completion("with", vscode.CompletionItemKind.Keyword),
     completion("u32", vscode.CompletionItemKind.TypeParameter),
+    completion("i32", vscode.CompletionItemKind.TypeParameter),
     completion("number", vscode.CompletionItemKind.TypeParameter),
     completion("bool", vscode.CompletionItemKind.TypeParameter),
     completion("text", vscode.CompletionItemKind.TypeParameter),
@@ -268,6 +269,7 @@ function completion(label, kind, detail) {
 const hoverDocs = new Map([
   ["number", "32비트 부호 없는 정수입니다. WASM에서는 i32로 실행됩니다."],
   ["u32", "number의 원래 타입 이름입니다. 모든 연산은 2^32에서 감쌉니다."],
+  ["i32", "32비트 부호 있는 정수입니다. 비교는 signed WASM 의미를 사용합니다."],
   ["bool", "true 또는 false입니다. 검증 계약에서는 0 또는 1로 방출됩니다."],
   ["text", "웹 입력과 화면 문구에 사용하는 문자열입니다."],
   ["record", "여러 필드를 하나로 묶는 화면 데이터 타입입니다."],
@@ -426,14 +428,14 @@ async function runContract(diagnostics, output) {
   const inputs = [];
   for (let index = 0; index < parameterCount; index += 1) {
     const input = await vscode.window.showInputBox({
-      prompt: `u32 input ${index + 1}/${parameterCount}`,
+      prompt: `scalar input ${index + 1}/${parameterCount}`,
       value:
         index === 0
           ? vscode.workspace
               .getConfiguration("synthetix")
               .get("runInput", "5")
           : "0",
-      validateInput: validateU32,
+      validateInput: validateScalarInput,
     });
     if (input === undefined) return;
     inputs.push(input);
@@ -479,12 +481,14 @@ function getParameterCount(document) {
   return parameterList ? parameterList.split(",").length : 0;
 }
 
-function validateU32(value) {
-  if (!/^(0|[1-9]\d*)$/.test(value)) {
-    return "Enter an unsigned 32-bit integer.";
+function validateScalarInput(value) {
+  if (value === "true" || value === "false") return undefined;
+  if (!/^-?(0|[1-9]\d*)$/.test(value)) {
+    return "Enter a scalar value (number, signed integer, true, or false).";
   }
-  if (Number(value) > 0xffffffff) {
-    return "Value must be at most 4294967295.";
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < -2147483648 || number > 4294967295) {
+    return "Value must fit a 32-bit scalar.";
   }
   return undefined;
 }

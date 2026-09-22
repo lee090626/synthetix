@@ -517,6 +517,7 @@ impl<'a> Parser<'a> {
         let type_name = self.expect_ident()?;
         match type_name.as_str() {
             "u32" | "number" => Ok(Type::U32),
+            "i32" => Ok(Type::I32),
             "bool" => Ok(Type::Bool),
             "text" | "string" => Ok(Type::Text),
             other => Ok(Type::Record(other.to_string())),

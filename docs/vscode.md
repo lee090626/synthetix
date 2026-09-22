@@ -33,7 +33,7 @@ code --install-extension /tmp/synthetix-vscode.vsix --force
    the editor title, or run `Synthetix: Start Web Dev Server` from the Command
    Palette. The command requires a `synthetix.toml` in the workspace or one of
    its parents.
-5. Enter a `u32` input. The extension runs the contract and shows the CLI
+5. Enter a scalar input. The extension runs the contract and shows the CLI
    output in `Output → Synthetix`. Saving the file also runs `axiom check`
    and places parser/type errors in the Problems panel.
 

@@ -122,7 +122,9 @@ pub fn check_requires(contract: &Contract, args: &[u32]) -> Result<(), String> {
         match eval_spec(expr, contract, args, 0, &HashMap::new())? {
             Value::Bool(true) => {}
             Value::Bool(false) => return Err("input violates a requires clause".to_string()),
-            Value::U32(_) => return Err("requires clause must be boolean".to_string()),
+            Value::U32(_) | Value::I32(_) => {
+                return Err("requires clause must be boolean".to_string());
+            }
         }
     }
     Ok(())
@@ -190,7 +192,18 @@ fn timeout_message(timeout: Option<Duration>) -> String {
 }
 
 fn sample_inputs(contract: &Contract) -> Vec<Vec<u32>> {
-    const VALUES: [u32; 7] = [0, 1, 2, 3, 7, 8, u32::MAX];
+    const VALUES: [u32; 10] = [
+        0,
+        1,
+        2,
+        3,
+        7,
+        8,
+        0x7fff_ffff,
+        0x8000_0000,
+        u32::MAX - 1,
+        u32::MAX,
+    ];
     let mut samples = vec![Vec::new()];
     for param in &contract.params {
         let values: &[u32] = if param.ty == Type::Bool {
@@ -234,6 +247,7 @@ fn matches_samples(contract: &Contract, candidate: &Expr, samples: &[Vec<u32>]) 
 #[derive(Clone)]
 enum Value {
     U32(u32),
+    I32(i32),
     Bool(bool),
 }
 
@@ -248,6 +262,8 @@ fn eval_spec(
         SpecExpr::Ident(name) if name == "result" => {
             if contract.return_type == Type::Bool {
                 Ok(Value::Bool(result != 0))
+            } else if contract.return_type == Type::I32 {
+                Ok(Value::I32(result as i32))
             } else {
                 Ok(Value::U32(result))
             }
@@ -263,10 +279,10 @@ fn eval_spec(
                 .get(index)
                 .copied()
                 .ok_or_else(|| format!("missing argument: {name}"))?;
-            if contract.params[index].ty == Type::Bool {
-                Ok(Value::Bool(value != 0))
-            } else {
-                Ok(Value::U32(value))
+            match contract.params[index].ty {
+                Type::Bool => Ok(Value::Bool(value != 0)),
+                Type::I32 => Ok(Value::I32(value as i32)),
+                _ => Ok(Value::U32(value)),
             }
         }
         SpecExpr::Number(value) => Ok(Value::U32(*value)),
@@ -283,7 +299,9 @@ fn eval_spec(
         SpecExpr::If(condition, then_branch, else_branch) => {
             let condition = match eval_spec(condition, contract, args, result, locals)? {
                 Value::Bool(value) => value,
-                Value::U32(_) => return Err("if condition must be boolean".to_string()),
+                Value::U32(_) | Value::I32(_) => {
+                    return Err("if condition must be boolean".to_string());
+                }
             };
             if condition {
                 eval_spec(then_branch, contract, args, result, locals)
@@ -301,20 +319,89 @@ fn eval_spec(
                 (BinaryOp::AddWrap, Value::U32(lhs), Value::U32(rhs)) => {
                     Ok(Value::U32(lhs.wrapping_add(rhs)))
                 }
+                (BinaryOp::AddWrap, Value::I32(lhs), Value::I32(rhs)) => {
+                    Ok(Value::I32(lhs.wrapping_add(rhs)))
+                }
+                (BinaryOp::AddWrap, Value::I32(lhs), Value::U32(rhs)) => {
+                    Ok(Value::I32(lhs.wrapping_add(rhs as i32)))
+                }
+                (BinaryOp::AddWrap, Value::U32(lhs), Value::I32(rhs)) => {
+                    Ok(Value::I32((lhs as i32).wrapping_add(rhs)))
+                }
                 (BinaryOp::MulWrap, Value::U32(lhs), Value::U32(rhs)) => {
                     Ok(Value::U32(lhs.wrapping_mul(rhs)))
+                }
+                (BinaryOp::MulWrap, Value::I32(lhs), Value::I32(rhs)) => {
+                    Ok(Value::I32(lhs.wrapping_mul(rhs)))
+                }
+                (BinaryOp::MulWrap, Value::I32(lhs), Value::U32(rhs)) => {
+                    Ok(Value::I32(lhs.wrapping_mul(rhs as i32)))
+                }
+                (BinaryOp::MulWrap, Value::U32(lhs), Value::I32(rhs)) => {
+                    Ok(Value::I32((lhs as i32).wrapping_mul(rhs)))
                 }
                 (BinaryOp::Shl, Value::U32(lhs), Value::U32(rhs)) => {
                     Ok(Value::U32(lhs.wrapping_shl(rhs & 31)))
                 }
+                (BinaryOp::Shl, Value::I32(lhs), Value::I32(rhs)) => {
+                    Ok(Value::I32(lhs.wrapping_shl((rhs as u32) & 31)))
+                }
+                (BinaryOp::Shl, Value::I32(lhs), Value::U32(rhs)) => {
+                    Ok(Value::I32(lhs.wrapping_shl(rhs & 31)))
+                }
+                (BinaryOp::Shl, Value::U32(lhs), Value::I32(rhs)) => {
+                    Ok(Value::I32((lhs as i32).wrapping_shl((rhs as u32) & 31)))
+                }
                 (BinaryOp::Eq, Value::U32(lhs), Value::U32(rhs)) => Ok(Value::Bool(lhs == rhs)),
                 (BinaryOp::Ne, Value::U32(lhs), Value::U32(rhs)) => Ok(Value::Bool(lhs != rhs)),
+                (BinaryOp::Eq, Value::I32(lhs), Value::I32(rhs)) => Ok(Value::Bool(lhs == rhs)),
+                (BinaryOp::Eq, Value::I32(lhs), Value::U32(rhs)) => {
+                    Ok(Value::Bool(lhs as u32 == rhs))
+                }
+                (BinaryOp::Eq, Value::U32(lhs), Value::I32(rhs)) => {
+                    Ok(Value::Bool(lhs == rhs as u32))
+                }
+                (BinaryOp::Ne, Value::I32(lhs), Value::I32(rhs)) => Ok(Value::Bool(lhs != rhs)),
+                (BinaryOp::Ne, Value::I32(lhs), Value::U32(rhs)) => {
+                    Ok(Value::Bool(lhs as u32 != rhs))
+                }
+                (BinaryOp::Ne, Value::U32(lhs), Value::I32(rhs)) => {
+                    Ok(Value::Bool(lhs != rhs as u32))
+                }
                 (BinaryOp::Eq, Value::Bool(lhs), Value::Bool(rhs)) => Ok(Value::Bool(lhs == rhs)),
                 (BinaryOp::Ne, Value::Bool(lhs), Value::Bool(rhs)) => Ok(Value::Bool(lhs != rhs)),
                 (BinaryOp::Lt, Value::U32(lhs), Value::U32(rhs)) => Ok(Value::Bool(lhs < rhs)),
                 (BinaryOp::Le, Value::U32(lhs), Value::U32(rhs)) => Ok(Value::Bool(lhs <= rhs)),
                 (BinaryOp::Gt, Value::U32(lhs), Value::U32(rhs)) => Ok(Value::Bool(lhs > rhs)),
                 (BinaryOp::Ge, Value::U32(lhs), Value::U32(rhs)) => Ok(Value::Bool(lhs >= rhs)),
+                (BinaryOp::Lt, Value::I32(lhs), Value::I32(rhs)) => Ok(Value::Bool(lhs < rhs)),
+                (BinaryOp::Lt, Value::I32(lhs), Value::U32(rhs)) => {
+                    Ok(Value::Bool(lhs < rhs as i32))
+                }
+                (BinaryOp::Lt, Value::U32(lhs), Value::I32(rhs)) => {
+                    Ok(Value::Bool((lhs as i32) < rhs))
+                }
+                (BinaryOp::Le, Value::I32(lhs), Value::I32(rhs)) => Ok(Value::Bool(lhs <= rhs)),
+                (BinaryOp::Le, Value::I32(lhs), Value::U32(rhs)) => {
+                    Ok(Value::Bool(lhs <= rhs as i32))
+                }
+                (BinaryOp::Le, Value::U32(lhs), Value::I32(rhs)) => {
+                    Ok(Value::Bool((lhs as i32) <= rhs))
+                }
+                (BinaryOp::Gt, Value::I32(lhs), Value::I32(rhs)) => Ok(Value::Bool(lhs > rhs)),
+                (BinaryOp::Gt, Value::I32(lhs), Value::U32(rhs)) => {
+                    Ok(Value::Bool(lhs > rhs as i32))
+                }
+                (BinaryOp::Gt, Value::U32(lhs), Value::I32(rhs)) => {
+                    Ok(Value::Bool((lhs as i32) > rhs))
+                }
+                (BinaryOp::Ge, Value::I32(lhs), Value::I32(rhs)) => Ok(Value::Bool(lhs >= rhs)),
+                (BinaryOp::Ge, Value::I32(lhs), Value::U32(rhs)) => {
+                    Ok(Value::Bool(lhs >= rhs as i32))
+                }
+                (BinaryOp::Ge, Value::U32(lhs), Value::I32(rhs)) => {
+                    Ok(Value::Bool((lhs as i32) >= rhs))
+                }
                 (BinaryOp::And, Value::Bool(lhs), Value::Bool(rhs)) => Ok(Value::Bool(lhs && rhs)),
                 (BinaryOp::Or, Value::Bool(lhs), Value::Bool(rhs)) => Ok(Value::Bool(lhs || rhs)),
                 _ => Err(format!("operator {:?} has incompatible operands", op)),
@@ -388,6 +475,10 @@ fn lower_spec_expr(
             "unresolved contract call: {name}; link the project before synthesis"
         )),
         SpecExpr::Binary(op, lhs, rhs) => {
+            let signed = matches!(
+                op,
+                BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+            ) && (is_i32_expr(lhs, contract) || is_i32_expr(rhs, contract));
             let lhs = Box::new(lower_spec_expr(lhs, contract, locals)?);
             let rhs = Box::new(lower_spec_expr(rhs, contract, locals)?);
             Ok(match op {
@@ -396,6 +487,10 @@ fn lower_spec_expr(
                 BinaryOp::Shl => Expr::Shl(lhs, rhs),
                 BinaryOp::Eq => Expr::Eq(lhs, rhs),
                 BinaryOp::Ne => Expr::Ne(lhs, rhs),
+                BinaryOp::Lt if signed => Expr::SLt(lhs, rhs),
+                BinaryOp::Le if signed => Expr::SLe(lhs, rhs),
+                BinaryOp::Gt if signed => Expr::SGt(lhs, rhs),
+                BinaryOp::Ge if signed => Expr::SGe(lhs, rhs),
                 BinaryOp::Lt => Expr::Lt(lhs, rhs),
                 BinaryOp::Le => Expr::Le(lhs, rhs),
                 BinaryOp::Gt => Expr::Gt(lhs, rhs),
@@ -405,6 +500,18 @@ fn lower_spec_expr(
             })
         }
     }
+}
+
+fn is_i32_expr(expr: &SpecExpr, contract: &Contract) -> bool {
+    let names = contract
+        .params
+        .iter()
+        .map(|param| (param.name.clone(), param.ty.clone()))
+        .collect();
+    matches!(
+        axiom_parser::type_of_expr(expr, &names, Some(&contract.return_type)),
+        Ok(Type::I32)
+    )
 }
 
 #[cfg(test)]
@@ -485,6 +592,23 @@ mod tests {
         assert_eq!(candidate.eval(&[8, 5]), 5);
         assert_eq!(axiom_wasm::run_with_args(&module, &[2, 5]).unwrap(), 2);
         assert_eq!(axiom_wasm::run_with_args(&module, &[8, 5]).unwrap(), 5);
+    }
+
+    #[test]
+    fn synthesizes_signed_conditional_contract() {
+        let contract = parse(include_str!("../../../examples/signed_min.ax")).unwrap();
+        let (candidate, module) = synthesize_wasm(&contract).unwrap();
+
+        assert_eq!(candidate.eval(&[u32::MAX, 1]), u32::MAX);
+        assert_eq!(candidate.eval(&[1, u32::MAX]), u32::MAX);
+        assert_eq!(
+            axiom_wasm::run_with_args(&module, &[u32::MAX, 1]).unwrap(),
+            u32::MAX
+        );
+        assert_eq!(
+            axiom_wasm::run_with_args(&module, &[1, u32::MAX]).unwrap(),
+            u32::MAX
+        );
     }
 
     #[test]

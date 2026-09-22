@@ -19,12 +19,13 @@ pub enum VerificationResult {
 #[derive(Clone)]
 enum Value {
     U32(BV),
+    I32(BV),
     Bool(Bool),
 }
 
 /// Proves that `candidate` satisfies every `ensures` clause under `requires`.
 pub fn verify(contract: &Contract, candidate: &Expr) -> Result<VerificationResult, String> {
-    if !matches!(contract.return_type, Type::U32 | Type::Bool) {
+    if !matches!(contract.return_type, Type::U32 | Type::I32 | Type::Bool) {
         return Err("unsupported contract return type".to_string());
     }
 
@@ -32,7 +33,7 @@ pub fn verify(contract: &Contract, candidate: &Expr) -> Result<VerificationResul
         .params
         .iter()
         .map(|param| {
-            if !matches!(param.ty, Type::U32 | Type::Bool) {
+            if !matches!(param.ty, Type::U32 | Type::I32 | Type::Bool) {
                 return Err(format!("unsupported parameter type: {}", param.name));
             }
             Ok(BV::new_const(param.name.as_str(), 32))
@@ -50,7 +51,9 @@ pub fn verify(contract: &Contract, candidate: &Expr) -> Result<VerificationResul
             .map(|expr| {
                 match spec_to_value(expr, contract, &args, &candidate_ast, &empty_locals)? {
                     Value::Bool(value) => Ok(value),
-                    Value::U32(_) => Err("requires clause must be boolean".to_string()),
+                    Value::U32(_) | Value::I32(_) => {
+                        Err("requires clause must be boolean".to_string())
+                    }
                 }
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -68,7 +71,7 @@ pub fn verify(contract: &Contract, candidate: &Expr) -> Result<VerificationResul
         .map(
             |expr| match spec_to_value(expr, contract, &args, &candidate_ast, &empty_locals)? {
                 Value::Bool(value) => Ok(value),
-                Value::U32(_) => Err("ensures clause must be boolean".to_string()),
+                Value::U32(_) | Value::I32(_) => Err("ensures clause must be boolean".to_string()),
             },
         )
         .collect::<Result<Vec<_>, String>>()?;
@@ -126,6 +129,10 @@ fn expr_to_bv(expr: &Expr, args: &[BV]) -> Result<BV, String> {
         | Expr::Le(_, _)
         | Expr::Gt(_, _)
         | Expr::Ge(_, _)
+        | Expr::SLt(_, _)
+        | Expr::SLe(_, _)
+        | Expr::SGt(_, _)
+        | Expr::SGe(_, _)
         | Expr::And(_, _)
         | Expr::Or(_, _) => Ok(bool_to_bv(expr_to_bool(expr, args)?)),
         Expr::Select {
@@ -149,6 +156,10 @@ fn expr_to_bool(expr: &Expr, args: &[BV]) -> Result<Bool, String> {
         Expr::Le(lhs, rhs) => Ok(expr_to_bv(lhs, args)?.bvule(&expr_to_bv(rhs, args)?)),
         Expr::Gt(lhs, rhs) => Ok(expr_to_bv(lhs, args)?.bvugt(&expr_to_bv(rhs, args)?)),
         Expr::Ge(lhs, rhs) => Ok(expr_to_bv(lhs, args)?.bvuge(&expr_to_bv(rhs, args)?)),
+        Expr::SLt(lhs, rhs) => Ok(expr_to_bv(lhs, args)?.bvslt(&expr_to_bv(rhs, args)?)),
+        Expr::SLe(lhs, rhs) => Ok(expr_to_bv(lhs, args)?.bvsle(&expr_to_bv(rhs, args)?)),
+        Expr::SGt(lhs, rhs) => Ok(expr_to_bv(lhs, args)?.bvsgt(&expr_to_bv(rhs, args)?)),
+        Expr::SGe(lhs, rhs) => Ok(expr_to_bv(lhs, args)?.bvsge(&expr_to_bv(rhs, args)?)),
         Expr::And(lhs, rhs) => Ok(&expr_to_bool(lhs, args)? & &expr_to_bool(rhs, args)?),
         Expr::Or(lhs, rhs) => Ok(&expr_to_bool(lhs, args)? | &expr_to_bool(rhs, args)?),
         _ => Ok(expr_to_bv(expr, args)?.ne(BV::from_u64(0, 32))),
@@ -170,6 +181,8 @@ fn spec_to_value(
         SpecExpr::Ident(name) if name == "result" => {
             if contract.return_type == Type::Bool {
                 Ok(Value::Bool(result.ne(BV::from_u64(0, 32))))
+            } else if contract.return_type == Type::I32 {
+                Ok(Value::I32(result.clone()))
             } else {
                 Ok(Value::U32(result.clone()))
             }
@@ -185,10 +198,10 @@ fn spec_to_value(
                 .get(index)
                 .cloned()
                 .ok_or_else(|| format!("missing argument: {name}"))?;
-            if contract.params[index].ty == Type::Bool {
-                Ok(Value::Bool(value.ne(BV::from_u64(0, 32))))
-            } else {
-                Ok(Value::U32(value))
+            match contract.params[index].ty {
+                Type::Bool => Ok(Value::Bool(value.ne(BV::from_u64(0, 32)))),
+                Type::I32 => Ok(Value::I32(value)),
+                _ => Ok(Value::U32(value)),
             }
         }
         SpecExpr::Number(value) => Ok(Value::U32(BV::from_u64(*value as u64, 32))),
@@ -205,7 +218,9 @@ fn spec_to_value(
         SpecExpr::If(condition, then_branch, else_branch) => {
             let condition = match spec_to_value(condition, contract, args, result, locals)? {
                 Value::Bool(value) => value,
-                Value::U32(_) => return Err("if condition must be boolean".to_string()),
+                Value::U32(_) | Value::I32(_) => {
+                    return Err("if condition must be boolean".to_string());
+                }
             };
             let then_branch = spec_to_value(then_branch, contract, args, result, locals)?;
             let else_branch = spec_to_value(else_branch, contract, args, result, locals)?;
@@ -215,6 +230,9 @@ fn spec_to_value(
                 }
                 (Value::Bool(then_branch), Value::Bool(else_branch)) => {
                     Ok(Value::Bool(condition.ite(&then_branch, &else_branch)))
+                }
+                (Value::I32(then_branch), Value::I32(else_branch)) => {
+                    Ok(Value::I32(condition.ite(&then_branch, &else_branch)))
                 }
                 _ => Err("if branches must have the same type".to_string()),
             }
@@ -229,14 +247,35 @@ fn spec_to_value(
                 (BinaryOp::AddWrap, Value::U32(lhs), Value::U32(rhs)) => {
                     Ok(Value::U32(&lhs + &rhs))
                 }
+                (BinaryOp::AddWrap, Value::I32(lhs), Value::I32(rhs))
+                | (BinaryOp::AddWrap, Value::I32(lhs), Value::U32(rhs))
+                | (BinaryOp::AddWrap, Value::U32(lhs), Value::I32(rhs)) => {
+                    Ok(Value::I32(&lhs + &rhs))
+                }
                 (BinaryOp::MulWrap, Value::U32(lhs), Value::U32(rhs)) => {
                     Ok(Value::U32(&lhs * &rhs))
+                }
+                (BinaryOp::MulWrap, Value::I32(lhs), Value::I32(rhs))
+                | (BinaryOp::MulWrap, Value::I32(lhs), Value::U32(rhs))
+                | (BinaryOp::MulWrap, Value::U32(lhs), Value::I32(rhs)) => {
+                    Ok(Value::I32(&lhs * &rhs))
                 }
                 (BinaryOp::Shl, Value::U32(lhs), Value::U32(rhs)) => {
                     Ok(Value::U32(lhs.bvshl(rhs.bvand(BV::from_u64(31, 32)))))
                 }
+                (BinaryOp::Shl, Value::I32(lhs), Value::I32(rhs))
+                | (BinaryOp::Shl, Value::I32(lhs), Value::U32(rhs))
+                | (BinaryOp::Shl, Value::U32(lhs), Value::I32(rhs)) => {
+                    Ok(Value::I32(lhs.bvshl(rhs.bvand(BV::from_u64(31, 32)))))
+                }
                 (BinaryOp::Eq, Value::U32(lhs), Value::U32(rhs)) => Ok(Value::Bool(lhs.eq(rhs))),
                 (BinaryOp::Ne, Value::U32(lhs), Value::U32(rhs)) => Ok(Value::Bool(lhs.ne(rhs))),
+                (BinaryOp::Eq, Value::I32(lhs), Value::I32(rhs))
+                | (BinaryOp::Eq, Value::I32(lhs), Value::U32(rhs))
+                | (BinaryOp::Eq, Value::U32(lhs), Value::I32(rhs)) => Ok(Value::Bool(lhs.eq(rhs))),
+                (BinaryOp::Ne, Value::I32(lhs), Value::I32(rhs))
+                | (BinaryOp::Ne, Value::I32(lhs), Value::U32(rhs))
+                | (BinaryOp::Ne, Value::U32(lhs), Value::I32(rhs)) => Ok(Value::Bool(lhs.ne(rhs))),
                 (BinaryOp::Eq, Value::Bool(lhs), Value::Bool(rhs)) => Ok(Value::Bool(lhs.eq(rhs))),
                 (BinaryOp::Ne, Value::Bool(lhs), Value::Bool(rhs)) => Ok(Value::Bool(lhs.ne(rhs))),
                 (BinaryOp::Lt, Value::U32(lhs), Value::U32(rhs)) => {
@@ -250,6 +289,26 @@ fn spec_to_value(
                 }
                 (BinaryOp::Ge, Value::U32(lhs), Value::U32(rhs)) => {
                     Ok(Value::Bool(lhs.bvuge(&rhs)))
+                }
+                (BinaryOp::Lt, Value::I32(lhs), Value::I32(rhs))
+                | (BinaryOp::Lt, Value::I32(lhs), Value::U32(rhs))
+                | (BinaryOp::Lt, Value::U32(lhs), Value::I32(rhs)) => {
+                    Ok(Value::Bool(lhs.bvslt(&rhs)))
+                }
+                (BinaryOp::Le, Value::I32(lhs), Value::I32(rhs))
+                | (BinaryOp::Le, Value::I32(lhs), Value::U32(rhs))
+                | (BinaryOp::Le, Value::U32(lhs), Value::I32(rhs)) => {
+                    Ok(Value::Bool(lhs.bvsle(&rhs)))
+                }
+                (BinaryOp::Gt, Value::I32(lhs), Value::I32(rhs))
+                | (BinaryOp::Gt, Value::I32(lhs), Value::U32(rhs))
+                | (BinaryOp::Gt, Value::U32(lhs), Value::I32(rhs)) => {
+                    Ok(Value::Bool(lhs.bvsgt(&rhs)))
+                }
+                (BinaryOp::Ge, Value::I32(lhs), Value::I32(rhs))
+                | (BinaryOp::Ge, Value::I32(lhs), Value::U32(rhs))
+                | (BinaryOp::Ge, Value::U32(lhs), Value::I32(rhs)) => {
+                    Ok(Value::Bool(lhs.bvsge(&rhs)))
                 }
                 (BinaryOp::And, Value::Bool(lhs), Value::Bool(rhs)) => Ok(Value::Bool(&lhs & &rhs)),
                 (BinaryOp::Or, Value::Bool(lhs), Value::Bool(rhs)) => Ok(Value::Bool(&lhs | &rhs)),
@@ -307,6 +366,21 @@ mod tests {
             parse("program is_ready(value: number) -> bool { gives answer equals value > 0; }")
                 .unwrap();
         let candidate = Expr::Gt(Box::new(Expr::Arg(0)), Box::new(Expr::Const(0)));
+
+        assert_eq!(
+            verify(&contract, &candidate).unwrap(),
+            VerificationResult::Verified
+        );
+    }
+
+    #[test]
+    fn proves_signed_conditional_specification() {
+        let contract = parse(include_str!("../../../examples/signed_min.ax")).unwrap();
+        let candidate = Expr::Select {
+            condition: Box::new(Expr::SLt(Box::new(Expr::Arg(0)), Box::new(Expr::Arg(1)))),
+            then_branch: Box::new(Expr::Arg(0)),
+            else_branch: Box::new(Expr::Arg(1)),
+        };
 
         assert_eq!(
             verify(&contract, &candidate).unwrap(),

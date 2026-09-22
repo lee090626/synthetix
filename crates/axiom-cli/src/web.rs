@@ -189,6 +189,7 @@ function setPath(scope, path, value) {
 function evaluate(expression, scope = __state) {
   switch (expression.kind) {
     case 'number': return expression.value >>> 0;
+    case 'i32': return expression.value | 0;
     case 'bool': return expression.value;
     case 'text': return expression.value;
     case 'ident': return scope[expression.name];
@@ -589,6 +590,7 @@ fn initial_json(ty: &axiom_parser::Type) -> &'static str {
     match ty {
         axiom_parser::Type::Bool => "{\"kind\":\"bool\",\"value\":false}",
         axiom_parser::Type::U32 => "{\"kind\":\"number\",\"value\":0}",
+        axiom_parser::Type::I32 => "{\"kind\":\"i32\",\"value\":0}",
         axiom_parser::Type::Text => "{\"kind\":\"text\",\"value\":\"\"}",
         axiom_parser::Type::List(_) => "{\"kind\":\"list\",\"values\":[]}",
         axiom_parser::Type::Record(_) => "{\"kind\":\"record\",\"fields\":{}}",

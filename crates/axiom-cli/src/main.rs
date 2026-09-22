@@ -23,7 +23,7 @@ fn main() -> ExitCode {
             );
             eprintln!("  axiom build");
             eprintln!(
-                "  axiom run <contract.ax> [--] [<u32>...] [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N]"
+                "  axiom run <contract.ax> [--] [<value>...] [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N]"
             );
             eprintln!("  axiom <contract.ax> [-o output.wasm]");
             ExitCode::FAILURE
@@ -129,7 +129,13 @@ fn run_command(args: &[String]) -> Result<(), String> {
             options.values.len()
         ));
     }
-    axiom_synth::check_requires(&contract, &options.values)?;
+    let values = options
+        .values
+        .iter()
+        .zip(&contract.params)
+        .map(|(value, param)| parse_input_value(value, &param.ty))
+        .collect::<Result<Vec<_>, _>>()?;
+    axiom_synth::check_requires(&contract, &values)?;
     let (candidate, module) = axiom_synth::synthesize_wasm_with_options(
         &contract,
         axiom_synth::SynthesisOptions {
@@ -139,7 +145,7 @@ fn run_command(args: &[String]) -> Result<(), String> {
     )?;
     fs::write(&options.output, &module)
         .map_err(|error| format!("cannot write {}: {error}", options.output.display()))?;
-    let result = axiom_wasm::run_with_args(&module, &options.values)?;
+    let result = axiom_wasm::run_with_args(&module, &values)?;
     if let Some(report) = &options.report {
         write_report(
             report,
@@ -147,7 +153,7 @@ fn run_command(args: &[String]) -> Result<(), String> {
             &contract,
             &candidate,
             &options.output,
-            Some(&options.values),
+            Some(&values),
             Some(result),
         )?;
     }
@@ -155,10 +161,19 @@ fn run_command(args: &[String]) -> Result<(), String> {
     println!("contract: {}", contract.name);
     println!("candidate: {candidate:?}");
     println!("verified: true");
-    if options.values.len() == 1 {
-        println!("input: {}", options.values[0]);
+    if values.len() == 1 {
+        println!(
+            "input: {}",
+            display_result(&contract.params[0].ty, values[0])
+        );
     } else {
-        println!("inputs: {:?}", options.values);
+        let inputs = contract
+            .params
+            .iter()
+            .zip(&values)
+            .map(|(param, value)| display_result(&param.ty, *value))
+            .collect::<Vec<_>>();
+        println!("inputs: {inputs:?}");
     }
     println!("result: {}", display_result(&contract.return_type, result));
     println!("wrote: {}", options.output.display());
@@ -172,7 +187,40 @@ fn display_result(ty: &axiom_parser::Type, result: u32) -> String {
     match ty {
         axiom_parser::Type::Bool => (result != 0).to_string(),
         axiom_parser::Type::U32 => result.to_string(),
+        axiom_parser::Type::I32 => (result as i32).to_string(),
         _ => result.to_string(),
+    }
+}
+
+fn parse_input_value(value: &str, ty: &axiom_parser::Type) -> Result<u32, String> {
+    match ty {
+        axiom_parser::Type::U32 => value
+            .parse::<u32>()
+            .map_err(|error| format!("invalid u32 input '{value}': {error}")),
+        axiom_parser::Type::I32 => value
+            .parse::<i32>()
+            .map(|value| value as u32)
+            .map_err(|error| format!("invalid i32 input '{value}': {error}")),
+        axiom_parser::Type::Bool => match value {
+            "true" | "1" => Ok(1),
+            "false" | "0" => Ok(0),
+            _ => Err(format!(
+                "invalid bool input '{value}' (use true, false, 1, or 0)"
+            )),
+        },
+        _ => Err(format!(
+            "cannot run a contract with {} input type",
+            type_name(ty)
+        )),
+    }
+}
+
+fn type_name(ty: &axiom_parser::Type) -> &'static str {
+    match ty {
+        axiom_parser::Type::U32 => "u32",
+        axiom_parser::Type::I32 => "i32",
+        axiom_parser::Type::Bool => "bool",
+        _ => "non-scalar",
     }
 }
 
@@ -320,7 +368,7 @@ fn parse_build_args(args: &[String]) -> Result<BuildArgs<'_>, String> {
 
 struct RunArgs<'a> {
     input: &'a str,
-    values: Vec<u32>,
+    values: Vec<String>,
     output: PathBuf,
     report: Option<PathBuf>,
     timeout: Option<Duration>,
@@ -368,11 +416,7 @@ fn parse_run_args(args: &[String]) -> Result<RunArgs<'_>, String> {
                     parse_limit(required_value(args, &mut index, "maximum candidate count")?)?;
             }
             "--" => {}
-            value => values.push(
-                value
-                    .parse::<u32>()
-                    .map_err(|error| format!("invalid u32 input '{value}': {error}"))?,
-            ),
+            value => values.push(value.to_string()),
         }
         index += 1;
     }
@@ -432,7 +476,7 @@ mod tests {
     fn parses_run_value_with_separator() {
         let args = vec!["mul8.ax".to_string(), "--".to_string(), "5".to_string()];
 
-        assert_eq!(parse_run_args(&args).unwrap().values, vec![5]);
+        assert_eq!(parse_run_args(&args).unwrap().values, vec!["5"]);
     }
 
     #[test]
@@ -447,7 +491,7 @@ mod tests {
         ];
 
         let parsed = parse_run_args(&args).unwrap();
-        assert_eq!(parsed.values, vec![5, 7]);
+        assert_eq!(parsed.values, vec!["5", "7"]);
         assert_eq!(parsed.output, PathBuf::from("add.wasm"));
     }
 
@@ -456,6 +500,15 @@ mod tests {
         let args = vec!["zero.ax".to_string(), "--".to_string()];
 
         assert!(parse_run_args(&args).unwrap().values.is_empty());
+    }
+
+    #[test]
+    fn parses_signed_i32_input() {
+        assert_eq!(
+            parse_input_value("-1", &axiom_parser::Type::I32).unwrap(),
+            u32::MAX
+        );
+        assert_eq!(display_result(&axiom_parser::Type::I32, u32::MAX), "-1");
     }
 
     #[test]

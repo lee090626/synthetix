@@ -1,0 +1,4 @@
+// Keep a number between a lower and upper bound.
+program clamp(value: number, lower: number, upper: number) -> number {
+    gives answer equals if value < lower { lower } else { if value > upper { upper } else { value } };
+}
