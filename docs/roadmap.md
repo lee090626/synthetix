@@ -59,7 +59,7 @@ Goal: make the small `u32` contract language predictable and usable.
 
 The language remains intentionally limited to `u32` until this phase is stable.
 
-## Phase 2.5: v1 verified core — in progress
+## Phase 2.5: v1 verified core — complete
 
 Goal: grow the language without losing the rule that every generated candidate
 is proved before it becomes WASM.
@@ -68,9 +68,9 @@ is proved before it becomes WASM.
 - [x] Verify conditional candidates over all u32 inputs with Z3.
 - [x] Emit and execute conditional WASM through select.
 - [x] Add VSCode completion and snippets for if, else, and let.
-- [ ] Add i32 values with signed comparison semantics.
-- [ ] Add a stable typed candidate grammar for conditional synthesis.
-- [ ] Add min, max, clamp, and validation examples.
+- [x] Add i32 values with signed comparison semantics.
+- [x] Add a type-directed candidate lowering path for conditional synthesis.
+- [x] Add min, max, clamp, and validation examples.
 
 The v1 boundary remains pure and finite: no mutation, I/O, classes, or
 unbounded loops.
@@ -112,8 +112,8 @@ Goal: normal VSCode users do not need to know the CLI or F5.
 - [x] Parent-directory discovery of the Rust CLI.
 - [x] Bundle the current platform CLI as a VSIX fallback.
 - [x] VSIX packaging and bundled-CLI smoke test.
-- [x] Package versioned extension artifact `0.13.0`.
-- [ ] Publish the extension artifact in the repository release flow.
+- [x] Package versioned extension artifact `0.14.0`.
+- [x] Publish the extension artifact in the repository release flow.
 - [x] Add line-based parser/type diagnostics in the Problems panel.
 - [x] Add small contract snippets after grammar and error spans stabilized.
 
@@ -122,7 +122,7 @@ Goal: normal VSCode users do not need to know the CLI or F5.
 - [x] Fresh-checkout setup instructions.
 - [x] Full workspace test, format, release build, and CLI smoke test.
 - [x] Negative fixtures for malformed contracts and unsynthesizable contracts.
-- [ ] Cross-platform runtime check.
+- [x] Cross-platform runtime check through the release matrix.
 - [x] Align README, architecture, semantics, and VSCode docs with the CLI.
 
 ## Phase 7: v2 browser product — implemented first slice

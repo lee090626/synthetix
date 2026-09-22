@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-cli:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: win32-x64
+          - os: macos-15
+            target: aarch64-apple-darwin
+            platform: darwin-arm64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            platform: darwin-x64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test and build
+        run: |
+          rustup target add ${{ matrix.target }}
+          cargo test --workspace
+          cargo build --release -p axiom-cli --target ${{ matrix.target }}
+      - name: Package Unix binary
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p release
+          cp target/${{ matrix.target }}/release/axiom release/axiom-${{ matrix.platform }}
+          tar -C release -czf release/axiom-${{ matrix.platform }}.tar.gz axiom-${{ matrix.platform }}
+          shasum -a 256 release/axiom-${{ matrix.platform }}.tar.gz > release/axiom-${{ matrix.platform }}.tar.gz.sha256
+      - name: Package Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/axiom.exe" "release/axiom-${{ matrix.platform }}.exe"
+          Compress-Archive -Path "release/axiom-${{ matrix.platform }}.exe" -DestinationPath "release/axiom-${{ matrix.platform }}.zip"
+          (Get-FileHash "release/axiom-${{ matrix.platform }}.zip" -Algorithm SHA256).Hash.ToLower() + "  axiom-${{ matrix.platform }}.zip" | Set-Content "release/axiom-${{ matrix.platform }}.zip.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.platform }}
+          path: release/*
+
+  package-vsix:
+    name: Package VSCode extension
+    needs: build-cli
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-*
+          path: release-artifacts
+          merge-multiple: true
+      - name: Add bundled platform CLIs
+        shell: bash
+        run: |
+          mkdir -p editors/vscode/bin/darwin-arm64 editors/vscode/bin/darwin-x64 editors/vscode/bin/linux-x64 editors/vscode/bin/win32-x64
+          cp release-artifacts/axiom-darwin-arm64 editors/vscode/bin/darwin-arm64/axiom
+          cp release-artifacts/axiom-darwin-x64 editors/vscode/bin/darwin-x64/axiom
+          cp release-artifacts/axiom-linux-x64 editors/vscode/bin/linux-x64/axiom
+          cp release-artifacts/axiom-win32-x64.exe editors/vscode/bin/win32-x64/axiom.exe
+          chmod +x editors/vscode/bin/darwin-arm64/axiom editors/vscode/bin/darwin-x64/axiom editors/vscode/bin/linux-x64/axiom
+      - name: Package VSIX
+        shell: bash
+        run: |
+          mkdir -p release
+          version=$(node -p "require('./editors/vscode/package.json').version")
+          npx --yes @vscode/vsce package --out "release/synthetix-vscode-${version}.vsix"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synthetix-vscode
+          path: release/*.vsix
+
+  create-release:
+    name: Create GitHub Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build-cli, package-vsix]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "*"
+          path: release-assets
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Synthetix $GITHUB_REF_NAME" \
+            --generate-notes

@@ -18,8 +18,9 @@ single-file flow.
 
 The extension uses the bundled platform CLI first, then searches parent
 directories for `target/debug/axiom` and `target/release/axiom`, before falling
-back to `axiom` on `PATH`. The current local artifact includes
-macOS Apple Silicon (`darwin-arm64`).
+back to `axiom` on `PATH`. The current local artifact includes macOS Apple
+Silicon (`darwin-arm64`); release VSIX packages include the platform CLI
+binaries built by the release matrix.
 
 Saving an `.ax` file runs the project check when `synthetix.toml` is present
 and maps parser/type errors to the Problems panel. Typing opens completion

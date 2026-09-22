@@ -813,7 +813,8 @@ fn page_expr_type(
             let rhs_type = page_expr_type(rhs, states, records, locals, source)?;
             match op {
                 axiom_parser::BinaryOp::Eq | axiom_parser::BinaryOp::Ne
-                    if types_compatible(&lhs_type, &rhs_type) =>
+                    if types_compatible(&lhs_type, &rhs_type)
+                        || page_numeric_type(lhs, &lhs_type, rhs, &rhs_type).is_some() =>
                 {
                     Ok(Type::Bool)
                 }
@@ -825,15 +826,15 @@ fn page_expr_type(
                 axiom_parser::BinaryOp::AddWrap
                 | axiom_parser::BinaryOp::MulWrap
                 | axiom_parser::BinaryOp::Shl
-                    if lhs_type == Type::U32 && rhs_type == Type::U32 =>
+                    if let Some(ty) = page_numeric_type(lhs, &lhs_type, rhs, &rhs_type) =>
                 {
-                    Ok(Type::U32)
+                    Ok(ty)
                 }
                 axiom_parser::BinaryOp::Lt
                 | axiom_parser::BinaryOp::Le
                 | axiom_parser::BinaryOp::Gt
                 | axiom_parser::BinaryOp::Ge
-                    if lhs_type == Type::U32 && rhs_type == Type::U32 =>
+                    if page_numeric_type(lhs, &lhs_type, rhs, &rhs_type).is_some() =>
                 {
                     Ok(Type::Bool)
                 }
@@ -850,6 +851,21 @@ fn page_expr_type(
     }
 }
 
+fn page_numeric_type(
+    lhs: &SpecExpr,
+    lhs_type: &Type,
+    rhs: &SpecExpr,
+    rhs_type: &Type,
+) -> Option<Type> {
+    match (lhs_type, rhs_type) {
+        (Type::U32, Type::U32) => Some(Type::U32),
+        (Type::I32, Type::I32) => Some(Type::I32),
+        (Type::I32, Type::U32) if matches!(rhs, SpecExpr::Number(_)) => Some(Type::I32),
+        (Type::U32, Type::I32) if matches!(lhs, SpecExpr::Number(_)) => Some(Type::I32),
+        _ => None,
+    }
+}
+
 fn types_compatible(actual: &Type, expected: &Type) -> bool {
     if actual == &Type::Unknown || expected == &Type::Unknown {
         return true;
@@ -858,6 +874,11 @@ fn types_compatible(actual: &Type, expected: &Type) -> bool {
         (Type::List(actual), Type::List(expected)) => types_compatible(actual, expected),
         _ => actual == expected,
     }
+}
+
+fn types_compatible_expr(actual: &Type, expected: &Type, expr: &SpecExpr) -> bool {
+    types_compatible(actual, expected)
+        || (expected == &Type::I32 && actual == &Type::U32 && matches!(expr, SpecExpr::Number(_)))
 }
 
 fn path_type(
@@ -948,7 +969,7 @@ fn validate_call(
     for (index, arg) in args.iter().enumerate() {
         let actual_type = page_expr_type(arg, states, records, locals, source)?;
         let expected_type = &definition.contract.params[index].ty;
-        if !types_compatible(&actual_type, expected_type) {
+        if !types_compatible_expr(&actual_type, expected_type, arg) {
             return Err(format!(
                 "{}: argument {} of {} has type {:?}, expected {:?}",
                 source.display(),

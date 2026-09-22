@@ -2,9 +2,9 @@
 
 This document defines the semantics that all pipeline components must share. The
 current repository slice implements the DSL lexer/parser, AMI evaluator, SMT
-translation, WASM emission, and embedded runtime for pure `u32` expressions,
-unsigned comparisons, conditional values, and `let` bindings; broader
-semantics are still a target.
+translation, WASM emission, and embedded runtime for pure `u32`/`i32`
+expressions, unsigned and signed comparisons, conditional values, and `let`
+bindings; broader semantics are still a target.
 
 ## 1. Modulo $2^{32}$ Arithmetic Equivalence
 
@@ -23,6 +23,7 @@ Any mismatch between these layers introduces a **soundness bug** (where a progra
 | **WASM** *(implemented)* | `i32.mul` | `i32.mul` | Wraps around modulo $2^{32}$ |
 | **WASM** *(implemented)* | `i32.shl` | `i32.shl` | Implicitly masks RHS with `0x1F` |
 | **Axiom DSL** | Unsigned comparison | `x < y` | Boolean result |
+| **Axiom DSL** | Signed comparison | `x < y` with `i32` operands | Two's-complement signed result |
 | **Axiom DSL** | Conditional value | `if c { a } else { b }` | a when c is true, otherwise b |
 
 ---
@@ -37,6 +38,13 @@ To ensure strict identity:
 
 Conditional values lower to the WASM `select` instruction. The condition is
 verified as a Boolean formula by Z3 before the module is emitted.
+
+## 3. Signed `i32` semantics
+
+`u32`/`number` comparisons use unsigned bit-vector order. `i32` comparisons
+use two's-complement signed order and lower to `i32.lt_s`, `i32.le_s`,
+`i32.gt_s`, and `i32.ge_s`. Arithmetic still wraps at 32 bits, so the same
+WASM bit pattern can be displayed as unsigned or signed depending on its type.
 
 ---
 

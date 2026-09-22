@@ -12,7 +12,7 @@
     },
     {
       "name": "storage.type.axiom",
-      "match": "\\b(u32|number|bool|text)\\b"
+      "match": "\\b(u32|i32|number|bool|text)\\b"
     },
     {
       "name": "constant.numeric.axiom",

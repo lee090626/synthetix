@@ -70,7 +70,17 @@ pub fn validate(contract: &Contract) -> Result<(), String> {
 }
 
 fn is_scalar(ty: &Type) -> bool {
-    matches!(ty, Type::U32 | Type::Bool)
+    matches!(ty, Type::U32 | Type::I32 | Type::Bool)
+}
+
+fn numeric_type(lhs: &SpecExpr, lhs_type: &Type, rhs: &SpecExpr, rhs_type: &Type) -> Option<Type> {
+    match (lhs_type, rhs_type) {
+        (Type::U32, Type::U32) => Some(Type::U32),
+        (Type::I32, Type::I32) => Some(Type::I32),
+        (Type::I32, Type::U32) if matches!(rhs, SpecExpr::Number(_)) => Some(Type::I32),
+        (Type::U32, Type::I32) if matches!(lhs, SpecExpr::Number(_)) => Some(Type::I32),
+        _ => None,
+    }
 }
 
 fn type_error(span: Option<Span>, message: impl std::fmt::Display) -> String {
@@ -133,13 +143,18 @@ pub fn type_of_expr(
             let rhs_type = type_of_expr(rhs, names, result_type)?;
             match op {
                 BinaryOp::AddWrap | BinaryOp::MulWrap | BinaryOp::Shl
-                    if lhs_type == Type::U32 && rhs_type == Type::U32 =>
+                    if numeric_type(lhs, &lhs_type, rhs, &rhs_type).is_some() =>
                 {
-                    Ok(Type::U32)
+                    Ok(numeric_type(lhs, &lhs_type, rhs, &rhs_type).unwrap())
                 }
-                BinaryOp::Eq | BinaryOp::Ne if lhs_type == rhs_type => Ok(Type::Bool),
+                BinaryOp::Eq | BinaryOp::Ne
+                    if lhs_type == rhs_type
+                        || numeric_type(lhs, &lhs_type, rhs, &rhs_type).is_some() =>
+                {
+                    Ok(Type::Bool)
+                }
                 BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
-                    if lhs_type == Type::U32 && rhs_type == Type::U32 =>
+                    if numeric_type(lhs, &lhs_type, rhs, &rhs_type).is_some() =>
                 {
                     Ok(Type::Bool)
                 }
@@ -379,5 +394,16 @@ mod tests {
                 .any(|element| matches!(element, PageElement::List { .. }))
         );
         assert_eq!(module.pages[0].reducers[0].name, "refresh");
+    }
+
+    #[test]
+    fn parses_signed_i32_contracts() {
+        let contract = parse(
+            "contract minimum(first: i32, second: i32) -> i32 { ensures result == if first < second { first } else { second }; }",
+        )
+        .unwrap();
+
+        assert_eq!(contract.params[0].ty, Type::I32);
+        assert_eq!(contract.return_type, Type::I32);
     }
 }

@@ -20,6 +20,10 @@ pub enum Expr {
     Le(Box<Expr>, Box<Expr>),
     Gt(Box<Expr>, Box<Expr>),
     Ge(Box<Expr>, Box<Expr>),
+    SLt(Box<Expr>, Box<Expr>),
+    SLe(Box<Expr>, Box<Expr>),
+    SGt(Box<Expr>, Box<Expr>),
+    SGe(Box<Expr>, Box<Expr>),
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),
     Select {
@@ -48,6 +52,10 @@ impl Expr {
             Expr::Le(lhs, rhs) => u32::from(lhs.eval(args) <= rhs.eval(args)),
             Expr::Gt(lhs, rhs) => u32::from(lhs.eval(args) > rhs.eval(args)),
             Expr::Ge(lhs, rhs) => u32::from(lhs.eval(args) >= rhs.eval(args)),
+            Expr::SLt(lhs, rhs) => u32::from((lhs.eval(args) as i32) < (rhs.eval(args) as i32)),
+            Expr::SLe(lhs, rhs) => u32::from((lhs.eval(args) as i32) <= (rhs.eval(args) as i32)),
+            Expr::SGt(lhs, rhs) => u32::from((lhs.eval(args) as i32) > (rhs.eval(args) as i32)),
+            Expr::SGe(lhs, rhs) => u32::from((lhs.eval(args) as i32) >= (rhs.eval(args) as i32)),
             Expr::And(lhs, rhs) => u32::from(lhs.eval(args) != 0 && rhs.eval(args) != 0),
             Expr::Or(lhs, rhs) => u32::from(lhs.eval(args) != 0 || rhs.eval(args) != 0),
             Expr::Select {

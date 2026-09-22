@@ -16,6 +16,10 @@ pub fn instruction_cost(expr: &Expr) -> usize {
         | Expr::Le(lhs, rhs)
         | Expr::Gt(lhs, rhs)
         | Expr::Ge(lhs, rhs)
+        | Expr::SLt(lhs, rhs)
+        | Expr::SLe(lhs, rhs)
+        | Expr::SGt(lhs, rhs)
+        | Expr::SGe(lhs, rhs)
         | Expr::And(lhs, rhs)
         | Expr::Or(lhs, rhs) => 1 + instruction_cost(lhs) + instruction_cost(rhs),
         Expr::Select {
@@ -177,6 +181,26 @@ fn encode_expr(expr: &Expr, param_count: u32, output: &mut Vec<u8>) -> Result<()
             encode_expr(rhs, param_count, output)?;
             output.push(0x4f); // i32.ge_u
         }
+        Expr::SLt(lhs, rhs) => {
+            encode_expr(lhs, param_count, output)?;
+            encode_expr(rhs, param_count, output)?;
+            output.push(0x48); // i32.lt_s
+        }
+        Expr::SLe(lhs, rhs) => {
+            encode_expr(lhs, param_count, output)?;
+            encode_expr(rhs, param_count, output)?;
+            output.push(0x4c); // i32.le_s
+        }
+        Expr::SGt(lhs, rhs) => {
+            encode_expr(lhs, param_count, output)?;
+            encode_expr(rhs, param_count, output)?;
+            output.push(0x4a); // i32.gt_s
+        }
+        Expr::SGe(lhs, rhs) => {
+            encode_expr(lhs, param_count, output)?;
+            encode_expr(rhs, param_count, output)?;
+            output.push(0x4e); // i32.ge_s
+        }
         Expr::And(lhs, rhs) => {
             encode_expr(lhs, param_count, output)?;
             encode_expr(rhs, param_count, output)?;
@@ -286,6 +310,15 @@ mod tests {
 
         assert_eq!(run_with_args(&module, &[2, 5]).unwrap(), 2);
         assert_eq!(run_with_args(&module, &[8, 5]).unwrap(), 5);
+    }
+
+    #[test]
+    fn emits_and_runs_signed_comparison() {
+        let expr = Expr::SLt(Box::new(Expr::Arg(0)), Box::new(Expr::Arg(1)));
+        let module = emit(&expr, 2).unwrap();
+
+        assert_eq!(run_with_args(&module, &[u32::MAX, 1]).unwrap(), 1);
+        assert_eq!(run_with_args(&module, &[1, u32::MAX]).unwrap(), 0);
     }
 
     #[test]

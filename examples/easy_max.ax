@@ -1,0 +1,4 @@
+// Choose the larger number without writing implementation code.
+program maximum(first: number, second: number) -> number {
+    gives answer equals if first > second { first } else { second };
+}

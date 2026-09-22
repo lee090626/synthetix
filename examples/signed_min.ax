@@ -1,0 +1,4 @@
+// Signed i32 comparisons use WebAssembly i32 signed semantics.
+program signed_min(first: i32, second: i32) -> i32 {
+    gives answer equals if first < second { first } else { second };
+}
