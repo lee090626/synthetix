@@ -776,6 +776,34 @@ browser 검증은 v5.7 integration 범위에 남긴다.
 | 의존성 | v4.5의 `extern` 의미와 v5.4 effect 모델에 의존한다. |
 | 범위 밖 | 외부 서버 내부 구현의 correctness 증명. |
 
+### v5.5 구현 기록
+
+상태: **완료**
+
+- project의 `extern` signature를 browser runtime metadata로 전달하고,
+  `app.wasm`과 verified contract export에는 포함하지 않는다.
+- `EffectRequest::from_extern`은 선언 입력을 확인하고 response `Type`을
+  기록한다. `window.synthetix.requestExtern`도 입력·응답·target state를
+  선언 타입으로 검증한다.
+- effect adapter 호출은 `LOADING`, `SUCCEEDED`, `ERROR` 상태를 노출한다.
+  generic effect payload는 지원되는 application JSON 값으로 제한한다.
+- 외부 결과는 application state 값이다. 필요하면 별도 verified export에
+  명시적으로 전달하며, API의 사실성은 증명된 것으로 취급하지 않는다.
+- API 오류는 extern source location과 함께 application runtime error로
+  전달하고 proof result에 넣지 않는다.
+
+검증:
+
+- `extern_signature_builds_a_typed_application_effect_request`: extern 입력
+  서명 및 response type, 잘못된 입력/선언 거부.
+- `extern_requests_use_typed_adapters_outside_verified_wasm`: generated project에서
+  u32/i32/bool 응답, 실제 verified WASM export 분리, UI state/render,
+  loading/success/error, invalid response, network failure, unsupported payload.
+- `cargo test --workspace`: 114개 통과
+- `cargo clippy --workspace --all-targets -- -D warnings` 통과
+- `cargo fmt --all -- --check`, `git diff --check` 통과
+- `cargo build --release -p axiom-cli` 통과
+
 ## v5.6 — Async와 실패 흐름
 
 | 항목 | 내용 |
@@ -943,9 +971,9 @@ v6의 loop, recursion, array, map, set은 단순한 문법 추가가 아니다. 
 ## 현재 다음 작업
 
 v4.1 Semantic Baseline부터 v4.9 Freeze까지와 v5.0 Application Boundary
-Baseline, v5.1 Thin Web Runtime, v5.2 State Transition, v5.3 Data Boundary가
-완료되었고 v5.4 Browser Effect와 Persistence도 완료되었다. 다음 milestone은
-v5.5 External Adapter이다.
+Baseline, v5.1 Thin Web Runtime, v5.2 State Transition, v5.3 Data Boundary,
+v5.4 Browser Effect와 Persistence, v5.5 External Adapter가 완료되었다. 다음
+milestone은 v5.6 Async와 실패 흐름이다.
 
 ```text
 v4.1 완료
@@ -962,10 +990,11 @@ v4.1 완료
   → v5.2 완료
   → v5.3 완료
   → v5.4 완료
-  → v5.5 External Adapter
+  → v5.5 완료
+  → v5.6 Async와 실패 흐름
 ```
 
 v4.9에서 의미론, 결과 상태, supported grammar, negative fixture, release
-검증 기준을 동결했고 v5.0~v5.3에서 core와 application/effect 실행, state
-transition, data boundary, persistence boundary를 분리했다. 일반 재귀,
-loop invariant, 무제한 호출은 시작하지 않는다.
+검증 기준을 동결했고 v5.0~v5.5에서 core와 application/effect 실행,
+state transition, data/persistence boundary, typed external adapter를
+분리했다. 일반 재귀, loop invariant, 무제한 호출은 시작하지 않는다.

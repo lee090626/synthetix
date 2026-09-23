@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, UNIX_EPOCH};
 
 use axiom_ami::Expr;
-use axiom_parser::{BinaryOp, PageElement, Reducer, SpecExpr, Type};
+use axiom_parser::{BinaryOp, DeclarationKind, PageElement, Reducer, SpecExpr, Type};
 use axiom_project::{LinkedPage, Project};
 
 #[derive(Debug, Clone)]
@@ -140,8 +140,19 @@ pub fn dev(config_path: &Path, port: u16, open_browser: bool, once: bool) -> Res
 fn compile_contracts(project: &Project) -> Result<Vec<CompiledFunction>, String> {
     let mut names = HashMap::new();
     let mut export_names = std::collections::HashSet::new();
+    let mut extern_names = std::collections::HashSet::new();
+    for linked in &project.verification_summaries {
+        if linked.contract.kind == DeclarationKind::Extern
+            && !extern_names.insert(linked.contract.name.clone())
+        {
+            return Err(format!("duplicate web extern {}", linked.contract.name));
+        }
+    }
     let mut compiled = Vec::new();
     for linked in &project.contracts {
+        if linked.contract.kind == DeclarationKind::Extern {
+            continue;
+        }
         let name = linked.contract.name.clone();
         if let Some(previous) = names.insert(name.clone(), linked.source.clone()) {
             return Err(format!(
@@ -242,13 +253,16 @@ fn page_javascript(project: &Project) -> String {
         })
         .unwrap_or_else(|| generic_page_json(project));
     let contracts = contracts_json(project);
+    let externs = externs_json(project);
     let mut script = r#"const __page = __PAGE_JSON__;
 const __contracts = __CONTRACTS__;
+const __externs = __EXTERNS__;
 
 let __exports = null;
 let __state = {};
 let __lastError = null;
 let __lastTransition = null;
+let __lastEffect = null;
 let __effectAdapter = null;
 let __storageMigration = typeof window.synthetixStorageMigration === 'function'
   ? window.synthetixStorageMigration
@@ -319,10 +333,10 @@ function display(value) {
   return String(value);
 }
 
-function applicationError(error, functionName = null) {
+function applicationError(error, functionName = null, sourceOverride = null) {
   if (error?.category === 'APPLICATION_RUNTIME_ERROR' || error?.category === 'APPLICATION_TRANSITION_FAILURE') return error;
   const contract = functionName ? __contracts[functionName] : null;
-  const source = contract?.source ?? __page.source;
+  const source = sourceOverride ?? contract?.source ?? __page.source;
   const message = error instanceof Error ? error.message : String(error);
   const location = functionName ? `${source}:${functionName}` : source;
   const wrapped = new Error(`${location}: application runtime error: ${message}`);
@@ -332,8 +346,8 @@ function applicationError(error, functionName = null) {
   return wrapped;
 }
 
-function reportApplicationError(error, functionName = null) {
-  __lastError = applicationError(error, functionName);
+function reportApplicationError(error, functionName = null, sourceOverride = null) {
+  __lastError = applicationError(error, functionName, sourceOverride);
   const node = document.querySelector('#synthetix-error');
   node.hidden = false;
   node.dataset.category = __lastError.category;
@@ -387,6 +401,33 @@ function liftResult(value, type) {
   if (type === 'u32') return value >>> 0;
   if (type === 'i32') return value | 0;
   throw new TypeError(`unsupported verified result type ${type}`);
+}
+
+function isApplicationValue(value, seen = new Set()) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isSafeInteger(value);
+  if (typeof value !== 'object' || seen.has(value)) return false;
+  if (!Array.isArray(value)) {
+    const prototype = Object.getPrototypeOf(value);
+    if (Object.prototype.toString.call(value) !== '[object Object]'
+      || (prototype !== null && prototype.constructor?.name !== 'Object')) return false;
+  }
+  seen.add(value);
+  const children = Array.isArray(value) ? value : Object.values(value);
+  for (const child of children) {
+    if (!isApplicationValue(child, seen)) return false;
+  }
+  seen.delete(value);
+  return true;
+}
+
+function validateEffectResponse(value, type = null) {
+  if (type === 'bool' && typeof value === 'boolean') return value;
+  if (type === 'u32' && typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 0xffffffff) return value;
+  if (type === 'i32' && typeof value === 'number' && Number.isInteger(value) && value >= -0x80000000 && value <= 0x7fffffff) return value;
+  if (type !== null && type !== undefined) throw new TypeError(`external response does not match ${type}`);
+  if (!isApplicationValue(value)) throw new TypeError('external response is not a supported application value');
+  return value;
 }
 
 function callContract(name, args) {
@@ -703,25 +744,60 @@ async function boot() {
       if (typeof adapter !== 'function') throw reportApplicationError(new TypeError('effect adapter must be a function'));
       __effectAdapter = adapter;
     },
+    async requestExtern(name, args, targetState = null) {
+      try {
+        const declaration = __externs[name];
+        if (!declaration) throw new Error(`Missing extern declaration: ${name}`);
+        if (!Array.isArray(args) || args.length !== declaration.params.length)
+          throw new TypeError(`${name}: expected ${declaration.params.length} arguments`);
+        args.forEach((value, index) => lowerArgument(value, declaration.params[index], index));
+        if (targetState !== null) {
+          const state = __page.states.find((candidate) => candidate.name === targetState);
+          if (!state || state.type !== declaration.result)
+            throw new TypeError(`${name}: target state must have type ${declaration.result}`);
+        }
+        return await window.synthetix.requestEffect({
+          name,
+          source: declaration.source,
+          inputs: args,
+          responseType: declaration.result,
+        }, targetState);
+      } catch (error) {
+        const failure = reportApplicationError(error, null, __externs[name]?.source);
+        __lastEffect = { name, status: 'ERROR', error: failure };
+        throw failure;
+      }
+    },
     async requestEffect(request, targetState = null) {
+      const name = typeof request?.name === 'string' ? request.name : null;
+      __lastEffect = { name, status: 'LOADING' };
       try {
         if (!request || typeof request.name !== 'string' || !Array.isArray(request.inputs))
           throw new TypeError('effect request must contain a name and inputs');
+        if (!request.inputs.every((value) => isApplicationValue(value)))
+          throw new TypeError('effect request contains an unsupported input value');
         if (!__effectAdapter) throw new Error(`No effect adapter registered for ${request.name}`);
-        const result = await __effectAdapter(request);
+        const result = validateEffectResponse(
+          await __effectAdapter(request),
+          request.responseType ?? null,
+        );
         if (targetState !== null) {
           setPath(__state, targetState, result);
           saveState();
           render();
         }
+        __lastEffect = { name, status: 'SUCCEEDED', response: result };
         clearApplicationError();
         return result;
       } catch (error) {
-        throw reportApplicationError(error);
+        const failure = reportApplicationError(error, null, request?.source);
+        __lastEffect = { name, status: 'ERROR', error: failure };
+        throw failure;
       }
     },
     get lastError() { return __lastError; },
     get lastTransition() { return __lastTransition; },
+    get lastEffect() { return __lastEffect; },
   };
   render();
 }
@@ -751,7 +827,8 @@ let __devVersion = null;
     .to_string();
     script = script
         .replace("__PAGE_JSON__", &page)
-        .replace("__CONTRACTS__", &contracts);
+        .replace("__CONTRACTS__", &contracts)
+        .replace("__EXTERNS__", &externs);
     script
 }
 
@@ -983,6 +1060,7 @@ fn contracts_json(project: &Project) -> String {
     let contracts = project
         .contracts
         .iter()
+        .filter(|linked| linked.contract.kind != DeclarationKind::Extern)
         .map(|linked| {
             let params = linked
                 .contract
@@ -1008,6 +1086,32 @@ fn contracts_json(project: &Project) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!("{{{contracts}}}")
+}
+
+fn externs_json(project: &Project) -> String {
+    let externs = project
+        .verification_summaries
+        .iter()
+        .filter(|linked| linked.contract.kind == DeclarationKind::Extern)
+        .map(|linked| {
+            let params = linked
+                .contract
+                .params
+                .iter()
+                .map(|parameter| json_string(state_type_name(&parameter.ty)))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "{}:{{\"source\":{},\"params\":[{}],\"result\":{}}}",
+                json_string(&linked.contract.name),
+                json_string(&source_label(&project.config.root, &linked.source)),
+                params,
+                json_string(state_type_name(&linked.contract.return_type))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{{{externs}}}")
 }
 
 fn requires_export_name(contract: &str) -> String {
@@ -2116,6 +2220,146 @@ async function launch(storage, migration = null) {
         assert_eq!(lines.next(), Some("Legacy|Legacy todo|2"));
         assert_eq!(lines.next(), Some("APPLICATION_RUNTIME_ERROR|0"));
         assert_eq!(lines.next(), Some("APPLICATION_RUNTIME_ERROR|false"));
+        assert!(lines.next().is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn extern_requests_use_typed_adapters_outside_verified_wasm() {
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-web-extern-adapter-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("api.ax"),
+            "export extern fn lookup(key: u32) -> u32;\n\
+             export extern fn signed_value(key: u32) -> i32;\n\
+             export extern fn readiness(key: u32) -> bool;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("main.ax"),
+            "import { lookup, signed_value, readiness } from \"./api.ax\";\n\
+             contract double(value: u32) -> u32 { ensures result == value *% 2; }\n\
+             contract signed_identity(value: i32) -> i32 { ensures result == value; }\n\
+             contract bool_identity(value: bool) -> bool { ensures result == value; }\n\
+             page Counter {\n\
+               state count: number = 0;\n\
+               state ready: bool = false;\n\
+               show count;\n\
+               show ready;\n\
+             }\n",
+        )
+        .unwrap();
+        let config = root.join("synthetix.toml");
+        std::fs::write(
+            &config,
+            "[project]\nentry = \"main.ax\"\ntarget = \"web\"\n",
+        )
+        .unwrap();
+        let output = root.join("dist");
+        build(&config, &output).unwrap();
+
+        let script = r#"
+const fs = require('node:fs');
+const vm = require('node:vm');
+const bytes = fs.readFileSync(process.env.AXIOM_TEST_WASM);
+const wasmExports = WebAssembly.Module.exports(new WebAssembly.Module(bytes)).map((entry) => entry.name);
+class Element {
+  constructor(tagName) { this.tagName = tagName; this.children = []; this.listeners = {}; this.dataset = {}; this.hidden = true; this.textContent = ''; }
+  append(...items) { this.children.push(...items); }
+  replaceChildren() { this.children = []; }
+  addEventListener(name, callback) { this.listeners[name] = callback; }
+}
+const root = new Element('main');
+const error = new Element('div');
+global.window = {};
+global.location = { reload() {} };
+global.localStorage = { getItem() { return null; }, setItem() {} };
+global.document = {
+  querySelector(selector) { return selector === '#app' ? root : error; },
+  createElement(tagName) { return new Element(tagName); },
+};
+global.setInterval = () => 0;
+global.fetch = async (url) => url === './app.wasm'
+  ? { ok: true, arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) }
+  : { ok: false, text: async () => '' };
+vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
+(async () => {
+  for (let attempt = 0; attempt < 100 && !window.synthetix?.state; attempt++)
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  if (!window.synthetix?.state) throw new Error('runtime did not instantiate verified WASM');
+  let loadingSeen = false;
+  let calls = 0;
+  window.synthetix.registerEffectAdapter(async (request) => {
+    calls++;
+    loadingSeen ||= window.synthetix.lastEffect.status === 'LOADING';
+    if (request.source !== 'api.ax') throw new Error('extern source metadata missing');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (request.name === 'lookup' && request.responseType === 'u32' && request.inputs[0] === 7) return 5;
+    if (request.name === 'signed_value' && request.responseType === 'i32') return -1;
+    if (request.name === 'readiness' && request.responseType === 'bool') return true;
+    throw new Error('unexpected external request');
+  });
+  const count = await window.synthetix.requestExtern('lookup', [7], 'count');
+  const signed = await window.synthetix.requestExtern('signed_value', [8]);
+  const ready = await window.synthetix.requestExtern('readiness', [9], 'ready');
+  const output = root.children.filter((node) => node.tagName === 'output').map((node) => node.textContent).join(',');
+  const verified = [window.synthetix.call('double', [count]),
+    window.synthetix.call('signed_identity', [signed]),
+    window.synthetix.call('bool_identity', [ready])].join('|');
+  const success = [count, window.synthetix.state.count, signed, ready,
+    window.synthetix.state.ready, output, verified, window.synthetix.lastEffect.status,
+    String(loadingSeen), String(!wasmExports.includes('lookup')), calls].join('|');
+
+  window.synthetix.registerEffectAdapter(async () => '5');
+  const invalid = await window.synthetix.requestExtern('lookup', [1], 'count').catch((failure) => failure);
+  const invalidResult = [invalid.category, invalid.source, window.synthetix.lastEffect.status,
+    window.synthetix.state.count, String(error.textContent.includes('COUNTEREXAMPLE'))].join('|');
+
+  window.synthetix.registerEffectAdapter(async () => { throw new Error('offline'); });
+  const network = await window.synthetix.requestExtern('lookup', [1]).catch((failure) => failure);
+  const networkResult = [network.category, network.source, window.synthetix.lastEffect.status,
+    String(error.textContent.includes('COUNTEREXAMPLE'))].join('|');
+
+  window.synthetix.registerEffectAdapter(async () => 1n);
+  const unsupported = await window.synthetix.requestEffect({ name: 'unsupported', inputs: [] }).catch((failure) => failure);
+  const unsupportedResult = [unsupported.category, window.synthetix.lastEffect.status,
+    String(error.textContent.includes('COUNTEREXAMPLE'))].join('|');
+  process.stdout.write([success, invalidResult, networkResult, unsupportedResult].join('\n'));
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"#;
+        let result = std::process::Command::new("node")
+            .arg("-e")
+            .arg(script)
+            .env("AXIOM_TEST_JS", output.join("app.js"))
+            .env("AXIOM_TEST_WASM", output.join("app.wasm"))
+            .output()
+            .expect("Node.js is required to execute the generated browser runtime");
+        assert!(
+            result.status.success(),
+            "extern adapter runtime failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let stdout = String::from_utf8(result.stdout).unwrap();
+        let mut lines = stdout.lines();
+        assert_eq!(
+            lines.next(),
+            Some("5|5|-1|true|true|5,true|10|-1|true|SUCCEEDED|true|true|3")
+        );
+        assert_eq!(
+            lines.next(),
+            Some("APPLICATION_RUNTIME_ERROR|api.ax|ERROR|5|false")
+        );
+        assert_eq!(
+            lines.next(),
+            Some("APPLICATION_RUNTIME_ERROR|api.ax|ERROR|false")
+        );
+        assert_eq!(lines.next(), Some("APPLICATION_RUNTIME_ERROR|ERROR|false"));
         assert!(lines.next().is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
