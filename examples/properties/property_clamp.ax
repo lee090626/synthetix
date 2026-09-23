@@ -1,0 +1,8 @@
+// The implementation is intentionally omitted.
+// The contract describes the three behavior regions without writing `if`.
+contract clamp(value: u32, lower: u32, upper: u32) -> u32 {
+  requires lower <= upper;
+  ensures value < lower || value > upper || result == value;
+  ensures value >= lower || result == lower;
+  ensures value <= upper || result == upper;
+}

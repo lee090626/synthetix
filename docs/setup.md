@@ -10,8 +10,8 @@ rustup show
 cargo test --workspace
 cargo fmt --all -- --check
 cargo build --release -p axiom-cli
-./target/release/axiom run examples/mul8.ax -- 5
-./target/release/axiom run examples/signed_min.ax -- -1 1
+./target/release/axiom run examples/basics/mul8.ax -- 5
+./target/release/axiom run examples/basics/signed_min.ax -- -1 1
 ```
 
 Expected result:
@@ -32,6 +32,7 @@ the local extension:
 ```bash
 cd editors/vscode
 npx --yes @vscode/vsce package --out /tmp/synthetix-vscode.vsix
+node ./check-vsix.js /tmp/synthetix-vscode.vsix
 code --install-extension /tmp/synthetix-vscode.vsix --force
 ```
 

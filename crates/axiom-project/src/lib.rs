@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use axiom_ami::Expr;
 use axiom_parser::{
     Component, Contract, Import, Module, Page, PageElement, RecordDef, Reducer, SpecExpr, Type,
 };
@@ -31,8 +32,33 @@ pub struct LinkedPage {
 pub struct Project {
     pub config: ProjectConfig,
     pub contracts: Vec<LinkedContract>,
+    /// Original contract summaries retained for compositional verification.
+    pub verification_summaries: Vec<LinkedContract>,
+    /// Imported signatures keyed by the importing module and local name.
+    pub verification_callees: HashMap<PathBuf, HashMap<String, Contract>>,
     pub pages: Vec<LinkedPage>,
     pub files: Vec<PathBuf>,
+}
+
+impl Project {
+    /// Verifies a linked contract against imported signature summaries.
+    pub fn verify_compositional(
+        &self,
+        linked: &LinkedContract,
+        candidate: &Expr,
+    ) -> Result<axiom_verify::CompositionalProof, String> {
+        let summary = self
+            .verification_summaries
+            .iter()
+            .find(|item| item.source == linked.source && item.contract.name == linked.contract.name)
+            .ok_or_else(|| format!("missing verification summary: {}", linked.contract.name))?;
+        let callees = self
+            .verification_callees
+            .get(&linked.source)
+            .cloned()
+            .unwrap_or_default();
+        axiom_verify::verify_compositional(&summary.contract, candidate, &callees)
+    }
 }
 
 type ContractKey = (PathBuf, String);
@@ -303,10 +329,29 @@ fn link_project(config: ProjectConfig, modules: Vec<ModuleInfo>) -> Result<Proje
     }
 
     let mut cache = HashMap::new();
+    let verification_callees = scopes
+        .iter()
+        .map(|(source, scope)| {
+            let callees = scope
+                .iter()
+                .filter_map(|(name, key)| {
+                    definitions
+                        .get(key)
+                        .map(|definition| (name.clone(), definition.contract.clone()))
+                })
+                .collect();
+            (source.clone(), callees)
+        })
+        .collect();
     let mut contracts = Vec::new();
+    let mut verification_summaries = Vec::new();
     for module in &modules {
         for contract in &module.module.contracts {
             let key = (module.path.clone(), contract.name.clone());
+            verification_summaries.push(LinkedContract {
+                source: module.path.clone(),
+                contract: contract.clone(),
+            });
             let linked = expand_contract(&key, &definitions, &scopes, &mut cache, &mut Vec::new())
                 .map_err(|error| format!("{}: {error}", module.path.display()))?;
             axiom_parser::validate(&linked)
@@ -340,6 +385,8 @@ fn link_project(config: ProjectConfig, modules: Vec<ModuleInfo>) -> Result<Proje
     Ok(Project {
         config,
         contracts,
+        verification_summaries,
+        verification_callees,
         pages,
         files: modules.into_iter().map(|module| module.path).collect(),
     })
@@ -472,11 +519,6 @@ fn expand_expr(
             let Some(definition) = definitions.get(target) else {
                 return Err(format!("contract not found: {name}"));
             };
-            if !definition.contract.requires.is_empty() {
-                return Err(format!(
-                    "contract calls with requires are not supported yet: {name}"
-                ));
-            }
             if definition.contract.params.len() != args.len() {
                 return Err(format!(
                     "contract {name} expects {} arguments, got {}",
@@ -824,8 +866,12 @@ fn page_expr_type(
                     Ok(Type::Bool)
                 }
                 axiom_parser::BinaryOp::AddWrap
+                | axiom_parser::BinaryOp::SubWrap
                 | axiom_parser::BinaryOp::MulWrap
                 | axiom_parser::BinaryOp::Shl
+                | axiom_parser::BinaryOp::BitAnd
+                | axiom_parser::BinaryOp::BitOr
+                | axiom_parser::BinaryOp::BitXor
                     if let Some(ty) = page_numeric_type(lhs, &lhs_type, rhs, &rhs_type) =>
                 {
                     Ok(ty)
@@ -1141,7 +1187,131 @@ mod tests {
             rhs.as_ref(),
             SpecExpr::Binary(axiom_parser::BinaryOp::AddWrap, _, _)
         ));
+        let summary = project
+            .verification_summaries
+            .iter()
+            .find(|item| item.contract.name == "total")
+            .unwrap();
+        assert!(matches!(
+            &summary.contract.ensures[0],
+            SpecExpr::Binary(axiom_parser::BinaryOp::Eq, _, rhs)
+                if matches!(rhs.as_ref(), SpecExpr::Call(name, _) if name == "add")
+        ));
         assert_eq!(project.files.len(), 2);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_circular_contract_calls_with_source_path() {
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-project-circular-call-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let entry = root.join("entry.ax");
+        fs::write(
+            &entry,
+            "contract first(value: u32) -> u32 { ensures result == second(value); }\n\
+             contract second(value: u32) -> u32 { ensures result == first(value); }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("synthetix.toml"),
+            "[project]\nentry = \"entry.ax\"\ntarget = \"web\"\n",
+        )
+        .unwrap();
+
+        let error = load(root.join("synthetix.toml")).unwrap_err();
+        assert!(error.contains(&entry.display().to_string()));
+        assert!(error.contains("circular contract call: first"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn composes_imported_requires_and_ensures_through_project_api() {
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-project-compositional-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("positive.ax"),
+            "export contract positive(value: u32) -> u32 {\n requires value > 0;\n ensures result == value;\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("entry.ax"),
+            "import { positive } from \"./positive.ax\";\ncontract total(value: u32) -> u32 {\n requires value > 0;\n ensures result == positive(value);\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("synthetix.toml"),
+            "[project]\nentry = \"entry.ax\"\ntarget = \"web\"\n",
+        )
+        .unwrap();
+
+        let project = load(root.join("synthetix.toml")).unwrap();
+        let linked = project
+            .contracts
+            .iter()
+            .find(|item| item.contract.name == "total")
+            .unwrap();
+        let proof = project.verify_compositional(linked, &Expr::Arg(0)).unwrap();
+        assert_eq!(proof.proof, Some(axiom_verify::ProofResult::Verified));
+        assert_eq!(proof.diagnostic, None);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn project_call_precondition_diagnostic_keeps_source_location() {
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-project-call-location-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("positive.ax"),
+            "export contract positive(value: u32) -> u32 { requires value > 0; ensures result == value; }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("entry.ax"),
+            "import { positive } from \"./positive.ax\";\ncontract total(value: u32) -> u32 {\n ensures result == positive(value);\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("synthetix.toml"),
+            "[project]\nentry = \"entry.ax\"\ntarget = \"web\"\n",
+        )
+        .unwrap();
+
+        let project = load(root.join("synthetix.toml")).unwrap();
+        let linked = project
+            .contracts
+            .iter()
+            .find(|item| item.contract.name == "total")
+            .unwrap();
+        let proof = project.verify_compositional(linked, &Expr::Arg(0)).unwrap();
+        assert_eq!(proof.proof, None);
+        assert!(matches!(
+            proof.diagnostic,
+            Some(axiom_verify::Diagnostic::CallPreconditionViolation {
+                callee,
+                span: Some(span),
+            }) if callee == "positive" && span.line == 3
+        ));
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -1199,6 +1369,49 @@ mod tests {
             page.elements
                 .iter()
                 .any(|element| matches!(element, PageElement::List { .. }))
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn links_fn_and_extern_without_treating_extern_as_synthesizable() {
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-project-v45-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("logic.ax"),
+            "export fn increment(value: u32) -> u32 { return value +% 1; ensures result == value +% 1; }\nexport extern fn read_count(key: u32) -> u32;",
+        )
+        .unwrap();
+        fs::write(
+            root.join("entry.ax"),
+            "import { increment, read_count } from \"./logic.ax\"; contract total(value: u32) -> u32 { ensures result == value; }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("synthetix.toml"),
+            "[project]\nentry = \"entry.ax\"\ntarget = \"web\"\n",
+        )
+        .unwrap();
+
+        let project = load(root.join("synthetix.toml")).unwrap();
+        assert!(
+            project
+                .contracts
+                .iter()
+                .any(|item| { item.contract.kind == axiom_parser::DeclarationKind::Function })
+        );
+        assert!(
+            project
+                .contracts
+                .iter()
+                .any(|item| { item.contract.kind == axiom_parser::DeclarationKind::Extern })
         );
 
         fs::remove_dir_all(root).unwrap();

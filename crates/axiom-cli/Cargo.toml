@@ -12,4 +12,5 @@ axiom-ami = { path = "../axiom-ami" }
 axiom-parser = { path = "../axiom-parser" }
 axiom-project = { path = "../axiom-project" }
 axiom-synth = { path = "../axiom-synth" }
+axiom-verify = { path = "../axiom-verify" }
 axiom-wasm = { path = "../axiom-wasm" }

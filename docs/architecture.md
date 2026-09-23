@@ -17,8 +17,8 @@ loop. The implementations remain intentionally narrow: the proof core is pure
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                axiom-project (v2)                           │
-│ Loads synthetix.toml, resolves imports, links pure calls,   │
-│ and validates the project graph                             │
+│ Loads synthetix.toml, resolves imports, and retains both    │
+│ runtime-expanded contracts and verification summaries       │
 └──────────────────────────────┬──────────────────────────────┘
                                │ Contract AST
                                ▼
@@ -83,16 +83,19 @@ loop. The implementations remain intentionally narrow: the proof core is pure
   - `requires`: Pre-conditions constraining the valid input domain.
   - `ensures`: Post-conditions that must hold for `result`.
 - **Current limitation**: grammar and semantic rules are intentionally limited to
-  pure `u32` values with finite conditional expressions; source errors now
-  include line and column positions.
+  pure scalar `u32`/`i32`/`bool` values with finite conditional expressions;
+  source errors now include line and column positions.
 
 ### `crates/axiom-project` — v2
 - **Role**: Project manifest loading and module linking.
 - **Input**: `synthetix.toml` plus the entry `.ax` file.
 - **Behavior**: Follows explicit relative imports, enforces exports, detects
-  cycles, and expands pure contract calls before synthesis.
+  cycles, and retains original contract summaries alongside the legacy
+  runtime-expanded view.
 - **Boundary**: Called contracts must currently have a single result equality
-  and no `requires` clauses.
+  and no requires clauses in the legacy runtime expansion. The verifier's
+  compositional API uses the original summaries and discharges call-site
+  preconditions before assuming callee postconditions.
 
 ### `crates/axiom-verify` — implemented subset
 - **Role**: The oracle of correctness.
@@ -102,8 +105,11 @@ loop. The implementations remain intentionally narrow: the proof core is pure
     $$\Phi(x) = \text{Requires}(x) \land (\text{Candidate}(x) \neq \text{Ensures}(x))$$
   - Submits $\Phi(x)$ to Z3 SMT Solver (bit-vector theory `QF_BV`).
   - If UNSAT, the candidate satisfies the specification for all $2^{32}$ inputs.
-- **Current limitation**: supports the current pure `u32` expression subset and
-  bundled Z3; it does not yet cover loops, memory, or proof artifacts.
+- **Current limitation**: supports the current pure scalar expression subset and
+  bundled Z3; it does not yet cover loops, memory, host effects, or external
+  provenance signatures. CLI reports carry verification state and artifact
+  integrity fingerprints, while correctness remains the `ProofResult` plus
+  backend conformance contract.
 
 ### `crates/axiom-synth` — bounded
 - **Role**: Enumerative program synthesizer with formal candidate verification.
@@ -137,3 +143,6 @@ loop. The implementations remain intentionally narrow: the proof core is pure
 - **v2 usage**: `axiom check`, `axiom build`, and `axiom dev` read
   `synthetix.toml`; `axiom dev` serves generated web files and watches the
   linked source files.
+- Artifact reports carry the semantics version, synthesis bounds, proof state,
+  and separate integrity fingerprints for the verification artifact and emitted
+  WASM.

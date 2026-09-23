@@ -8,7 +8,7 @@
     },
     {
       "name": "keyword.control.axiom",
-      "match": "\\b(import|export|from|contract|program|requires|when|ensures|gives|if|else|let|in|page|record|component|use|state|show|button|updates|adds|runs|reducer|input|placeholder|persist|list|as|with)\\b"
+      "match": "\\b(import|export|from|contract|program|fn|extern|return|requires|when|ensures|gives|if|else|let|in|page|record|component|use|state|show|button|updates|adds|runs|reducer|input|placeholder|persist|list|as|with)\\b"
     },
     {
       "name": "storage.type.axiom",
@@ -20,7 +20,7 @@
     },
     {
       "name": "keyword.operator.axiom",
-      "match": "(\\*%|\\+%|<<|==|!=|<=|>=|<|>|->|plus|times|shift_left|equals|not_equals|is_not|and|or)"
+      "match": "(-%|\\*%|\\+%|<<|==|!=|<=|>=|<|>|->|&|\\||\\^|plus|minus|times|shift_left|equals|not_equals|is_not|and|or)"
     },
     {
       "name": "variable.language.result.axiom",

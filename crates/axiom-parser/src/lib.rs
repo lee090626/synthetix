@@ -27,6 +27,28 @@ pub fn validate(contract: &Contract) -> Result<(), String> {
     if !is_scalar(&contract.return_type) {
         return Err("type error: contracts can only return number or bool".to_string());
     }
+
+    match contract.kind {
+        DeclarationKind::Extern => {
+            if contract.implementation.is_some()
+                || !contract.requires.is_empty()
+                || !contract.ensures.is_empty()
+            {
+                return Err("type error: extern declarations cannot contain an implementation or contract clauses".to_string());
+            }
+            return Ok(());
+        }
+        DeclarationKind::Contract if contract.implementation.is_some() => {
+            return Err(
+                "type error: contract declarations cannot contain a return expression".to_string(),
+            );
+        }
+        DeclarationKind::Function if contract.implementation.is_none() => {
+            return Err("type error: fn declarations require one return expression".to_string());
+        }
+        DeclarationKind::Contract | DeclarationKind::Function => {}
+    }
+
     if contract.ensures.is_empty() {
         return Err("type error: contract must have at least one ensures clause".to_string());
     }
@@ -44,6 +66,16 @@ pub fn validate(contract: &Contract) -> Result<(), String> {
         }
     }
 
+    if let Some(implementation) = &contract.implementation {
+        let implementation_type = type_of_expr(implementation, &names, None)?;
+        if implementation_type != contract.return_type {
+            return Err(format!(
+                "type error: fn return expression has type {:?}, expected {:?}",
+                implementation_type, contract.return_type
+            ));
+        }
+    }
+
     for (index, expr) in contract.requires.iter().enumerate() {
         if type_of_expr(expr, &names, None)
             .map_err(|error| type_error(contract.requires_spans.get(index).copied(), error))?
@@ -56,6 +88,12 @@ pub fn validate(contract: &Contract) -> Result<(), String> {
         }
     }
     for (index, expr) in contract.ensures.iter().enumerate() {
+        if !mentions_result(expr) {
+            return Err(type_error(
+                contract.ensures_spans.get(index).copied(),
+                "ensures clause must constrain result",
+            ));
+        }
         if type_of_expr(expr, &names, Some(&contract.return_type))
             .map_err(|error| type_error(contract.ensures_spans.get(index).copied(), error))?
             != Type::Bool
@@ -87,6 +125,23 @@ fn type_error(span: Option<Span>, message: impl std::fmt::Display) -> String {
     match span {
         Some(span) => format!("{}:{}: type error: {message}", span.line, span.column),
         None => format!("type error: {message}"),
+    }
+}
+
+fn mentions_result(expr: &SpecExpr) -> bool {
+    match expr {
+        SpecExpr::Ident(name) => name == "result",
+        SpecExpr::Binary(_, lhs, rhs) => mentions_result(lhs) || mentions_result(rhs),
+        SpecExpr::Let(_, value, body) => mentions_result(value) || mentions_result(body),
+        SpecExpr::If(condition, then_branch, else_branch) => {
+            mentions_result(condition)
+                || mentions_result(then_branch)
+                || mentions_result(else_branch)
+        }
+        SpecExpr::Call(_, args) | SpecExpr::List(args) => args.iter().any(mentions_result),
+        SpecExpr::Record { fields, .. } => fields.iter().any(|(_, value)| mentions_result(value)),
+        SpecExpr::Field(value, _) => mentions_result(value),
+        SpecExpr::Number(_) | SpecExpr::Bool(_) | SpecExpr::Text(_) => false,
     }
 }
 
@@ -142,7 +197,13 @@ pub fn type_of_expr(
             let lhs_type = type_of_expr(lhs, names, result_type)?;
             let rhs_type = type_of_expr(rhs, names, result_type)?;
             match op {
-                BinaryOp::AddWrap | BinaryOp::MulWrap | BinaryOp::Shl
+                BinaryOp::AddWrap
+                | BinaryOp::SubWrap
+                | BinaryOp::MulWrap
+                | BinaryOp::Shl
+                | BinaryOp::BitAnd
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor
                     if numeric_type(lhs, &lhs_type, rhs, &rhs_type).is_some() =>
                 {
                     Ok(numeric_type(lhs, &lhs_type, rhs, &rhs_type).unwrap())
@@ -207,6 +268,29 @@ mod tests {
     }
 
     #[test]
+    fn parses_function_and_extern_declarations() {
+        let function = parse(
+            "fn increment(value: u32) -> u32 { \
+             return value +% 1; \
+             ensures result == value +% 1; }",
+        )
+        .unwrap();
+        assert_eq!(function.kind, DeclarationKind::Function);
+        assert!(function.implementation.is_some());
+
+        let external = parse("extern fn read_count(key: u32) -> u32;").unwrap();
+        assert_eq!(external.kind, DeclarationKind::Extern);
+        assert!(external.implementation.is_none());
+        assert!(external.ensures.is_empty());
+    }
+
+    #[test]
+    fn rejects_function_without_a_return_expression() {
+        let error = parse("fn broken(value: u32) -> u32 { ensures result == value; }").unwrap_err();
+        assert!(error.contains("fn declarations require one return expression"));
+    }
+
+    #[test]
     fn rejects_tokens_after_contract() {
         let error = parse("contract f() -> u32 { ensures result == 0; } extra").unwrap_err();
         assert!(error.contains("Unexpected token after contract"));
@@ -216,6 +300,12 @@ mod tests {
     fn rejects_unknown_identifiers() {
         let error = parse("contract f(x: u32) -> u32 { ensures result == y; }").unwrap_err();
         assert!(error.contains("unknown identifier: y"));
+    }
+
+    #[test]
+    fn rejects_ensures_that_do_not_constrain_result() {
+        let error = parse("contract f(x: u32) -> u32 { ensures x == x; }").unwrap_err();
+        assert!(error.contains("ensures clause must constrain result"));
     }
 
     #[test]
@@ -405,5 +495,19 @@ mod tests {
 
         assert_eq!(contract.params[0].ty, Type::I32);
         assert_eq!(contract.return_type, Type::I32);
+    }
+
+    #[test]
+    fn parses_scalar_bitwise_and_subtraction_operators() {
+        let contract = parse(
+            "contract mask(value: u32, bits: u32) -> u32 { ensures result == (value & bits) ^ (value -% 1); }",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            &contract.ensures[0],
+            SpecExpr::Binary(BinaryOp::Eq, _, rhs)
+                if matches!(rhs.as_ref(), SpecExpr::Binary(BinaryOp::BitXor, _, _))
+        ));
     }
 }
