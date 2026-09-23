@@ -233,7 +233,13 @@ fn page_javascript(project: &Project) -> String {
     let page = project
         .pages
         .first()
-        .map(|page| page_json(page, &project.config.root))
+        .map(|page| {
+            page_json(
+                page,
+                &project.config.root,
+                project.config.storage_schema_version,
+            )
+        })
         .unwrap_or_else(|| generic_page_json(project));
     let contracts = contracts_json(project);
     let mut script = r#"const __page = __PAGE_JSON__;
@@ -244,7 +250,11 @@ let __state = {};
 let __lastError = null;
 let __lastTransition = null;
 let __effectAdapter = null;
+let __storageMigration = typeof window.synthetixStorageMigration === 'function'
+  ? window.synthetixStorageMigration
+  : null;
 const __storagePrefix = `synthetix:${__page.name}:`;
+const __storageKey = `${__storagePrefix}state`;
 
 function getPath(scope, path) {
   return path.split('.').reduce((value, part) => value?.[part], scope);
@@ -412,10 +422,92 @@ function parseInputValue(input, type) {
   return value;
 }
 
-function saveState() {
-  for (const state of __page.states) {
-    if (state.persisted) localStorage.setItem(__storagePrefix + state.name, JSON.stringify(__state[state.name]));
+function storageAdapter() {
+  const adapter = window.synthetixStorageAdapter ?? localStorage;
+  if (!adapter || typeof adapter.getItem !== 'function' || typeof adapter.setItem !== 'function')
+    throw new TypeError('storage adapter must implement getItem and setItem');
+  return adapter;
+}
+
+function validatePersistedValues(values) {
+  if (!values || typeof values !== 'object' || Array.isArray(values))
+    throw new TypeError('persisted state must be an object');
+  for (const [name, value] of Object.entries(values)) {
+    const state = __page.states.find((candidate) => candidate.name === name && candidate.persisted);
+    if (!state) throw new TypeError(`unknown persisted state: ${name}`);
+    const valid = state.type === 'bool' ? typeof value === 'boolean'
+      : state.type === 'u32' ? Number.isInteger(value) && value >= 0 && value <= 0xffffffff
+      : state.type === 'i32' ? Number.isInteger(value) && value >= -0x80000000 && value <= 0x7fffffff
+      : state.type === 'text' ? typeof value === 'string'
+      : state.type === 'list' ? Array.isArray(value)
+      : state.type === 'record' ? value !== null && typeof value === 'object' && !Array.isArray(value)
+      : false;
+    if (!valid) throw new TypeError(`persisted state ${name} does not match ${state.type}`);
   }
+  return values;
+}
+
+function saveState(state = __state) {
+  const persisted = __page.states.filter((candidate) => candidate.persisted);
+  if (persisted.length === 0) return;
+  const values = Object.fromEntries(persisted.map((candidate) => [candidate.name, state[candidate.name]]));
+  validatePersistedValues(values);
+  storageAdapter().setItem(__storageKey, JSON.stringify({
+    version: __page.storageSchemaVersion,
+    values,
+  }));
+}
+
+async function loadPersistedState(baseState = __state) {
+  const persisted = __page.states.filter((candidate) => candidate.persisted);
+  if (persisted.length === 0) return baseState;
+  const adapter = storageAdapter();
+  const stored = adapter.getItem(__storageKey);
+  let values;
+  let version;
+  let legacy = false;
+  if (stored === null) {
+    values = {};
+    for (const state of persisted) {
+      const saved = adapter.getItem(__storagePrefix + state.name);
+      if (saved !== null) {
+        values[state.name] = JSON.parse(saved);
+        legacy = true;
+      }
+    }
+    if (!legacy) return baseState;
+    version = 0;
+  } else {
+    const envelope = JSON.parse(stored);
+    if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)
+      || !Number.isSafeInteger(envelope.version) || envelope.version < 0
+      || !Object.prototype.hasOwnProperty.call(envelope, 'values'))
+      throw new TypeError('persisted state envelope is malformed');
+    ({ version, values } = envelope);
+  }
+
+  let migrated = false;
+  if (version !== __page.storageSchemaVersion) {
+    if (legacy && version === 0 && !__storageMigration) {
+      migrated = true;
+    } else if (__storageMigration) {
+      values = await __storageMigration({
+        page: __page.name,
+        fromVersion: version,
+        toVersion: __page.storageSchemaVersion,
+        values: structuredClone(values),
+      });
+      migrated = true;
+    } else {
+      throw new Error(`incompatible storage schema ${version}; expected ${__page.storageSchemaVersion}`);
+    }
+  }
+
+  validatePersistedValues(values);
+  const nextState = structuredClone(baseState);
+  Object.assign(nextState, values);
+  if (migrated) saveState(nextState);
+  return nextState;
 }
 
 function callVerified(element, scope, target) {
@@ -435,6 +527,8 @@ function applyReducerTransition(element) {
       const value = callContract(update.function, update.args.map((arg) => evaluate(arg, nextState)));
       setPath(nextState, update.state, value);
     }
+    functionName = null;
+    saveState(nextState);
   } catch (error) {
     const cause = applicationError(error, functionName);
     const failure = new Error(`${cause.message}; transition ${element.event} failed at update ${updateIndex + 1}`);
@@ -465,7 +559,6 @@ function applyReducerTransition(element) {
     state: structuredClone(__state),
   };
   try {
-    saveState();
     render();
     clearApplicationError();
   } catch (error) {
@@ -583,16 +676,29 @@ async function boot() {
   const bytes = await fetch('./app.wasm').then((response) => response.arrayBuffer());
   const { instance } = await WebAssembly.instantiate(bytes, {});
   __exports = instance.exports;
-  for (const state of __page.states) {
-    const saved = state.persisted && localStorage.getItem(__storagePrefix + state.name);
-    if (saved) {
-      try { __state[state.name] = JSON.parse(saved); continue; } catch (_) {}
-    }
-    __state[state.name] = evaluate(state.initial);
-  }
+  for (const state of __page.states) __state[state.name] = evaluate(state.initial);
+  try { Object.assign(__state, await loadPersistedState(__state)); }
+  catch (error) { reportApplicationError(error); }
   window.synthetix = {
     state: __state,
     call: callContract,
+    storageSchemaVersion: __page.storageSchemaVersion,
+    registerStorageMigration(migration) {
+      if (typeof migration !== 'function') throw reportApplicationError(new TypeError('storage migration must be a function'));
+      __storageMigration = migration;
+    },
+    async restore() {
+      try {
+        const restored = await loadPersistedState(__state);
+        for (const key of Object.keys(__state)) delete __state[key];
+        Object.assign(__state, restored);
+        render();
+        clearApplicationError();
+        return __state;
+      } catch (error) {
+        throw reportApplicationError(error);
+      }
+    },
     registerEffectAdapter(adapter) {
       if (typeof adapter !== 'function') throw reportApplicationError(new TypeError('effect adapter must be a function'));
       __effectAdapter = adapter;
@@ -649,7 +755,7 @@ let __devVersion = null;
     script
 }
 
-fn page_json(linked: &LinkedPage, root: &Path) -> String {
+fn page_json(linked: &LinkedPage, root: &Path, storage_schema_version: u32) -> String {
     let page = &linked.page;
     let states = page
         .states
@@ -700,9 +806,10 @@ fn page_json(linked: &LinkedPage, root: &Path) -> String {
         })
         .collect::<Vec<_>>();
     format!(
-        "{{\"name\":{},\"source\":{},\"states\":[{}],\"reducers\":[{}],\"elements\":[{}]}}",
+        "{{\"name\":{},\"source\":{},\"storageSchemaVersion\":{},\"states\":[{}],\"reducers\":[{}],\"elements\":[{}]}}",
         json_string(&page.name),
         json_string(&source_label(root, &linked.source)),
+        storage_schema_version,
         states.join(","),
         reducers.join(","),
         elements.join(",")
@@ -860,12 +967,13 @@ fn generic_page_json(project: &Project) -> String {
         args.join(",")
     ));
     format!(
-        "{{\"name\":{},\"source\":{},\"states\":[{}],\"elements\":[{}]}}",
+        "{{\"name\":{},\"source\":{},\"storageSchemaVersion\":{},\"states\":[{}],\"elements\":[{}]}}",
         json_string(&contract.name),
         json_string(&source_label(
             &project.config.root,
             &project.contracts[0].source
         )),
+        project.config.storage_schema_version,
         states.join(","),
         elements.join(",")
     )
@@ -912,7 +1020,9 @@ fn state_type_name(ty: &Type) -> &'static str {
         Type::I32 => "i32",
         Type::Bool => "bool",
         Type::Text => "text",
-        Type::Record(_) | Type::List(_) | Type::Unknown => "application",
+        Type::Record(_) => "record",
+        Type::List(_) => "list",
+        Type::Unknown => "application",
     }
 }
 
@@ -1245,6 +1355,7 @@ mod tests {
                 root: PathBuf::from("/tmp/synthetix"),
                 entry: PathBuf::from("/tmp/synthetix/main.ax"),
                 target: "web".to_string(),
+                storage_schema_version: 1,
             },
             contracts: vec![LinkedContract {
                 source: PathBuf::from("/tmp/synthetix/main.ax"),
@@ -1413,6 +1524,7 @@ mod tests {
                 root: PathBuf::from("/tmp/synthetix"),
                 entry: PathBuf::from("/tmp/synthetix/main.ax"),
                 target: "web".to_string(),
+                storage_schema_version: 1,
             },
             contracts,
             verification_summaries: contracts_for_project,
@@ -1802,7 +1914,7 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
   row?.children.find((node) => node.tagName === 'button' && node.textContent === '완료 전환').click();
 
   row = root.children.find((node) => node.tagName === 'ul')?.children[0];
-  const saved = JSON.parse(storage.get('synthetix:Todo:todos'));
+  const saved = JSON.parse(storage.get('synthetix:Todo:state')).values.todos;
   const completed = [window.synthetix.state.todos[0]?.done,
     row?.children.find((node) => node.tagName === 'output')?.textContent,
     row?.children.find((node) => node.tagName === 'p')?.textContent,
@@ -1826,6 +1938,184 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
         let mut lines = stdout.lines();
         assert_eq!(lines.next(), Some("Task|1|Task|false|Task"));
         assert_eq!(lines.next(), Some("true|Task|완료됨|true|none"));
+        assert!(lines.next().is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn persisted_state_is_versioned_validated_and_migratable() {
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-web-persistence-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let example = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/v3-todo-v31");
+        std::fs::copy(example.join("main.ax"), root.join("main.ax")).unwrap();
+        std::fs::copy(example.join("logic.ax"), root.join("logic.ax")).unwrap();
+        let config = root.join("synthetix.toml");
+        std::fs::write(
+            &config,
+            "[project]\nentry = \"main.ax\"\ntarget = \"web\"\nstorage_schema_version = 2\n",
+        )
+        .unwrap();
+        let output = root.join("dist");
+        build(&config, &output).unwrap();
+
+        let script = r#"
+const fs = require('node:fs');
+const vm = require('node:vm');
+const bytes = fs.readFileSync(process.env.AXIOM_TEST_WASM);
+const source = fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8');
+const key = 'synthetix:Todo:state';
+class Element {
+  constructor(tagName) { this.tagName = tagName; this.children = []; this.listeners = {}; this.dataset = {}; this.value = ''; this.checked = false; this.hidden = true; this.textContent = ''; }
+  append(...items) { this.children.push(...items); }
+  replaceChildren() { this.children = []; }
+  addEventListener(name, callback) { this.listeners[name] = callback; }
+  dispatch(name) { this.listeners[name]?.({ target: this }); }
+  click() { this.listeners.click?.(); }
+}
+function makeStorage(seed = {}, fail = {}) {
+  const values = new Map(Object.entries(seed));
+  return {
+    values,
+    getItem(name) { if (fail.read) throw new Error('storage unavailable'); return values.get(name) ?? null; },
+    setItem(name, value) { if (fail.write) throw new Error('storage unavailable'); values.set(name, String(value)); },
+  };
+}
+async function launch(storage, migration = null) {
+  const root = new Element('main');
+  const error = new Element('div');
+  const window = { synthetixStorageAdapter: storage };
+  if (migration) window.synthetixStorageMigration = migration;
+  const context = {
+    window,
+    location: { reload() {} },
+    document: {
+      querySelector(selector) { return selector === '#app' ? root : error; },
+      createElement(tagName) { return new Element(tagName); },
+    },
+    setInterval: () => 0,
+    setTimeout,
+    structuredClone,
+    fetch: async (url) => url === './app.wasm'
+      ? { ok: true, arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) }
+      : { ok: false, text: async () => '' },
+  };
+  vm.runInNewContext(`(function() { ${source}\n })()`, context);
+  for (let attempt = 0; attempt < 100 && !window.synthetix?.state; attempt++)
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  if (!window.synthetix?.state) throw new Error('runtime did not finish booting');
+  return { window, root, error };
+}
+(async () => {
+  const storage = makeStorage();
+  const first = await launch(storage);
+  if (first.window.synthetix.storageSchemaVersion !== 2) throw new Error('schema version was not embedded');
+  const input = first.root.children.find((node) => node.tagName === 'input');
+  input.value = 'Task';
+  input.dispatch('change');
+  first.root.children.find((node) => node.tagName === 'button' && node.textContent === '추가').click();
+  first.root.children.find((node) => node.tagName === 'button' && node.textContent === '검증된 상태 갱신').click();
+  const envelope = JSON.parse(storage.values.get(key));
+  const persistence = [envelope.version, Object.keys(envelope.values).sort().join(','),
+    String('count' in envelope.values || 'ready' in envelope.values)].join('|');
+
+  const restored = await launch(storage);
+  const restore = [restored.window.synthetix.state.draft, restored.window.synthetix.state.todos[0]?.title,
+    restored.window.synthetix.state.count, restored.window.synthetix.state.ready].join('|');
+
+  const malformed = await launch(makeStorage({ [key]: '{' }));
+  const malformedResult = [malformed.window.synthetix.lastError?.category,
+    malformed.window.synthetix.state.todos.length].join('|');
+  const badShape = await launch(makeStorage({ [key]: JSON.stringify({ version: 2, values: { todos: 3 } }) }));
+  const badShapeResult = [badShape.window.synthetix.lastError?.category,
+    badShape.window.synthetix.state.todos.length].join('|');
+
+  const incompatibleStorage = makeStorage({ [key]: JSON.stringify({ version: 99, values: { draft: 'old', todos: [] } }) });
+  const incompatible = await launch(incompatibleStorage);
+  const incompatibleResult = [incompatible.window.synthetix.lastError?.category,
+    incompatible.window.synthetix.state.draft, JSON.parse(incompatibleStorage.values.get(key)).version].join('|');
+
+  let migrations = 0;
+  const migrationStorage = makeStorage({ [key]: JSON.stringify({
+    version: 1, values: { title: 'Legacy', todos: [{ title: 'old', done: false }] },
+  }) });
+  const migrated = await launch(migrationStorage, async (request) => {
+    if (request.fromVersion !== 1 || request.toVersion !== 2) throw new Error('wrong migration versions');
+    migrations++;
+    return { draft: request.values.title, todos: request.values.todos };
+  });
+  const migrationResult = [migrated.window.synthetix.state.draft,
+    migrated.window.synthetix.state.todos[0]?.title,
+    JSON.parse(migrationStorage.values.get(key)).version, migrations].join('|');
+
+  const retryStorage = makeStorage({ [key]: JSON.stringify({ version: 1, values: { draft: 'Retry' } }) });
+  const retry = await launch(retryStorage);
+  retry.window.synthetix.registerStorageMigration(({ values }) => ({ draft: `${values.draft} migrated` }));
+  await retry.window.synthetix.restore();
+  const retryResult = [retry.window.synthetix.state.draft,
+    JSON.parse(retryStorage.values.get(key)).version,
+    retry.window.synthetix.lastError?.category ?? 'none'].join('|');
+
+  const failedMigrationStorage = makeStorage({ [key]: JSON.stringify({ version: 1, values: { draft: 'old' } }) });
+  const failedMigration = await launch(failedMigrationStorage, async () => { throw new Error('migration failed'); });
+  const migrationFailureResult = [failedMigration.window.synthetix.lastError?.category,
+    failedMigration.window.synthetix.state.draft,
+    JSON.parse(failedMigrationStorage.values.get(key)).version].join('|');
+
+  const legacyStorage = makeStorage({
+    'synthetix:Todo:draft': JSON.stringify('Legacy'),
+    'synthetix:Todo:todos': JSON.stringify([{ title: 'Legacy todo', done: false }]),
+  });
+  const legacy = await launch(legacyStorage);
+  const legacyResult = [legacy.window.synthetix.state.draft,
+    legacy.window.synthetix.state.todos[0]?.title,
+    JSON.parse(legacyStorage.values.get(key)).version].join('|');
+
+  const unavailable = await launch(makeStorage({}, { read: true }));
+  const readFailure = [unavailable.window.synthetix.lastError?.category,
+    unavailable.window.synthetix.state.todos.length].join('|');
+  const writeFailure = await launch(makeStorage({}, { write: true }));
+  const writeInput = writeFailure.root.children.find((node) => node.tagName === 'input');
+  writeInput.value = 'Not saved';
+  writeInput.dispatch('change');
+  const writeResult = [writeFailure.window.synthetix.lastError?.category,
+    String(writeFailure.error.textContent.includes('COUNTEREXAMPLE'))].join('|');
+
+  process.stdout.write([persistence, restore, malformedResult, badShapeResult,
+    incompatibleResult, migrationResult, retryResult, migrationFailureResult,
+    legacyResult, readFailure, writeResult].join('\n'));
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"#;
+        let result = std::process::Command::new("node")
+            .arg("-e")
+            .arg(script)
+            .env("AXIOM_TEST_JS", output.join("app.js"))
+            .env("AXIOM_TEST_WASM", output.join("app.wasm"))
+            .output()
+            .expect("Node.js is required to execute the generated browser runtime");
+        assert!(
+            result.status.success(),
+            "persistence runtime failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let stdout = String::from_utf8(result.stdout).unwrap();
+        let mut lines = stdout.lines();
+        assert_eq!(lines.next(), Some("2|draft,todos|false"));
+        assert_eq!(lines.next(), Some("Task|Task|0|false"));
+        assert_eq!(lines.next(), Some("APPLICATION_RUNTIME_ERROR|0"));
+        assert_eq!(lines.next(), Some("APPLICATION_RUNTIME_ERROR|0"));
+        assert_eq!(lines.next(), Some("APPLICATION_RUNTIME_ERROR||99"));
+        assert_eq!(lines.next(), Some("Legacy|old|2|1"));
+        assert_eq!(lines.next(), Some("Retry migrated|2|none"));
+        assert_eq!(lines.next(), Some("APPLICATION_RUNTIME_ERROR||1"));
+        assert_eq!(lines.next(), Some("Legacy|Legacy todo|2"));
+        assert_eq!(lines.next(), Some("APPLICATION_RUNTIME_ERROR|0"));
+        assert_eq!(lines.next(), Some("APPLICATION_RUNTIME_ERROR|false"));
         assert!(lines.next().is_none());
         std::fs::remove_dir_all(root).unwrap();
     }

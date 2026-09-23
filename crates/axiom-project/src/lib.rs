@@ -14,6 +14,7 @@ pub struct ProjectConfig {
     pub root: PathBuf,
     pub entry: PathBuf,
     pub target: String,
+    pub storage_schema_version: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +121,7 @@ fn parse_config(path: &Path) -> Result<ProjectConfig, String> {
     let mut in_project = false;
     let mut entry = None;
     let mut target = None;
+    let mut storage_schema_version = 1;
 
     for (index, raw_line) in contents.lines().enumerate() {
         let line = raw_line.split('#').next().unwrap_or_default().trim();
@@ -145,6 +147,22 @@ fn parse_config(path: &Path) -> Result<ProjectConfig, String> {
         match key.trim() {
             "entry" => entry = Some(value.to_string()),
             "target" => target = Some(value.to_string()),
+            "storage_schema_version" => {
+                storage_schema_version = value.parse().map_err(|_| {
+                    format!(
+                        "{}:{}: storage_schema_version must be a positive integer",
+                        path.display(),
+                        index + 1
+                    )
+                })?;
+                if storage_schema_version == 0 {
+                    return Err(format!(
+                        "{}:{}: storage_schema_version must be a positive integer",
+                        path.display(),
+                        index + 1
+                    ));
+                }
+            }
             other => {
                 return Err(format!(
                     "{}:{}: unknown project setting: {other}",
@@ -173,6 +191,7 @@ fn parse_config(path: &Path) -> Result<ProjectConfig, String> {
         root,
         entry,
         target,
+        storage_schema_version,
     })
 }
 

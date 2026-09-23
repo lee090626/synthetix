@@ -740,6 +740,33 @@ browser 검증은 v5.7 integration 범위에 남긴다.
 | 의존성 | v5.1 runtime과 v5.3 data boundary가 필요하다. |
 | 범위 밖 | DB transaction과 서버 storage의 증명. |
 
+### v5.4 구현 기록
+
+상태: **완료**
+
+- `persist` 선언된 상태만 하나의 versioned storage envelope에 저장한다.
+  비 persist 상태는 선언된 초기값으로 시작한다.
+- `storage_schema_version`을 `[project]` 설정에 추가했다. 생략하면 `1`이며,
+  0은 거부한다. 저장 envelope와 generated runtime에 버전을 함께 기록한다.
+- 기본 localStorage adapter 외에 host get/set adapter를 허용한다. 저장 값을
+  envelope와 top-level state 타입에 맞춰 검사한다.
+- 구형 v3.1 per-state storage key를 versioned envelope로 변환한다.
+  버전이 달라지면 migration adapter를 요구하고, 성공 결과를 검증한 뒤
+  새 envelope로 저장한다. `registerStorageMigration`과 `restore()`로 런타임
+  복구 경로도 제공한다.
+- 손상 JSON, 잘못된 state shape, incompatible version, migration 실패, storage
+  read/write 오류는 application runtime 오류로 보고하며 proof 결과에 섞지 않는다.
+
+검증:
+
+- `persisted_state_is_versioned_validated_and_migratable`: generated web bundle에서
+  저장/복원, persist/non-persist 구분, 기존 키 변환, schema mismatch,
+  migration 성공/실패, corrupted data, storage read/write 오류를 실행.
+- `cargo test --workspace`: 112개 통과
+- `cargo clippy --workspace --all-targets -- -D warnings` 통과
+- `cargo fmt --all -- --check`, `git diff --check` 통과
+- `cargo build --release -p axiom-cli` 통과
+
 ## v5.5 — External Adapter
 
 | 항목 | 내용 |
@@ -917,7 +944,8 @@ v6의 loop, recursion, array, map, set은 단순한 문법 추가가 아니다. 
 
 v4.1 Semantic Baseline부터 v4.9 Freeze까지와 v5.0 Application Boundary
 Baseline, v5.1 Thin Web Runtime, v5.2 State Transition, v5.3 Data Boundary가
-완료되었다. 다음 milestone은 v5.4 Browser Effect와 Persistence이다.
+완료되었고 v5.4 Browser Effect와 Persistence도 완료되었다. 다음 milestone은
+v5.5 External Adapter이다.
 
 ```text
 v4.1 완료
@@ -933,9 +961,11 @@ v4.1 완료
   → v5.1 완료
   → v5.2 완료
   → v5.3 완료
-  → v5.4 Browser Effect와 Persistence
+  → v5.4 완료
+  → v5.5 External Adapter
 ```
 
 v4.9에서 의미론, 결과 상태, supported grammar, negative fixture, release
 검증 기준을 동결했고 v5.0~v5.3에서 core와 application/effect 실행, state
-transition, data boundary를 분리했다. 일반 재귀, loop invariant, 무제한 호출은 시작하지 않는다.
+transition, data boundary, persistence boundary를 분리했다. 일반 재귀,
+loop invariant, 무제한 호출은 시작하지 않는다.
