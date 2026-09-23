@@ -225,7 +225,9 @@ integration test launches the CLI to check and build a project, inspects the
 proof manifest and static files, then runs the generated runtime against its
 WASM. It verifies that a page action and explicit verified call use the contract
 export, while a typed extern request updates application state through the host
-adapter and deployment config. The extern stays outside the proof and WASM.
+adapter and deployment config. The updated persisted state is checked in its
+versioned envelope, then restored and rendered. The extern stays outside the
+proof and WASM.
 
 ## v5.0 Scope
 
