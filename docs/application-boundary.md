@@ -179,6 +179,23 @@ application data; a caller must explicitly pass supported scalar data to a
 verified contract when it needs a verified computation. This does not prove the
 external service's factual correctness.
 
+## v5.6 Async Effects
+
+An effect adapter receives `(request, { signal, requestId })`. A newer request
+for the same target state supersedes the earlier request; the earlier signal is
+aborted and its eventual response cannot update state or replace the current
+effect status. `cancelEffect(targetStateOrName)` cancels matching pending work,
+and `cancelEffect()` cancels all pending work. A cancelled request resolves to
+`undefined`. `retryEffect(targetStateOrName)` repeats a failed request using its
+saved inputs. Requests for separate targets can complete independently, so one
+failed adapter does not discard another target's successful update.
+
+`lastEffect` adds a request id and target state and reports `CANCELLED` alongside
+`LOADING`, `SUCCEEDED`, and `ERROR`. Adapter failures remain application runtime
+errors. The generated-runtime test covers late stale responses, explicit cancel,
+retry after a transient failure, and partial success/failure with real generated
+WASM.
+
 ## v5.0 Scope
 
 This baseline does not implement full records, lists, strings, state
