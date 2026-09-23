@@ -587,6 +587,37 @@ application runtime, effect boundary로 재분류하고 안정화한다.
 | 의존성 | v4.9의 의미론과 `contract/fn/extern` 정의 이후 진행한다. |
 | 범위 밖 | 새 collection 알고리즘, 서버 구현, DB·인증 검증. |
 
+### v5.0 구현 기록
+
+상태: **완료**
+
+- `axiom-application`에서 `ApplicationValue`, `VerifiedComputation`,
+  `ApplicationCall`, `EffectRequest`를 분리해 pure computation, application
+  call, 외부 effect 경계를 타입으로 표현한다.
+- `app-run`이 application 입력을 검증·lowering하고 verified WASM을 실행한
+  뒤 결과를 application value로 lifting한다. `mul8(5)`와 signed `-1` 실행을
+  실제 release CLI에서 확인했다.
+- 정수/boolean 간 암묵 변환과 범위 밖 입력을 거부하고, `extern` 실행,
+  precondition, WASM runtime, effect, 결과 lifting 실패를 proof result와
+  분리한다.
+- [Application Boundary 문서](application-boundary.md)와 architecture에
+  trust/dependency/value/failure 경계를 기록했다. v4 core/semantics 파일은
+  수정하지 않았다.
+
+검증:
+
+- `cargo test --workspace`: 105개 통과
+- `cargo clippy --workspace --all-targets -- -D warnings` 통과
+- `cargo fmt --all -- --check`, `git diff --check` 통과
+- `cargo build --release -p axiom-cli` 통과
+
+추가로 Cargo metadata에서 app → core 방향과 core의 application/browser/
+HTTP/storage dependency 부재를 확인했다.
+
+경계 테스트: 잘못된 scalar 범위, text/list/record, integer-to-bool coercion,
+잘못된 boolean output, extern declaration, precondition, WASM runtime, effect
+실패를 확인하고 CLI integration test로 positive/negative 흐름을 실행했다.
+
 ## v5.1 — Thin Web Runtime
 
 | 항목 | 내용 |
@@ -798,8 +829,8 @@ v6의 loop, recursion, array, map, set은 단순한 문법 추가가 아니다. 
 
 ## 현재 다음 작업
 
-v4.1 Semantic Baseline부터 v4.9 Freeze까지 완료되었고, 현재 구현 대상은
-**v5.0 Application Boundary Baseline 하나뿐**이다.
+v4.1 Semantic Baseline부터 v4.9 Freeze와 v5.0 Application Boundary
+Baseline까지 완료되었다. 다음 milestone은 v5.1 Thin Web Runtime이다.
 
 ```text
 v4.1 완료
@@ -811,9 +842,11 @@ v4.1 완료
   → v4.7 완료
   → v4.8 완료
   → v4.9 완료
-  → v5.0 Application Boundary Baseline
+  → v5.0 완료
+  → v5.1 Thin Web Runtime
 ```
 
 v4.9에서 의미론, 결과 상태, supported grammar, negative fixture, release
-검증 기준을 동결했다. 다음은 verified core와 웹·effect 경계를 다루는 v5.0이며,
-일반 재귀·loop invariant·무제한 호출은 여전히 시작하지 않는다.
+검증 기준을 동결했고 v5.0에서 core와 application/effect 책임을 분리했다.
+v5.1 runtime 구현은 이 milestone 작업 범위에 포함되지 않는다. 일반 재귀,
+loop invariant, 무제한 호출도 시작하지 않는다.

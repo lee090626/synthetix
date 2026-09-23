@@ -7,10 +7,21 @@ name = "axiom-ami"
 version = "0.1.0"
 
 [[package]]
+name = "axiom-application"
+version = "0.1.0"
+dependencies = [
+ "axiom-parser",
+ "axiom-synth",
+ "axiom-verify",
+ "axiom-wasm",
+]
+
+[[package]]
 name = "axiom-cli"
 version = "0.1.0"
 dependencies = [
  "axiom-ami",
+ "axiom-application",
  "axiom-parser",
  "axiom-project",
  "axiom-synth",

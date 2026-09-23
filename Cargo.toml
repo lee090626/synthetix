@@ -7,5 +7,6 @@ members = [
     "crates/axiom-synth",
     "crates/axiom-wasm",
     "crates/axiom-project",
+    "crates/axiom-application",
     "crates/axiom-cli",
 ]

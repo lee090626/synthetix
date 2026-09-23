@@ -2,64 +2,70 @@
 
 ## 1. System Overview
 
-Synthetix is a Cargo workspace with six decoupled crates. The first usable
+Synthetix is a Cargo workspace with eight decoupled crates. The first usable
 vertical slice now covers parsing, bounded synthesis, Z3 verification, direct
 WASM emission, embedded WASM execution, project linking, and a browser dev
-loop. The implementations remain intentionally narrow: the proof core is pure
-`u32`, while the web layer provides a small declarative page surface.
+loop. The v4 proof core supports pure `u32`, `i32`, and `bool` computations;
+browser state, rendering, and host APIs remain outside that proof boundary.
+
+Cargo dependency direction:
+
+```mermaid
+flowchart LR
+  CLI[axiom-cli] --> APP[axiom-application]
+  CLI --> PROJECT[axiom-project]
+  CLI --> SYNTH[axiom-synth]
+  CLI --> VERIFY[axiom-verify]
+  CLI --> WASM[axiom-wasm]
+  CLI --> PARSER[axiom-parser]
+  CLI --> AMI[axiom-ami]
+
+  APP --> PARSER
+  APP --> SYNTH
+  APP --> VERIFY
+  APP --> WASM
+  PROJECT --> PARSER
+  PROJECT --> VERIFY
+  PROJECT --> AMI
+  SYNTH --> PARSER
+  SYNTH --> VERIFY
+  SYNTH --> WASM
+  SYNTH --> AMI
+  VERIFY --> PARSER
+  VERIFY --> AMI
+  VERIFY --> Z3[z3]
+  WASM --> AMI
+  WASM --> WASMI[wasmi]
+```
+
+---
+
+## v5.0 Application Boundary
+
+The graph above shows workspace dependencies. At runtime, the v5 application
+call path uses the one-way boundary below:
 
 ```text
-┌─────────────────────────────────────────────────────────────┐
-│                axiom-parser (implemented)                   │
-│ Parses .ax modules, imports, contracts, and small web pages  │
-└──────────────────────────────┬──────────────────────────────┘
-                               │ Module AST
-                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│                axiom-project (v2)                           │
-│ Loads synthetix.toml, resolves imports, and retains both    │
-│ runtime-expanded contracts and verification summaries       │
-└──────────────────────────────┬──────────────────────────────┘
-                               │ Contract AST
-                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│                 axiom-ami (implemented)                     │
-│   Axiom Machine IR: Tree-structured 32-bit bit-vector IR     │
-│   Provides: Expr enum and wrapping interpreter              │
-└──────────────┬──────────────────────────────▲───────────────┘
-               │                              │
-               │ Candidate Expr               │ Counterexamples
-               ▼                              │
-┌──────────────────────────────┐              │
-│       axiom-synth (bounded)  │              │
-│  Candidate Enumerator        │              │
-│  Verification Loop           │              │
-└──────────────┬───────────────┘              │
-               │                              │
-               │ (Candidate, Contract)        │
-               ▼                              │
-┌─────────────────────────────────────────────┴───────────────┐
-│      axiom-verify (initial)  │              │
-│  Translates Spec & AMI to SMT-LIB2 bit-vector formulas      │
-│  Queries Z3: Is there ANY input where Candidate != Spec?     │
-│    - SAT   => returns concrete Counterexample               │
-│    - UNSAT => marks candidate as VERIFIED                   │
-└──────────────────────────────┬──────────────────────────────┘
-                               │ Verified AMI
-                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│       axiom-wasm             │
-│  Direct emission of one or more named WebAssembly functions  │
-│  No WAT, LLVM, or clang dependency                           │
-└─────────────────────────────────────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────┐
-│       axiom-cli web layer (v2)                              │
-│  Static HTML/JS/CSS/WASM output, localhost dev server,       │
-│  polling-based Live Reload                                   │
-└─────────────────────────────────────────────────────────────┘
+axiom-cli app-run
+       │
+       ▼
+axiom-application ────────┬── axiom-parser (contract signature)
+  ApplicationValue        ├── axiom-synth ── axiom-ami / axiom-verify / axiom-wasm
+  validation + lowering   ├── axiom-verify
+  WASM call + lifting     └── axiom-wasm
+       │
+       └── EffectRequest → host adapter boundary (no adapter in v5.0)
 ```
+
+`axiom-application` depends on the parser and verified-core crates. No verified
+core crate depends on `axiom-application`, browser APIs, HTTP, or storage. The
+CLI's generated browser host in `axiom-cli/src/web.rs` owns DOM, fetch,
+`localStorage`, and rendering behavior; those operations are outside the proof.
+Pure contract bodies continue to execute from verified WASM exports.
+
+`axiom-application` exposes `VerifiedComputation`, `ApplicationCall`, and
+`EffectRequest` as distinct representations. `app-run` is the executable
+vertical slice. The existing `run` command remains the v4 command path.
 
 ---
 
@@ -146,3 +152,11 @@ loop. The implementations remain intentionally narrow: the proof core is pure
 - Artifact reports carry the semantics version, synthesis bounds, proof state,
   and separate integrity fingerprints for the verification artifact and emitted
   WASM.
+
+### `crates/axiom-application` — v5.0 boundary baseline
+- **Role**: Validates application values, lowers supported scalar inputs to the
+  verified WASM ABI, executes a verified computation, and lifts its result.
+- **Effect boundary**: `EffectRequest` is separate from `ApplicationCall`; v5.0
+  has no host adapter implementation.
+- **Failure boundary**: input validation, precondition, WASM runtime, output,
+  and effect failures use application errors rather than `ProofResult` states.
