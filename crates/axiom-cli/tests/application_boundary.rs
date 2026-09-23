@@ -71,9 +71,15 @@ fn v5_release_path_keeps_proof_wasm_state_effect_and_static_config_together() {
     .unwrap();
     fs::write(
         root.join("main.ax"),
-        "import { balance } from \"./api.ax\";\n\
-         contract increment(value: u32) -> u32 { ensures result == value +% 1; }\n\
-         page Account { state count: number = 0; show count; button \"increment\" updates count with increment(count); }\n",
+        r#"import { balance } from "./api.ax";
+contract increment(value: u32) -> u32 { ensures result == value +% 1; }
+page Account {
+  state count: number = 0;
+  persist count;
+  show count;
+  button "increment" updates count with increment(count);
+}
+"#,
     )
     .unwrap();
     fs::write(
@@ -153,9 +159,13 @@ class Element {
 }
 const root = new Element('main');
 const error = new Element('div');
+const storage = new Map();
 global.window = {};
 global.location = { reload() {} };
-global.localStorage = { getItem() { return null; }, setItem() {} };
+global.localStorage = {
+  getItem(key) { return storage.get(key) ?? null; },
+  setItem(key, value) { storage.set(key, String(value)); },
+};
 global.document = {
   querySelector(selector) { return selector === '#app' ? root : error; },
   createElement(tagName) { return new Element(tagName); },
@@ -183,11 +193,17 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
     return request.inputs[0] * 3;
   });
   const apiResult = await window.synthetix.requestExtern('balance', [7], 'count');
+  const envelope = JSON.parse(storage.get('synthetix:Account:state'));
+  if (envelope.version !== window.synthetix.storageSchemaVersion || envelope.values.count !== 21)
+    throw new Error('API state update was not saved in the versioned storage envelope');
+  window.synthetix.state.count = 0;
+  const restored = await window.synthetix.restore();
   const rendered = root.children.find((element) => element.tagName === 'output' && element.dataset.state === 'count');
   process.stdout.write([
     stateAfterVerifiedAction,
     verifiedCall,
     apiResult,
+    restored.count,
     window.synthetix.state.count,
     rendered.textContent,
     window.synthetix.lastEffect.status,
@@ -211,7 +227,7 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
     );
     assert_eq!(
         String::from_utf8(runtime_result.stdout).unwrap(),
-        "1|42|21|21|21|SUCCEEDED|release-test"
+        "1|42|21|21|21|21|SUCCEEDED|release-test"
     );
     fs::remove_dir_all(root).unwrap();
 }

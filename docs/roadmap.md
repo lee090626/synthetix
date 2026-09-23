@@ -917,7 +917,8 @@ browser 검증은 v5.7 integration 범위에 남긴다.
   WASM export 경계를 검사한다.
 - 같은 test가 generated browser runtime에서 verified page action과 contract
   call, typed extern adapter, deployment config, rendered state를 end-to-end로
-  확인한다. extern은 WASM export나 proof manifest에 들어가지 않는다.
+  확인한다. typed extern으로 갱신된 state의 versioned storage 저장과 복원도
+  검사한다. extern은 WASM export나 proof manifest에 들어가지 않는다.
 - 이 test는 `cargo test --workspace`에 포함돼 release workflow의 workspace
   test job에서 실행된다.
 
