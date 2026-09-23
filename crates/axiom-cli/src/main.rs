@@ -7,6 +7,10 @@ use std::{
     time::Duration,
 };
 
+use axiom_application::{
+    ApplicationCall, ApplicationValue, BoundaryOperation, VerifiedComputation,
+};
+
 const SEMANTICS_VERSION: &str = "v4.1-scalar-baseline";
 type SynthesisOutput = (
     axiom_parser::Contract,
@@ -34,6 +38,7 @@ fn main() -> ExitCode {
             eprintln!(
                 "  axiom run <contract.ax> [--] [<value>...] [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N] [--max-memory-bytes N]"
             );
+            eprintln!("  axiom app-run <contract.ax> [--] [<application-value>...]");
             eprintln!("  axiom <contract.ax> [-o output.wasm]");
             ExitCode::FAILURE
         }
@@ -46,6 +51,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
         Some("check") => check_command(&args[1..]),
         Some("build") => build_command(&args[1..]),
         Some("run") => run_command(&args[1..]),
+        Some("app-run") => application_run_command(&args[1..]),
         _ => build_command(&args),
     }
 }
@@ -293,6 +299,34 @@ fn run_command(args: &[String]) -> Result<(), String> {
     if let Some(report) = options.report {
         println!("report: {}", report.display());
     }
+    Ok(())
+}
+
+fn application_run_command(args: &[String]) -> Result<(), String> {
+    let input = args
+        .first()
+        .ok_or_else(|| "app-run requires a contract file".to_string())?;
+    let values_start = if args.get(1).map(String::as_str) == Some("--") {
+        2
+    } else {
+        1
+    };
+    let values = args[values_start..]
+        .iter()
+        .map(|value| ApplicationValue::from_cli_token(value))
+        .collect::<Vec<_>>();
+    let contract = read_contract(input)?;
+    let verified = VerifiedComputation::synthesize(&contract)
+        .map_err(|error| format!("cannot prepare verified computation: {error}"))?;
+    let call = ApplicationCall::new(verified, &values).map_err(|error| error.to_string())?;
+    let result = BoundaryOperation::Application(call)
+        .execute()
+        .map_err(|error| error.to_string())?;
+
+    println!("contract: {}", contract.name);
+    println!("boundary: APPLICATION -> VERIFIED_CORE -> APPLICATION");
+    println!("proof_result: VERIFIED");
+    println!("result: {result:?}");
     Ok(())
 }
 
