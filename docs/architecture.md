@@ -67,6 +67,21 @@ Pure contract bodies continue to execute from verified WASM exports.
 `EffectRequest` as distinct representations. `app-run` is the executable
 vertical slice. The existing `run` command remains the v4 command path.
 
+## v5.1 Thin Browser Runtime
+
+The generated browser runtime validates top-level scalar input values against
+their declared type, calls verified exports from `app.wasm`, stores the lifted
+result in page state, and renders the updated state. It exposes a small host
+adapter hook for `{ name, inputs }` effect requests; an adapter result can
+update application state without entering the proof core. Runtime errors carry
+the source path and remain application errors. Page/UI expression evaluation
+stays in JavaScript, while verified contract bodies run only in WASM.
+
+Page reducers stage ordered updates against a cloned application state and
+commit only after every verified WASM call succeeds. A failed update leaves the
+original state in place and reports an application transition failure separately
+from proof results.
+
 ---
 
 ## 2. Detailed Crate Responsibilities

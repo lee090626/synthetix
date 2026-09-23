@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, UNIX_EPOCH};
 
 use axiom_ami::Expr;
-use axiom_parser::{BinaryOp, PageElement, Reducer, SpecExpr};
+use axiom_parser::{BinaryOp, PageElement, Reducer, SpecExpr, Type};
 use axiom_project::{LinkedPage, Project};
 
 #[derive(Debug, Clone)]
@@ -17,6 +17,8 @@ struct CompiledFunction {
     source: PathBuf,
     params: u32,
     candidate: Expr,
+    requires: Option<Expr>,
+    requires_export: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -37,9 +39,16 @@ pub fn build(config_path: &Path, output_dir: &Path) -> Result<BuildResult, Strin
         return Err("web project must contain at least one contract".to_string());
     }
 
-    let functions = compiled
+    let mut exports = Vec::with_capacity(compiled.len() * 2);
+    for function in &compiled {
+        exports.push((function.name.clone(), &function.candidate, function.params));
+        if let (Some(requires), Some(name)) = (&function.requires, &function.requires_export) {
+            exports.push((name.clone(), requires, function.params));
+        }
+    }
+    let functions = exports
         .iter()
-        .map(|function| (function.name.as_str(), &function.candidate, function.params))
+        .map(|(name, expression, params)| (name.as_str(), *expression, *params))
         .collect::<Vec<_>>();
     let wasm = axiom_wasm::emit_functions(&functions)?;
 
@@ -130,6 +139,7 @@ pub fn dev(config_path: &Path, port: u16, open_browser: bool, once: bool) -> Res
 
 fn compile_contracts(project: &Project) -> Result<Vec<CompiledFunction>, String> {
     let mut names = HashMap::new();
+    let mut export_names = std::collections::HashSet::new();
     let mut compiled = Vec::new();
     for linked in &project.contracts {
         let name = linked.contract.name.clone();
@@ -140,8 +150,23 @@ fn compile_contracts(project: &Project) -> Result<Vec<CompiledFunction>, String>
                 linked.source.display()
             ));
         }
+        if !export_names.insert(name.clone()) {
+            return Err(format!("duplicate web export {name}"));
+        }
         let candidate = axiom_synth::synthesize(&linked.contract)
             .map_err(|error| format!("{}:{}: {error}", linked.source.display(), name))?;
+        let requires = axiom_synth::lower_requires(&linked.contract)
+            .map_err(|error| format!("{}:{}: {error}", linked.source.display(), name))?;
+        let requires_export = requires.as_ref().map(|_| requires_export_name(&name));
+        if let Some(requires_export) = &requires_export
+            && !export_names.insert(requires_export.clone())
+        {
+            return Err(format!(
+                "{}:{}: reserved or duplicate WASM export {requires_export}",
+                linked.source.display(),
+                name
+            ));
+        }
         let composition = project
             .verify_compositional(linked, &candidate)
             .map_err(|error| format!("{}:{}: {error}", linked.source.display(), name))?;
@@ -185,6 +210,8 @@ fn compile_contracts(project: &Project) -> Result<Vec<CompiledFunction>, String>
             source: linked.source.clone(),
             params: linked.contract.params.len() as u32,
             candidate,
+            requires,
+            requires_export,
         });
     }
     Ok(compiled)
@@ -206,12 +233,17 @@ fn page_javascript(project: &Project) -> String {
     let page = project
         .pages
         .first()
-        .map(page_json)
+        .map(|page| page_json(page, &project.config.root))
         .unwrap_or_else(|| generic_page_json(project));
+    let contracts = contracts_json(project);
     let mut script = r#"const __page = __PAGE_JSON__;
+const __contracts = __CONTRACTS__;
 
 let __exports = null;
 let __state = {};
+let __lastError = null;
+let __lastTransition = null;
+let __effectAdapter = null;
 const __storagePrefix = `synthetix:${__page.name}:`;
 
 function getPath(scope, path) {
@@ -277,6 +309,109 @@ function display(value) {
   return String(value);
 }
 
+function applicationError(error, functionName = null) {
+  if (error?.category === 'APPLICATION_RUNTIME_ERROR' || error?.category === 'APPLICATION_TRANSITION_FAILURE') return error;
+  const contract = functionName ? __contracts[functionName] : null;
+  const source = contract?.source ?? __page.source;
+  const message = error instanceof Error ? error.message : String(error);
+  const location = functionName ? `${source}:${functionName}` : source;
+  const wrapped = new Error(`${location}: application runtime error: ${message}`);
+  wrapped.category = 'APPLICATION_RUNTIME_ERROR';
+  wrapped.source = source;
+  wrapped.contract = functionName;
+  return wrapped;
+}
+
+function reportApplicationError(error, functionName = null) {
+  __lastError = applicationError(error, functionName);
+  const node = document.querySelector('#synthetix-error');
+  node.hidden = false;
+  node.dataset.category = __lastError.category;
+  node.dataset.source = __lastError.source;
+  node.textContent = __lastError.message;
+  return __lastError;
+}
+
+function clearApplicationError() {
+  __lastError = null;
+  const node = document.querySelector('#synthetix-error');
+  node.hidden = true;
+  node.textContent = '';
+  delete node.dataset.category;
+  delete node.dataset.source;
+}
+
+function runApplicationAction(action) {
+  try {
+    const result = action();
+    clearApplicationError();
+    return result;
+  } catch (error) {
+    return reportApplicationError(error);
+  }
+}
+
+function lowerArgument(value, type, index) {
+  if (type === 'bool') {
+    if (typeof value !== 'boolean') throw new TypeError(`argument ${index}: expected bool`);
+    return value ? 1 : 0;
+  }
+  if (type === 'u32') {
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 0xffffffff)
+      throw new TypeError(`argument ${index}: expected u32`);
+    return value;
+  }
+  if (type === 'i32') {
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < -0x80000000 || value > 0x7fffffff)
+      throw new TypeError(`argument ${index}: expected i32`);
+    return value;
+  }
+  throw new TypeError(`argument ${index}: unsupported verified type ${type}`);
+}
+
+function liftResult(value, type) {
+  if (type === 'bool') {
+    if (value !== 0 && value !== 1) throw new TypeError(`verified WASM returned invalid bool ${value}`);
+    return value === 1;
+  }
+  if (type === 'u32') return value >>> 0;
+  if (type === 'i32') return value | 0;
+  throw new TypeError(`unsupported verified result type ${type}`);
+}
+
+function callContract(name, args) {
+  try {
+    const contract = __contracts[name];
+    if (!contract) throw new Error(`Missing verified contract: ${name}`);
+    if (!Array.isArray(args) || args.length !== contract.params.length)
+      throw new TypeError(`${name}: expected ${contract.params.length} arguments`);
+    const fn = __exports?.[name];
+    if (typeof fn !== 'function') throw new Error(`Missing WASM export: ${name}`);
+    const lowered = args.map((value, index) => lowerArgument(value, contract.params[index], index));
+    if (contract.requires) {
+      const check = __exports?.[contract.requires];
+      if (typeof check !== 'function') throw new Error(`Missing WASM precondition check: ${name}`);
+      if (check(...lowered) !== 1) throw new Error(`${name}: input violates a requires clause`);
+    }
+    return liftResult(fn(...lowered), contract.result);
+  } catch (error) {
+    throw applicationError(error, name);
+  }
+}
+
+function parseInputValue(input, type) {
+  if (type === 'text') return input.value;
+  if (type === 'bool') return input.checked;
+  if (type !== 'u32' && type !== 'i32') throw new TypeError(`input does not support ${type}`);
+  if (input.value.trim() === '') throw new TypeError(`expected ${type} input`);
+  const value = Number(input.value);
+  const minimum = type === 'i32' ? -0x80000000 : 0;
+  const maximum = type === 'i32' ? 0x7fffffff : 0xffffffff;
+  if (!Number.isInteger(value) || value < minimum || value > maximum)
+    throw new TypeError(`input is outside ${type}`);
+  return value;
+}
+
 function saveState() {
   for (const state of __page.states) {
     if (state.persisted) localStorage.setItem(__storagePrefix + state.name, JSON.stringify(__state[state.name]));
@@ -284,11 +419,59 @@ function saveState() {
 }
 
 function callVerified(element, scope, target) {
-  const fn = __exports[element.function];
-  if (typeof fn !== 'function') throw new Error(`Missing WASM export: ${element.function}`);
-  setPath(scope, target, fn(...element.args.map((arg) => evaluate(arg, scope))));
+  setPath(scope, target, callContract(element.function, element.args.map((arg) => evaluate(arg, scope))));
   saveState();
   render();
+}
+
+function applyReducerTransition(element) {
+  const nextState = structuredClone(__state);
+  let updateIndex = 0;
+  let functionName = null;
+  try {
+    for (; updateIndex < element.updates.length; updateIndex++) {
+      const update = element.updates[updateIndex];
+      functionName = update.function;
+      const value = callContract(update.function, update.args.map((arg) => evaluate(arg, nextState)));
+      setPath(nextState, update.state, value);
+    }
+  } catch (error) {
+    const cause = applicationError(error, functionName);
+    const failure = new Error(`${cause.message}; transition ${element.event} failed at update ${updateIndex + 1}`);
+    failure.category = 'APPLICATION_TRANSITION_FAILURE';
+    failure.source = cause.source;
+    failure.contract = cause.contract;
+    failure.event = element.event;
+    failure.failedUpdate = updateIndex;
+    failure.cause = cause;
+    __lastTransition = {
+      event: element.event,
+      status: 'FAILED',
+      updatesApplied: 0,
+      failedUpdate: updateIndex,
+      state: structuredClone(__state),
+      error: failure,
+    };
+    reportApplicationError(failure);
+    return __lastTransition;
+  }
+
+  for (const key of Object.keys(__state)) delete __state[key];
+  Object.assign(__state, nextState);
+  __lastTransition = {
+    event: element.event,
+    status: 'APPLIED',
+    updatesApplied: element.updates.length,
+    state: structuredClone(__state),
+  };
+  try {
+    saveState();
+    render();
+    clearApplicationError();
+  } catch (error) {
+    reportApplicationError(error);
+  }
+  return __lastTransition;
 }
 
 function renderElement(element, root, scope) {
@@ -320,12 +503,21 @@ function renderElement(element, root, scope) {
     return;
   }
   if (element.kind === 'input') {
+    const state = __page.states.find((candidate) => candidate.name === element.state);
     const input = document.createElement('input');
-    input.value = getPath(__state, element.state) ?? '';
+    input.type = state?.type === 'bool' ? 'checkbox' : state?.type === 'u32' || state?.type === 'i32' ? 'number' : 'text';
+    input.step = input.type === 'number' ? '1' : undefined;
+    if (input.type === 'checkbox') input.checked = getPath(__state, element.state) ?? false;
+    else input.value = getPath(__state, element.state) ?? '';
     input.placeholder = element.placeholder;
-    input.addEventListener('input', () => {
-      setPath(__state, element.state, input.value);
-      saveState();
+    input.addEventListener('change', () => {
+      try {
+        setPath(__state, element.state, parseInputValue(input, state?.type ?? 'unsupported'));
+        saveState();
+        clearApplicationError();
+      } catch (error) {
+        reportApplicationError(error);
+      }
     });
     root.append(input);
     return;
@@ -345,7 +537,10 @@ function renderElement(element, root, scope) {
     const button = document.createElement('button');
     button.type = 'button';
     button.textContent = element.label;
-    button.addEventListener('click', () => callVerified(element, scope, element.state));
+    button.addEventListener('click', () => {
+      try { callVerified(element, scope, element.state); clearApplicationError(); }
+      catch (error) { reportApplicationError(error, element.function); }
+    });
     root.append(button);
     return;
   }
@@ -354,11 +549,14 @@ function renderElement(element, root, scope) {
     button.type = 'button';
     button.textContent = element.label;
     button.addEventListener('click', () => {
-      const list = getPath(__state, element.state);
-      if (!Array.isArray(list)) throw new Error(`State is not a list: ${element.state}`);
-      list.push(evaluate(element.value, __state));
-      saveState();
-      render();
+      try {
+        const list = getPath(__state, element.state);
+        if (!Array.isArray(list)) throw new Error(`State is not a list: ${element.state}`);
+        list.push(evaluate(element.value, __state));
+        saveState();
+        render();
+        clearApplicationError();
+      } catch (error) { reportApplicationError(error); }
     });
     root.append(button);
     return;
@@ -367,15 +565,7 @@ function renderElement(element, root, scope) {
     const button = document.createElement('button');
     button.type = 'button';
     button.textContent = element.label;
-    button.addEventListener('click', () => {
-      for (const update of element.updates) {
-        const fn = __exports[update.function];
-        if (typeof fn !== 'function') throw new Error(`Missing WASM export: ${update.function}`);
-        setPath(__state, update.state, fn(...update.args.map((arg) => evaluate(arg))));
-      }
-      saveState();
-      render();
-    });
+    button.addEventListener('click', () => applyReducerTransition(element));
     root.append(button);
   }
 }
@@ -400,19 +590,44 @@ async function boot() {
     }
     __state[state.name] = evaluate(state.initial);
   }
-  window.synthetix = { exports: __exports, state: __state };
+  window.synthetix = {
+    state: __state,
+    call: callContract,
+    registerEffectAdapter(adapter) {
+      if (typeof adapter !== 'function') throw reportApplicationError(new TypeError('effect adapter must be a function'));
+      __effectAdapter = adapter;
+    },
+    async requestEffect(request, targetState = null) {
+      try {
+        if (!request || typeof request.name !== 'string' || !Array.isArray(request.inputs))
+          throw new TypeError('effect request must contain a name and inputs');
+        if (!__effectAdapter) throw new Error(`No effect adapter registered for ${request.name}`);
+        const result = await __effectAdapter(request);
+        if (targetState !== null) {
+          setPath(__state, targetState, result);
+          saveState();
+          render();
+        }
+        clearApplicationError();
+        return result;
+      } catch (error) {
+        throw reportApplicationError(error);
+      }
+    },
+    get lastError() { return __lastError; },
+    get lastTransition() { return __lastTransition; },
+  };
   render();
 }
 
 boot().catch((error) => {
   const node = document.querySelector('#synthetix-error');
-  node.hidden = false;
-  node.textContent = error.message;
+  reportApplicationError(error);
 });
 
 // Local development uses polling instead of a WebSocket so the dev server stays dependency-free.
 let __devVersion = null;
-setInterval(async () => {
+    setInterval(async () => {
   try {
     const response = await fetch('/__synthetix/version', { cache: 'no-store' });
     if (!response.ok) return;
@@ -428,19 +643,22 @@ setInterval(async () => {
 }, 500);
 "#
     .to_string();
-    script = script.replace("__PAGE_JSON__", &page);
+    script = script
+        .replace("__PAGE_JSON__", &page)
+        .replace("__CONTRACTS__", &contracts);
     script
 }
 
-fn page_json(linked: &LinkedPage) -> String {
+fn page_json(linked: &LinkedPage, root: &Path) -> String {
     let page = &linked.page;
     let states = page
         .states
         .iter()
         .map(|state| {
             format!(
-                "{{\"name\":{},\"initial\":{},\"persisted\":{}}}",
+                "{{\"name\":{},\"type\":{},\"initial\":{},\"persisted\":{}}}",
                 json_string(&state.name),
+                json_string(state_type_name(&state.ty)),
                 expr_json(&state.initial).unwrap_or_else(|error| {
                     format!("{{\"kind\":\"error\",\"message\":{}}}", json_string(&error))
                 }),
@@ -482,8 +700,9 @@ fn page_json(linked: &LinkedPage) -> String {
         })
         .collect::<Vec<_>>();
     format!(
-        "{{\"name\":{},\"states\":[{}],\"reducers\":[{}],\"elements\":[{}]}}",
+        "{{\"name\":{},\"source\":{},\"states\":[{}],\"reducers\":[{}],\"elements\":[{}]}}",
         json_string(&page.name),
+        json_string(&source_label(root, &linked.source)),
         states.join(","),
         reducers.join(","),
         elements.join(",")
@@ -549,8 +768,9 @@ fn element_json(element: &PageElement, reducers: &[Reducer]) -> String {
                 })
                 .unwrap_or_default();
             format!(
-                "{{\"kind\":\"reducer\",\"label\":{},\"updates\":[{}]}}",
+                "{{\"kind\":\"reducer\",\"label\":{},\"event\":{},\"updates\":[{}]}}",
                 json_string(label),
+                json_string(reducer),
                 updates
             )
         }
@@ -600,14 +820,16 @@ fn generic_page_json(project: &Project) -> String {
         .iter()
         .map(|param| {
             format!(
-                "{{\"name\":{},\"initial\":{}}}",
+                "{{\"name\":{},\"type\":{},\"initial\":{}}}",
                 json_string(&param.name),
+                json_string(state_type_name(&param.ty)),
                 initial_json(&param.ty)
             )
         })
         .collect::<Vec<_>>();
     states.push(format!(
-        "{{\"name\":\"result\",\"initial\":{}}}",
+        "{{\"name\":\"result\",\"type\":{},\"initial\":{}}}",
+        json_string(state_type_name(&contract.return_type)),
         initial_json(&contract.return_type)
     ));
     let args = contract
@@ -620,13 +842,85 @@ fn generic_page_json(project: &Project) -> String {
             )
         })
         .collect::<Vec<_>>();
-    format!(
-        "{{\"name\":{},\"states\":[{}],\"elements\":[{{\"kind\":\"show\",\"state\":\"result\"}},{{\"kind\":\"button\",\"label\":\"실행\",\"state\":\"result\",\"function\":{},\"args\":[{}]}}]}}",
-        json_string(&contract.name),
-        states.join(","),
+    let mut elements = contract
+        .params
+        .iter()
+        .map(|param| {
+            format!(
+                "{{\"kind\":\"input\",\"state\":{},\"placeholder\":{}}}",
+                json_string(&param.name),
+                json_string(&param.name)
+            )
+        })
+        .collect::<Vec<_>>();
+    elements.push("{\"kind\":\"show\",\"state\":\"result\"}".to_string());
+    elements.push(format!(
+        "{{\"kind\":\"button\",\"label\":\"실행\",\"state\":\"result\",\"function\":{},\"args\":[{}]}}",
         json_string(&contract.name),
         args.join(",")
+    ));
+    format!(
+        "{{\"name\":{},\"source\":{},\"states\":[{}],\"elements\":[{}]}}",
+        json_string(&contract.name),
+        json_string(&source_label(
+            &project.config.root,
+            &project.contracts[0].source
+        )),
+        states.join(","),
+        elements.join(",")
     )
+}
+
+fn contracts_json(project: &Project) -> String {
+    let contracts = project
+        .contracts
+        .iter()
+        .map(|linked| {
+            let params = linked
+                .contract
+                .params
+                .iter()
+                .map(|param| json_string(state_type_name(&param.ty)))
+                .collect::<Vec<_>>()
+                .join(",");
+            let requires = if linked.contract.requires.is_empty() {
+                "null".to_string()
+            } else {
+                json_string(&requires_export_name(&linked.contract.name))
+            };
+            format!(
+                "{}:{{\"source\":{},\"params\":[{}],\"result\":{},\"requires\":{}}}",
+                json_string(&linked.contract.name),
+                json_string(&source_label(&project.config.root, &linked.source)),
+                params,
+                json_string(state_type_name(&linked.contract.return_type)),
+                requires
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{{{contracts}}}")
+}
+
+fn requires_export_name(contract: &str) -> String {
+    format!("__axiom_requires_{contract}")
+}
+
+fn state_type_name(ty: &Type) -> &'static str {
+    match ty {
+        Type::U32 => "u32",
+        Type::I32 => "i32",
+        Type::Bool => "bool",
+        Type::Text => "text",
+        Type::Record(_) | Type::List(_) | Type::Unknown => "application",
+    }
+}
+
+fn source_label(root: &Path, source: &Path) -> String {
+    let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let source = fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
+    let relative = source.strip_prefix(root).unwrap_or(&source);
+    relative.to_string_lossy().replace('\\', "/")
 }
 
 fn initial_json(ty: &axiom_parser::Type) -> &'static str {
@@ -964,8 +1258,8 @@ mod tests {
 
         let javascript = page_javascript(&project);
         assert!(javascript.contains("WebAssembly.instantiate(bytes, {})"));
-        assert!(javascript.contains("const fn = __exports[element.function]"));
-        assert!(javascript.contains("const fn = __exports[update.function]"));
+        assert!(javascript.contains("callContract(element.function"));
+        assert!(javascript.contains("requestEffect(request, targetState"));
         assert!(javascript.contains("fetch('./app.wasm')"));
     }
 
@@ -1018,6 +1312,11 @@ mod tests {
     fn generated_browser_runtime_instantiates_wasm_and_matches_scalar_backends() {
         let definitions = [
             (
+                "mul8",
+                "contract mul8(x: u32) -> u32 { ensures result == x *% 8; }",
+                Expr::Mul(Box::new(Expr::Arg(0)), Box::new(Expr::Const(8))),
+            ),
+            (
                 "add_wrap",
                 "contract add_wrap(x: u32, y: u32) -> u32 { ensures result == x +% y; }",
                 Expr::Add(Box::new(Expr::Arg(0)), Box::new(Expr::Arg(1))),
@@ -1056,7 +1355,7 @@ mod tests {
             });
         }
 
-        let buttons = definitions
+        let buttons: Vec<PageElement> = definitions
             .iter()
             .map(|(name, _, _)| PageElement::Button {
                 label: (*name).to_string(),
@@ -1067,10 +1366,24 @@ mod tests {
                     SpecExpr::Ident("y".to_string()),
                 ]
                 .into_iter()
-                .take(if *name == "bool_identity" { 1 } else { 2 })
+                .take(if matches!(*name, "bool_identity" | "mul8") {
+                    1
+                } else {
+                    2
+                })
                 .collect(),
             })
             .collect();
+        let mut elements = vec![
+            PageElement::Input {
+                state: "x".to_string(),
+                placeholder: "x".to_string(),
+            },
+            PageElement::Show {
+                state: "result".to_string(),
+            },
+        ];
+        elements.extend(buttons);
         let page = Page {
             name: "Conformance".to_string(),
             states: vec![
@@ -1092,7 +1405,7 @@ mod tests {
             ],
             persisted: Vec::new(),
             reducers: Vec::new(),
-            elements: buttons,
+            elements,
         };
         let contracts_for_project = contracts.clone();
         let project = Project {
@@ -1113,6 +1426,7 @@ mod tests {
         let javascript = page_javascript(&project);
         let wasm = axiom_wasm::emit_functions(&exports).unwrap();
         let cases = [
+            ("mul8", [5, 0]),
             ("add_wrap", [u32::MAX, 1]),
             ("add_wrap", [0x7fff_ffff, 1]),
             ("mul_wrap", [u32::MAX, 2]),
@@ -1172,10 +1486,11 @@ const vm = require('node:vm');
 const bytes = fs.readFileSync(process.env.AXIOM_TEST_WASM);
 const cases = [{cases_js}];
 class Element {{
-  constructor(tagName) {{ this.tagName = tagName; this.children = []; this.listeners = {{}}; }}
+  constructor(tagName) {{ this.tagName = tagName; this.children = []; this.listeners = {{}}; this.dataset = {{}}; this.value = ''; this.checked = false; }}
   append(...items) {{ this.children.push(...items); }}
   replaceChildren() {{ this.children = []; }}
   addEventListener(name, callback) {{ this.listeners[name] = callback; }}
+  dispatch(name) {{ this.listeners[name]?.({{ target: this }}); }}
   click() {{ this.listeners.click?.(); }}
 }}
 const root = new Element('main');
@@ -1198,14 +1513,46 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
   if (!window.synthetix) throw new Error('generated runtime did not instantiate WASM');
   const output = [];
   for (const item of cases) {{
-    window.synthetix.state.x = item.inputs[0];
-    window.synthetix.state.y = item.inputs[1];
+    window.synthetix.state.x = item.name === 'bool_identity'
+      ? item.inputs[0] !== 0
+      : item.name === 'signed_lt' ? item.inputs[0] | 0 : item.inputs[0];
+    window.synthetix.state.y = item.name === 'signed_lt' ? item.inputs[1] | 0 : item.inputs[1];
     const button = root.children.find((node) => node.tagName === 'button' && node.textContent === item.name);
     if (!button) throw new Error(`missing generated button: ${{item.name}}`);
     button.click();
     output.push(window.synthetix.state.result >>> 0);
   }}
-  process.stdout.write(output.join(','));
+  const input = root.children.find((node) => node.tagName === 'input');
+  window.synthetix.state.x = 7;
+  input.value = '4294967296';
+  input.dispatch('change');
+  const invalid = window.synthetix.lastError;
+  const invalidLine = [invalid?.category, invalid?.source, window.synthetix.state.x, String(error.textContent.includes('COUNTEREXAMPLE'))].join('|');
+
+  input.value = '5';
+  input.dispatch('change');
+  const mul8 = root.children.find((node) => node.tagName === 'button' && node.textContent === 'mul8');
+  mul8.click();
+  const outputNode = root.children.find((node) => node.tagName === 'output');
+  const flowLine = [window.synthetix.state.x, window.synthetix.state.result, outputNode.textContent].join('|');
+
+  window.synthetix.registerEffectAdapter(async (request) => {{
+    if (request.name === 'double') return request.inputs[0] * 2;
+    throw new Error('adapter unavailable');
+  }});
+  await window.synthetix.requestEffect({{ name: 'double', inputs: [3] }}, 'result');
+  const effectOutput = root.children.find((node) => node.tagName === 'output');
+  const effectLine = [window.synthetix.state.result, effectOutput.textContent].join('|');
+
+  window.synthetix.state.x = '5';
+  const invalidCall = root.children.find((node) => node.tagName === 'button' && node.textContent === 'mul8');
+  invalidCall.click();
+  const callError = window.synthetix.lastError;
+  const callErrorLine = [callError?.category, callError?.source, callError?.contract, String(error.textContent.includes('COUNTEREXAMPLE'))].join('|');
+
+  const effectFailure = await window.synthetix.requestEffect({{ name: 'offline', inputs: [] }}, 'result').catch((failure) => failure);
+  const effectFailureLine = [effectFailure?.category, effectFailure?.source, window.synthetix.state.result, String(error.textContent.includes('COUNTEREXAMPLE'))].join('|');
+  process.stdout.write([output.join(','), invalidLine, flowLine, effectLine, callErrorLine, effectFailureLine].join('\n'));
 }})().catch((error) => {{ console.error(error); process.exitCode = 1; }});
 "#
         );
@@ -1221,7 +1568,10 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
             "browser runtime failed: {}",
             String::from_utf8_lossy(&result.stderr)
         );
-        let browser_results = String::from_utf8(result.stdout)
+        let output = String::from_utf8(result.stdout).unwrap();
+        let mut lines = output.lines();
+        let browser_results = lines
+            .next()
             .unwrap()
             .split(',')
             .map(|value| value.parse::<u32>().unwrap())
@@ -1231,6 +1581,293 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
             .map(|(name, inputs)| candidates[name].eval(inputs))
             .collect::<Vec<_>>();
         assert_eq!(browser_results, expected_results);
+        assert_eq!(
+            lines.next(),
+            Some("APPLICATION_RUNTIME_ERROR|main.ax|7|false")
+        );
+        assert_eq!(lines.next(), Some("5|40|40"));
+        assert_eq!(lines.next(), Some("6|6"));
+        assert_eq!(
+            lines.next(),
+            Some("APPLICATION_RUNTIME_ERROR|main.ax|mul8|false")
+        );
+        assert_eq!(
+            lines.next(),
+            Some("APPLICATION_RUNTIME_ERROR|main.ax|6|false")
+        );
+        assert!(lines.next().is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn built_web_app_runs_input_state_verified_wasm_and_effect_runtime() {
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-web-runtime-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("main.ax"),
+            "contract mul8(x: u32) -> u32 { ensures result == x *% 8; }\n\
+             contract positive(x: u32) -> u32 { requires x > 0; ensures result == x; }\n\
+             contract bool_identity(value: bool) -> bool { ensures result == value; }\n\
+             page Counter {\n\
+               state value: number = 0;\n\
+               state result: number = 0;\n\
+               state guarded_result: number = 0;\n\
+               state ready: bool = false;\n\
+               state ready_result: bool = false;\n\
+               input value placeholder \"number\";\n\
+               input ready placeholder \"ready\";\n\
+               show result;\n\
+               show guarded_result;\n\
+               show ready_result;\n\
+               button \"run\" updates result with mul8(value);\n\
+               button \"guard\" updates guarded_result with positive(value);\n\
+               button \"check\" updates ready_result with bool_identity(ready);\n\
+             }\n",
+        )
+        .unwrap();
+        let config = root.join("synthetix.toml");
+        std::fs::write(
+            &config,
+            "[project]\nentry = \"main.ax\"\ntarget = \"web\"\n",
+        )
+        .unwrap();
+        let output = root.join("dist");
+        build(&config, &output).unwrap();
+
+        let script = r#"
+const fs = require('node:fs');
+const vm = require('node:vm');
+const bytes = fs.readFileSync(process.env.AXIOM_TEST_WASM);
+class Element {
+  constructor(tagName) { this.tagName = tagName; this.children = []; this.listeners = {}; this.dataset = {}; this.value = ''; this.checked = false; this.hidden = true; this.textContent = ''; }
+  append(...items) { this.children.push(...items); }
+  replaceChildren() { this.children = []; }
+  addEventListener(name, callback) { this.listeners[name] = callback; }
+  dispatch(name) { this.listeners[name]?.({ target: this }); }
+  click() { this.listeners.click?.(); }
+}
+const root = new Element('main');
+const error = new Element('div');
+global.window = {};
+global.location = { reload() {} };
+global.localStorage = { getItem() { return null; }, setItem() {} };
+global.document = {
+  querySelector(selector) { return selector === '#app' ? root : error; },
+  createElement(tagName) { return new Element(tagName); },
+};
+global.setInterval = () => 0;
+global.fetch = async (url) => url === './app.wasm'
+  ? { ok: true, arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) }
+  : { ok: false, text: async () => '' };
+vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
+(async () => {
+  for (let attempt = 0; attempt < 100 && !window.synthetix; attempt++)
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  if (!window.synthetix) throw new Error('generated runtime did not instantiate verified WASM');
+  const input = root.children.find((node) => node.tagName === 'input');
+  if (input.type !== 'number') throw new Error(`unexpected input type: ${input.type}`);
+  input.value = '5';
+  input.dispatch('change');
+  const run = root.children.find((node) => node.tagName === 'button' && node.textContent === 'run');
+  run.click();
+  const rendered = root.children.find((node) => node.tagName === 'output');
+  const flow = [window.synthetix.state.value, window.synthetix.state.result, rendered.textContent].join('|');
+
+  const invalidInput = root.children.find((node) => node.tagName === 'input');
+  invalidInput.value = '4294967296';
+  invalidInput.dispatch('change');
+  const invalid = [window.synthetix.lastError?.category, window.synthetix.lastError?.source, window.synthetix.state.value, String(error.textContent.includes('COUNTEREXAMPLE'))].join('|');
+
+  const guardedInput = root.children.find((node) => node.tagName === 'input' && node.type === 'number');
+  guardedInput.value = '0';
+  guardedInput.dispatch('change');
+  root.children.find((node) => node.tagName === 'button' && node.textContent === 'guard').click();
+  const precondition = [window.synthetix.lastError?.category, window.synthetix.lastError?.source, window.synthetix.lastError?.contract, window.synthetix.state.guarded_result, String(error.textContent.includes('COUNTEREXAMPLE'))].join('|');
+
+  window.synthetix.registerEffectAdapter(async (request) => request.inputs[0] * 2);
+  await window.synthetix.requestEffect({ name: 'double', inputs: [3] }, 'result');
+  const effectRendered = root.children.find((node) => node.tagName === 'output');
+  const effect = [window.synthetix.state.result, effectRendered.textContent].join('|');
+
+  const checkbox = root.children.find((node) => node.tagName === 'input' && node.type === 'checkbox');
+  checkbox.checked = true;
+  checkbox.dispatch('change');
+  root.children.find((node) => node.tagName === 'button' && node.textContent === 'check').click();
+  const booleanOutput = root.children.find((node) => node.tagName === 'output' && node.dataset.state === 'ready_result');
+  const booleanFlow = [window.synthetix.state.ready, window.synthetix.state.ready_result, booleanOutput.textContent].join('|');
+
+  window.synthetix.registerEffectAdapter(async () => { throw new Error('offline'); });
+  const failure = await window.synthetix.requestEffect({ name: 'offline', inputs: [] }, 'result').catch((error) => error);
+  const failedEffect = [failure?.category, failure?.source, window.synthetix.state.result, String(error.textContent.includes('COUNTEREXAMPLE'))].join('|');
+  process.stdout.write([flow, invalid, precondition, effect, booleanFlow, failedEffect].join('\n'));
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"#;
+        let result = std::process::Command::new("node")
+            .arg("-e")
+            .arg(script)
+            .env("AXIOM_TEST_JS", output.join("app.js"))
+            .env("AXIOM_TEST_WASM", output.join("app.wasm"))
+            .output()
+            .expect("Node.js is required to execute the generated browser runtime");
+        assert!(
+            result.status.success(),
+            "web runtime failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let stdout = String::from_utf8(result.stdout).unwrap();
+        let mut lines = stdout.lines();
+        assert_eq!(lines.next(), Some("5|40|40"));
+        assert_eq!(
+            lines.next(),
+            Some("APPLICATION_RUNTIME_ERROR|main.ax|5|false")
+        );
+        assert_eq!(
+            lines.next(),
+            Some("APPLICATION_RUNTIME_ERROR|main.ax|positive|0|false")
+        );
+        assert_eq!(lines.next(), Some("6|6"));
+        assert_eq!(lines.next(), Some("true|true|true"));
+        assert_eq!(
+            lines.next(),
+            Some("APPLICATION_RUNTIME_ERROR|main.ax|6|false")
+        );
+        assert!(lines.next().is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reducer_transitions_are_ordered_deterministic_and_atomic() {
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-web-transition-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("main.ax"),
+            "contract increment(value: u32) -> u32 { ensures result == value +% 1; }\n\
+             contract double(value: u32) -> u32 { ensures result == value *% 2; }\n\
+             contract positive(value: u32) -> u32 { requires value > 10; ensures result == value; }\n\
+             page Counter {\n\
+               state value: number = 1;\n\
+               state doubled: number = 0;\n\
+             reducer ordered {\n\
+               updates value with increment(value);\n\
+               updates doubled with double(value);\n\
+             }\n\
+             reducer step {\n\
+               updates value with increment(value);\n\
+             }\n\
+             reducer failing {\n\
+                 updates value with increment(value);\n\
+                 updates doubled with positive(value);\n\
+               }\n\
+               show value;\n\
+               show doubled;\n\
+               button \"ordered\" runs ordered;\n\
+               button \"step\" runs step;\n\
+               button \"fail\" runs failing;\n\
+             }\n",
+        )
+        .unwrap();
+        let config = root.join("synthetix.toml");
+        std::fs::write(
+            &config,
+            "[project]\nentry = \"main.ax\"\ntarget = \"web\"\n",
+        )
+        .unwrap();
+        let output = root.join("dist");
+        build(&config, &output).unwrap();
+
+        let script = r#"
+const fs = require('node:fs');
+const vm = require('node:vm');
+const bytes = fs.readFileSync(process.env.AXIOM_TEST_WASM);
+class Element {
+  constructor(tagName) { this.tagName = tagName; this.children = []; this.listeners = {}; this.dataset = {}; this.textContent = ''; }
+  append(...items) { this.children.push(...items); }
+  replaceChildren() { this.children = []; }
+  addEventListener(name, callback) { this.listeners[name] = callback; }
+  click() { this.listeners.click?.(); }
+}
+const root = new Element('main');
+const error = new Element('div');
+global.window = {};
+global.location = { reload() {} };
+global.localStorage = { getItem() { return null; }, setItem() {} };
+global.document = {
+  querySelector(selector) { return selector === '#app' ? root : error; },
+  createElement(tagName) { return new Element(tagName); },
+};
+global.setInterval = () => 0;
+global.fetch = async (url) => url === './app.wasm'
+  ? { ok: true, arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) }
+  : { ok: false, text: async () => '' };
+vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
+(async () => {
+  for (let attempt = 0; attempt < 100 && !window.synthetix; attempt++)
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  if (!window.synthetix) throw new Error('generated runtime did not instantiate verified WASM');
+  if (window.synthetix.state.value !== 1 || window.synthetix.state.doubled !== 0)
+    throw new Error('unexpected initial state');
+  const click = (name) => root.children.find((node) => node.tagName === 'button' && node.textContent === name).click();
+  click('ordered');
+  const first = JSON.stringify(window.synthetix.lastTransition);
+  const rendered = root.children.filter((node) => node.tagName === 'output').map((node) => node.textContent);
+  window.synthetix.state.value = 1;
+  window.synthetix.state.doubled = 0;
+  click('ordered');
+  const deterministic = first === JSON.stringify(window.synthetix.lastTransition);
+  const success = [window.synthetix.state.value, window.synthetix.state.doubled, rendered[0], rendered[1], String(deterministic), window.synthetix.lastTransition.event, window.synthetix.lastTransition.status, window.synthetix.lastTransition.updatesApplied].join('|');
+
+  window.synthetix.state.value = 1;
+  window.synthetix.state.doubled = 0;
+  click('ordered');
+  click('step');
+  const firstSequence = [window.synthetix.state.value, window.synthetix.state.doubled].join('|');
+  window.synthetix.state.value = 1;
+  window.synthetix.state.doubled = 0;
+  click('step');
+  click('ordered');
+  const reversedSequence = [window.synthetix.state.value, window.synthetix.state.doubled].join('|');
+
+  window.synthetix.state.value = 1;
+  window.synthetix.state.doubled = 0;
+  click('fail');
+  const transition = window.synthetix.lastTransition;
+  const failure = [window.synthetix.state.value, window.synthetix.state.doubled, transition.status, transition.updatesApplied, transition.failedUpdate, transition.error.category, transition.error.source, transition.error.contract, String(error.textContent.includes('COUNTEREXAMPLE'))].join('|');
+  process.stdout.write([success, [firstSequence, reversedSequence].join('|'), failure].join('\n'));
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"#;
+        let result = std::process::Command::new("node")
+            .arg("-e")
+            .arg(script)
+            .env("AXIOM_TEST_JS", output.join("app.js"))
+            .env("AXIOM_TEST_WASM", output.join("app.wasm"))
+            .output()
+            .expect("Node.js is required to execute the generated browser runtime");
+        assert!(
+            result.status.success(),
+            "web transition runtime failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let stdout = String::from_utf8(result.stdout).unwrap();
+        let mut lines = stdout.lines();
+        assert_eq!(lines.next(), Some("2|4|2|4|true|ordered|APPLIED|2"));
+        assert_eq!(lines.next(), Some("3|4|3|6"));
+        assert_eq!(
+            lines.next(),
+            Some("1|0|FAILED|0|1|APPLICATION_TRANSITION_FAILURE|main.ax|positive|false")
+        );
+        assert!(lines.next().is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 

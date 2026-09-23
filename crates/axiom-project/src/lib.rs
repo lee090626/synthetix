@@ -1058,10 +1058,17 @@ fn validate_elements(
                 }
             }
             PageElement::Input { state, .. } => {
-                if path_type(state, states, records, locals, source)? != Type::Text {
+                if state.contains('.') {
                     return Err(format!(
-                        "{}: input state must be text: {state}",
-                        source.display()
+                        "{}: input requires a top-level state: {state}",
+                        source.display(),
+                    ));
+                }
+                let input_type = path_type(state, states, records, locals, source)?;
+                if !matches!(input_type, Type::Text | Type::U32 | Type::I32 | Type::Bool) {
+                    return Err(format!(
+                        "{}: input state must be text or a scalar: {state}",
+                        source.display(),
                     ));
                 }
             }

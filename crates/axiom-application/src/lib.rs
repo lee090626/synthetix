@@ -5,8 +5,10 @@ use std::{collections::BTreeMap, fmt};
 use axiom_parser::{Contract, DeclarationKind, Type};
 use axiom_synth::{SynthesisOptions, SynthesisResult};
 use axiom_verify::{ContractCheck, ProofResult, check_contract, verify};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum ApplicationValue {
     Integer(i128),
     Boolean(bool),
@@ -35,6 +37,74 @@ impl ApplicationValue {
             Self::Text(_) => "text",
             Self::List(_) => "list",
             Self::Record(_) => "record",
+        }
+    }
+
+    /// Reads one named record field without coercing its application value.
+    pub fn record_field(&self, name: &str) -> Result<&Self, ApplicationDataError> {
+        let Self::Record(fields) = self else {
+            return Err(ApplicationDataError::NotRecord(self.kind()));
+        };
+        fields
+            .get(name)
+            .ok_or_else(|| ApplicationDataError::MissingField(name.to_string()))
+    }
+
+    /// Reads one list element without treating the list itself as verified data.
+    pub fn list_item(&self, index: usize) -> Result<&Self, ApplicationDataError> {
+        let Self::List(values) = self else {
+            return Err(ApplicationDataError::NotList(self.kind()));
+        };
+        values
+            .get(index)
+            .ok_or(ApplicationDataError::IndexOutOfBounds {
+                index,
+                len: values.len(),
+            })
+    }
+
+    /// Explicitly extracts a supported scalar for subsequent contract validation.
+    pub fn verified_scalar(&self) -> Result<Self, ApplicationDataError> {
+        match self {
+            Self::Integer(_) | Self::Boolean(_) => Ok(self.clone()),
+            value => Err(ApplicationDataError::NotScalar(value.kind())),
+        }
+    }
+
+    pub fn to_json(&self) -> Result<String, ApplicationDataError> {
+        serde_json::to_string(self)
+            .map_err(|error| ApplicationDataError::Serialization(error.to_string()))
+    }
+
+    pub fn from_json(json: &str) -> Result<Self, ApplicationDataError> {
+        serde_json::from_str(json)
+            .map_err(|error| ApplicationDataError::Serialization(error.to_string()))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplicationDataError {
+    NotRecord(&'static str),
+    MissingField(String),
+    NotList(&'static str),
+    IndexOutOfBounds { index: usize, len: usize },
+    NotScalar(&'static str),
+    Serialization(String),
+}
+
+impl fmt::Display for ApplicationDataError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotRecord(received) => write!(f, "expected record, received {received}"),
+            Self::MissingField(name) => write!(f, "record field not found: {name}"),
+            Self::NotList(received) => write!(f, "expected list, received {received}"),
+            Self::IndexOutOfBounds { index, len } => {
+                write!(f, "list index {index} is outside length {len}")
+            }
+            Self::NotScalar(received) => {
+                write!(f, "application {received} value is not a verified scalar")
+            }
+            Self::Serialization(message) => write!(f, "application value JSON error: {message}"),
         }
     }
 }

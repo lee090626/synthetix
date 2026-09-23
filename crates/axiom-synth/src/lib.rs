@@ -448,6 +448,21 @@ pub fn synthesize_wasm_with_metrics(
     Ok((candidate, module, diagnostic, candidates_checked))
 }
 
+/// Lowers the contract precondition to a scalar AMI predicate for runtime checks.
+/// An empty `requires` clause list means every input satisfies the precondition.
+pub fn lower_requires(contract: &Contract) -> Result<Option<Expr>, String> {
+    contract
+        .requires
+        .iter()
+        .map(|condition| lower_spec_expr(condition, contract, &HashMap::new()))
+        .try_fold(None, |combined, condition| {
+            Ok(Some(match combined {
+                Some(previous) => Expr::And(Box::new(previous), Box::new(condition?)),
+                None => condition?,
+            }))
+        })
+}
+
 /// Checks a concrete input against every `requires` clause.
 pub fn check_requires(contract: &Contract, args: &[u32]) -> Result<(), String> {
     if args.len() != contract.params.len() {
@@ -1526,6 +1541,29 @@ mod tests {
 
         assert!(check_requires(&contract, &[2]).is_ok());
         assert!(check_requires(&contract, &[1]).is_err());
+    }
+
+    #[test]
+    fn lowered_requires_matches_the_reference_runtime_check() {
+        let contract = parse(
+            "contract bounded(x: u32) -> u32 { requires x > 0; requires x < 10; ensures result == x; }",
+        )
+        .unwrap();
+        let predicate = lower_requires(&contract).unwrap().unwrap();
+        for value in [0, 1, 9, 10, u32::MAX] {
+            assert_eq!(
+                predicate.eval(&[value]) != 0,
+                check_requires(&contract, &[value]).is_ok(),
+                "requires lowering differs at {value}"
+            );
+        }
+        assert_eq!(
+            lower_requires(
+                &parse("contract identity(x: u32) -> u32 { ensures result == x; }").unwrap()
+            )
+            .unwrap(),
+            None
+        );
     }
 
     #[test]
