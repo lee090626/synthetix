@@ -218,6 +218,15 @@ the effect adapter reads the configured API base URL through
 VSCode package is rebuilt with the current CLI and checked for source/package
 hash equality plus extension activation smoke.
 
+## v5.9 Release Path
+
+The `v5_release_path_keeps_proof_wasm_state_effect_and_static_config_together`
+integration test launches the CLI to check and build a project, inspects the
+proof manifest and static files, then runs the generated runtime against its
+WASM. It verifies that a page action and explicit verified call use the contract
+export, while a typed extern request updates application state through the host
+adapter and deployment config. The extern stays outside the proof and WASM.
+
 ## v5.0 Scope
 
 This baseline does not implement full records, lists, strings, state
