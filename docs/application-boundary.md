@@ -143,6 +143,25 @@ verified `toggle` contract, and the WASM result updates the record and rendered
 list. Serialization round-trip and malformed JSON are checked separately from
 contract verification.
 
+## v5.4 Persistence Boundary
+
+Only states declared with `persist` enter the storage envelope; all other
+states start from their declared initial values. `storage_schema_version` in
+`synthetix.toml` defaults to `1` and is stored with the persisted values. The
+runtime validates the envelope and top-level declared state types before
+restoring them. It reads the older per-state v3.1 keys once and rewrites them
+into the versioned envelope.
+
+The browser runtime uses `localStorage` through a small get/set adapter. A host
+may provide `window.synthetixStorageAdapter` with `getItem` and `setItem`. A
+schema migration receives `{ page, fromVersion, toVersion, values }` and must
+return the migrated persisted values. Hosts can set
+`window.synthetixStorageMigration` before the bundle loads, or register a
+migration through `window.synthetix.registerStorageMigration` and call
+`window.synthetix.restore()`. Corrupt data, incompatible versions without a
+migration, invalid migrated values, and storage failures are reported as
+application runtime errors; they never become proof counterexamples.
+
 ## v5.0 Scope
 
 This baseline does not implement full records, lists, strings, state
