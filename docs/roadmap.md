@@ -908,6 +908,26 @@ browser 검증은 v5.7 integration 범위에 남긴다.
 | 의존성 | v5.0~v5.8 전체 완료 이후 진행한다. |
 | 범위 밖 | Python급 범용 언어, 자체 backend framework. |
 
+### v5.9 구현 기록
+
+상태: **완료**
+
+- `v5_release_path_keeps_proof_wasm_state_effect_and_static_config_together`
+  가 실제 CLI `check`와 `build`를 실행하고 proof manifest, static asset,
+  WASM export 경계를 검사한다.
+- 같은 test가 generated browser runtime에서 verified page action과 contract
+  call, typed extern adapter, deployment config, rendered state를 end-to-end로
+  확인한다. extern은 WASM export나 proof manifest에 들어가지 않는다.
+- 이 test는 `cargo test --workspace`에 포함돼 release workflow의 workspace
+  test job에서 실행된다.
+
+검증:
+
+- `cargo test --workspace`: 117개 통과 (16 suites)
+- `cargo clippy --workspace --all-targets -- -D warnings` 통과
+- `cargo fmt --all -- --check`, `git diff --check` 통과
+- `cargo build --release -p axiom-cli` 통과
+
 ---
 
 # v6 — 증명 가능한 프로그램 규모 확장
@@ -1036,13 +1056,13 @@ v6의 loop, recursion, array, map, set은 단순한 문법 추가가 아니다. 
 `docs/v2.md`, `docs/v3.md`, `docs/semantics.md`, `docs/architecture.md`는
 각 버전의 상세 사양과 현재 구현 경계를 설명하는 하위 문서로 계속 사용한다.
 
-## 현재 다음 작업
+## 현재 상태
 
 v4.1 Semantic Baseline부터 v4.9 Freeze까지와 v5.0 Application Boundary
 Baseline, v5.1 Thin Web Runtime, v5.2 State Transition, v5.3 Data Boundary,
 v5.4 Browser Effect와 Persistence, v5.5 External Adapter, v5.6 Async와 실패
-흐름, v5.7 Web Integration Test, v5.8 Packaging과 Deployment가 완료되었다.
-다음 milestone은 v5.9 Freeze다.
+흐름, v5.7 Web Integration Test, v5.8 Packaging과 Deployment, v5.9 Freeze가
+완료되었다. v6은 미래 연구 트랙이며 이 freeze 작업에서는 시작하지 않는다.
 
 ```text
 v4.1 완료
@@ -1063,10 +1083,10 @@ v4.1 완료
   → v5.6 완료
   → v5.7 완료
   → v5.8 완료
-  → v5.9 Freeze
+  → v5.9 완료
 ```
 
 v4.9에서 의미론, 결과 상태, supported grammar, negative fixture, release
-검증 기준을 동결했고 v5.0~v5.8에서 core와 application/effect 실행,
+검증 기준을 동결했고 v5.0~v5.9에서 core와 application/effect 실행,
 state transition, data/persistence boundary, typed external adapter를
 분리했다. 일반 재귀, loop invariant, 무제한 호출은 시작하지 않는다.
