@@ -40,5 +40,20 @@ For the v2 browser workflow, create `synthetix.toml` with an `entry` file and
 run `axiom dev`. This starts the local web development server and watches the
 imported `.ax` files. See [the v2 specification](v2.md).
 
+Use the checked-in web counter as a starter project:
+
+```bash
+cp -R examples/web-counter my-counter
+cd my-counter
+axiom check
+axiom dev
+axiom build
+```
+
+The static build writes `dist/app.config.js`. Replace it for staging or
+production with browser-visible settings such as `environment` and
+`apiBaseUrl`; adapters can read them from `window.synthetix.config`. Do not put
+secrets in this file because it is served to every browser.
+
 Open the repository in VSCode, open an `.ax` file, save it once to populate
 Problems diagnostics, then click `Run Axiom`.

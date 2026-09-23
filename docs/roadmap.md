@@ -875,6 +875,30 @@ browser 검증은 v5.7 integration 범위에 남긴다.
 | 의존성 | v5.7의 runtime test 통과가 선행 조건이다. |
 | 범위 밖 | Synthetix 자체 cloud, managed DB, 인증 서비스. |
 
+### v5.8 구현 기록
+
+상태: **완료**
+
+- static bundle에 `app.config.js`를 추가했다. deployment는 공개 설정을
+  교체하고 effect adapter는 `window.synthetix.config`에서 읽는다.
+- Node integration test가 독립된 두 build의 모든 산출물을 byte 단위로
+  대조하고, staging 설정을 실제 generated runtime에서 확인한다.
+- `examples/web-counter`를 starter project로 문서화했다. release CLI로
+  해당 프로젝트의 check/build가 성공하고 `app.config.js`를 포함한 정적
+  산출물이 생성되는 것을 확인했다.
+- 현재 release CLI를 포함해 VSIX를 다시 package했다. checker가 packaged
+  `extension.js`와 CLI의 SHA-256을 source와 대조하고 activation smoke를
+  실행했다.
+
+검증:
+
+- `cargo test --workspace`: 116개 통과 (16 suites)
+- `cargo clippy --workspace --all-targets -- -D warnings` 통과
+- `cargo fmt --all -- --check`, `git diff --check` 통과
+- `cargo build --release -p axiom-cli` 통과
+- web-counter release CLI `check` 및 `build` 통과
+- VSIX package, `check-vsix.js` hash 확인 및 activation smoke 통과
+
 ## v5.9 — Freeze
 
 | 항목 | 내용 |
@@ -1017,8 +1041,8 @@ v6의 loop, recursion, array, map, set은 단순한 문법 추가가 아니다. 
 v4.1 Semantic Baseline부터 v4.9 Freeze까지와 v5.0 Application Boundary
 Baseline, v5.1 Thin Web Runtime, v5.2 State Transition, v5.3 Data Boundary,
 v5.4 Browser Effect와 Persistence, v5.5 External Adapter, v5.6 Async와 실패
-흐름, v5.7 Web Integration Test가 완료되었다. 다음 milestone은 v5.8
-Packaging과 Deployment다.
+흐름, v5.7 Web Integration Test, v5.8 Packaging과 Deployment가 완료되었다.
+다음 milestone은 v5.9 Freeze다.
 
 ```text
 v4.1 완료
@@ -1038,10 +1062,11 @@ v4.1 완료
   → v5.5 완료
   → v5.6 완료
   → v5.7 완료
-  → v5.8 Packaging과 Deployment
+  → v5.8 완료
+  → v5.9 Freeze
 ```
 
 v4.9에서 의미론, 결과 상태, supported grammar, negative fixture, release
-검증 기준을 동결했고 v5.0~v5.7에서 core와 application/effect 실행,
+검증 기준을 동결했고 v5.0~v5.8에서 core와 application/effect 실행,
 state transition, data/persistence boundary, typed external adapter를
 분리했다. 일반 재귀, loop invariant, 무제한 호출은 시작하지 않는다.

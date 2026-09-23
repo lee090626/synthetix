@@ -208,6 +208,16 @@ executed to verify reload on version change and removal of a recovered error.
 The same server test checks `app.proof.json` maps a verified contract to its
 project-relative source file.
 
+## v5.8 Static Packaging
+
+`axiom build` emits a self-contained static directory, including `app.config.js`
+for public deployment settings. The Node integration test compares all generated
+files across two builds and executes the bundle with a staging configuration;
+the effect adapter reads the configured API base URL through
+`window.synthetix.config`. `examples/web-counter` is the starter project. The
+VSCode package is rebuilt with the current CLI and checked for source/package
+hash equality plus extension activation smoke.
+
 ## v5.0 Scope
 
 This baseline does not implement full records, lists, strings, state

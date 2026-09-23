@@ -60,6 +60,10 @@ pub fn build(config_path: &Path, output_dir: &Path) -> Result<BuildResult, Strin
         page_html(&project).as_bytes(),
     )?;
     write_file(
+        &output_dir.join("app.config.js"),
+        b"window.synthetixConfig = window.synthetixConfig || {};\n",
+    )?;
+    write_file(
         &output_dir.join("app.js"),
         page_javascript(&project).as_bytes(),
     )?;
@@ -235,7 +239,7 @@ fn page_html(project: &Project) -> String {
         .map(|page| page.page.name.as_str())
         .unwrap_or("Synthetix Web App");
     format!(
-        "<!doctype html>\n<html lang=\"ko\">\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n  <title>{}</title>\n  <link rel=\"stylesheet\" href=\"./app.css\">\n</head>\n<body>\n  <main id=\"app\"><p>Loading…</p></main>\n  <div id=\"synthetix-error\" hidden></div>\n  <script type=\"module\" src=\"./app.js\"></script>\n</body>\n</html>\n",
+        "<!doctype html>\n<html lang=\"ko\">\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n  <title>{}</title>\n  <link rel=\"stylesheet\" href=\"./app.css\">\n</head>\n<body>\n  <main id=\"app\"><p>Loading…</p></main>\n  <div id=\"synthetix-error\" hidden></div>\n  <script src=\"./app.config.js\"></script>\n  <script type=\"module\" src=\"./app.js\"></script>\n</body>\n</html>\n",
         escape_html(title)
     )
 }
@@ -718,6 +722,10 @@ function render() {
 }
 
 async function boot() {
+  const runtimeConfig = window.synthetixConfig ?? {};
+  if (typeof runtimeConfig !== 'object' || runtimeConfig === null
+    || Array.isArray(runtimeConfig) || !isApplicationValue(runtimeConfig))
+    throw new TypeError('deployment config must be a JSON object');
   const bytes = await fetch('./app.wasm').then((response) => response.arrayBuffer());
   const { instance } = await WebAssembly.instantiate(bytes, {});
   __exports = instance.exports;
@@ -726,6 +734,7 @@ async function boot() {
   catch (error) { reportApplicationError(error); }
   window.synthetix = {
     state: __state,
+    config: Object.freeze({ ...runtimeConfig }),
     call: callContract,
     storageSchemaVersion: __page.storageSchemaVersion,
     registerStorageMigration(migration) {
@@ -1687,6 +1696,110 @@ mod tests {
         let proof_map = get(address, "/app.proof.json");
         assert!(proof_map.contains("\"source\":\"main.ax\""));
         server.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn static_bundle_is_reproducible_and_uses_public_environment_config() {
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-static-bundle-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("main.ax"),
+            "contract increment(x: u32) -> u32 { ensures result == x +% 1; }\n",
+        )
+        .unwrap();
+        let config = root.join("synthetix.toml");
+        std::fs::write(
+            &config,
+            "[project]\nentry = \"main.ax\"\ntarget = \"web\"\n",
+        )
+        .unwrap();
+        let first = root.join("first");
+        let second = root.join("second");
+        build(&config, &first).unwrap();
+        build(&config, &second).unwrap();
+
+        let files = [
+            "index.html",
+            "app.config.js",
+            "app.js",
+            "app.wasm",
+            "app.css",
+            "app.proof.json",
+        ];
+        for file in files {
+            assert_eq!(
+                std::fs::read(first.join(file)).unwrap(),
+                std::fs::read(second.join(file)).unwrap(),
+                "static bundle output differs for {file}"
+            );
+        }
+        let html = std::fs::read_to_string(first.join("index.html")).unwrap();
+        assert!(
+            html.find("./app.config.js").unwrap() < html.find("./app.js").unwrap(),
+            "deployment config must load before the runtime"
+        );
+        std::fs::write(
+            first.join("app.config.js"),
+            "window.synthetixConfig = Object.freeze({ environment: 'staging', apiBaseUrl: 'https://api.example.invalid' });\n",
+        )
+        .unwrap();
+        let script = r#"
+const fs = require('node:fs');
+const vm = require('node:vm');
+const bytes = fs.readFileSync(process.env.AXIOM_TEST_WASM);
+class Element {
+  constructor() { this.children = []; this.dataset = {}; this.hidden = true; this.textContent = ''; }
+  append(...items) { this.children.push(...items); }
+  replaceChildren() { this.children = []; }
+}
+const root = new Element();
+const error = new Element();
+global.window = {};
+global.location = { reload() {} };
+global.localStorage = { getItem() { return null; }, setItem() {} };
+global.document = {
+  querySelector(selector) { return selector === '#app' ? root : error; },
+  createElement() { return new Element(); },
+};
+global.setInterval = () => 0;
+global.fetch = async (url) => url === './app.wasm'
+  ? { ok: true, arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) }
+  : { ok: false, text: async () => '' };
+vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_CONFIG, 'utf8'));
+vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
+(async () => {
+  for (let attempt = 0; attempt < 100 && !window.synthetix; attempt++)
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  if (!window.synthetix) throw new Error('generated bundle did not start');
+  window.synthetix.registerEffectAdapter(async () => window.synthetix.config.apiBaseUrl);
+  const baseUrl = await window.synthetix.requestEffect({ name: 'config', inputs: [] });
+  process.stdout.write([window.synthetix.config.environment, window.synthetix.config.apiBaseUrl, baseUrl].join('|'));
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"#;
+        let result = std::process::Command::new("node")
+            .arg("-e")
+            .arg(script)
+            .env("AXIOM_TEST_CONFIG", first.join("app.config.js"))
+            .env("AXIOM_TEST_JS", first.join("app.js"))
+            .env("AXIOM_TEST_WASM", first.join("app.wasm"))
+            .output()
+            .expect("Node.js is required to execute the generated static bundle");
+        assert!(
+            result.status.success(),
+            "static bundle runtime failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(result.stdout).unwrap(),
+            "staging|https://api.example.invalid|https://api.example.invalid"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
