@@ -162,6 +162,23 @@ migration through `window.synthetix.registerStorageMigration` and call
 migration, invalid migrated values, and storage failures are reported as
 application runtime errors; they never become proof counterexamples.
 
+## v5.5 Typed External Adapter
+
+Imported `extern` declarations are emitted as runtime signature metadata and
+are excluded from verified exports and `app.wasm`. `window.synthetix.requestExtern`
+checks arguments against the declaration, sends `{ name, source, inputs,
+responseType }` to the registered effect adapter, validates the response type,
+and may store the result in a matching scalar application state. General effect
+responses must be JSON-compatible application values; unsupported values are
+rejected.
+
+`window.synthetix.lastEffect` reports `LOADING`, `SUCCEEDED`, or `ERROR` while
+the adapter runs. Adapter/network and response validation errors include the
+extern source and remain application runtime errors. A returned value stays
+application data; a caller must explicitly pass supported scalar data to a
+verified contract when it needs a verified computation. This does not prove the
+external service's factual correctness.
+
 ## v5.0 Scope
 
 This baseline does not implement full records, lists, strings, state

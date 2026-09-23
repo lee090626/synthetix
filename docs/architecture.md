@@ -54,7 +54,7 @@ axiom-application ────────┬── axiom-parser (contract signa
   validation + lowering   ├── axiom-verify
   WASM call + lifting     └── axiom-wasm
        │
-       └── EffectRequest → host adapter boundary (no adapter in v5.0)
+       └── EffectRequest → generated v5.5 host adapter boundary
 ```
 
 `axiom-application` depends on the parser and verified-core crates. No verified
@@ -66,6 +66,11 @@ Pure contract bodies continue to execute from verified WASM exports.
 `axiom-application` exposes `VerifiedComputation`, `ApplicationCall`, and
 `EffectRequest` as distinct representations. `app-run` is the executable
 vertical slice. The existing `run` command remains the v4 command path.
+
+Web builds carry imported `extern` signatures as host metadata. The signatures
+do not become WASM exports; the host adapter validates request and response
+types and keeps external results in application state until a caller explicitly
+passes supported scalars to a verified export.
 
 ## v5.1 Thin Browser Runtime
 
@@ -172,6 +177,7 @@ from proof results.
 - **Role**: Validates application values, lowers supported scalar inputs to the
   verified WASM ABI, executes a verified computation, and lifts its result.
 - **Effect boundary**: `EffectRequest` is separate from `ApplicationCall`; v5.0
-  has no host adapter implementation.
+  defines the boundary and v5.5 routes typed `extern` requests through the
+  generated browser adapter. Neither HTTP nor browser API calls enter the core.
 - **Failure boundary**: input validation, precondition, WASM runtime, output,
   and effect failures use application errors rather than `ProofResult` states.

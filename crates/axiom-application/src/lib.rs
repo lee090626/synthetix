@@ -192,6 +192,7 @@ impl fmt::Display for CompileError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoundaryError {
+    NotExternDeclaration(String),
     InputCount {
         expected: usize,
         received: usize,
@@ -217,6 +218,9 @@ pub enum BoundaryError {
 impl fmt::Display for BoundaryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::NotExternDeclaration(name) => {
+                write!(f, "{name} is not an extern declaration")
+            }
             Self::InputCount { expected, received } => {
                 write!(
                     f,
@@ -322,6 +326,7 @@ impl ApplicationCall {
 pub struct EffectRequest {
     pub name: String,
     pub inputs: Vec<ApplicationValue>,
+    pub response_type: Option<Type>,
 }
 
 impl EffectRequest {
@@ -329,7 +334,33 @@ impl EffectRequest {
         Self {
             name: name.into(),
             inputs,
+            response_type: None,
         }
+    }
+
+    pub fn from_extern(
+        declaration: &Contract,
+        inputs: Vec<ApplicationValue>,
+    ) -> Result<Self, BoundaryError> {
+        if declaration.kind != DeclarationKind::Extern {
+            return Err(BoundaryError::NotExternDeclaration(
+                declaration.name.clone(),
+            ));
+        }
+        if inputs.len() != declaration.params.len() {
+            return Err(BoundaryError::InputCount {
+                expected: declaration.params.len(),
+                received: inputs.len(),
+            });
+        }
+        for (index, (input, parameter)) in inputs.iter().zip(&declaration.params).enumerate() {
+            lower_input(input, &parameter.ty, index)?;
+        }
+        Ok(Self {
+            name: declaration.name.clone(),
+            inputs,
+            response_type: Some(declaration.return_type.clone()),
+        })
     }
 
     pub fn dispatch_without_adapter(self) -> Result<ApplicationValue, BoundaryFailure> {
@@ -622,6 +653,30 @@ mod tests {
         assert!(matches!(
             VerifiedComputation::synthesize(&external),
             Err(CompileError::ExternalBoundary)
+        ));
+    }
+
+    #[test]
+    fn extern_signature_builds_a_typed_application_effect_request() {
+        let external = parse("extern fn read_count(key: u32) -> i32;").unwrap();
+        let request =
+            EffectRequest::from_extern(&external, vec![ApplicationValue::Integer(7)]).unwrap();
+        assert_eq!(request.name, "read_count");
+        assert_eq!(request.response_type, Some(Type::I32));
+
+        assert!(matches!(
+            EffectRequest::from_extern(&external, vec![ApplicationValue::Boolean(true)]),
+            Err(BoundaryError::ValueTypeMismatch { .. })
+        ));
+        assert!(matches!(
+            EffectRequest::from_extern(&external, vec![]),
+            Err(BoundaryError::InputCount { .. })
+        ));
+        let contract =
+            parse("contract identity(key: u32) -> u32 { ensures result == key; }").unwrap();
+        assert!(matches!(
+            EffectRequest::from_extern(&contract, vec![ApplicationValue::Integer(7)]),
+            Err(BoundaryError::NotExternDeclaration(_))
         ));
     }
 }
