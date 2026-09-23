@@ -1742,6 +1742,95 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
     }
 
     #[test]
+    fn todo_example_keeps_application_data_outside_verified_scalars() {
+        let config = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/v3-todo-v31/synthetix.toml");
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-web-data-boundary-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let output = root.join("dist");
+        build(&config, &output).unwrap();
+
+        let script = r#"
+const fs = require('node:fs');
+const vm = require('node:vm');
+const bytes = fs.readFileSync(process.env.AXIOM_TEST_WASM);
+const storage = new Map();
+class Element {
+  constructor(tagName) { this.tagName = tagName; this.children = []; this.listeners = {}; this.dataset = {}; this.value = ''; this.checked = false; this.textContent = ''; }
+  append(...items) { this.children.push(...items); }
+  replaceChildren() { this.children = []; }
+  addEventListener(name, callback) { this.listeners[name] = callback; }
+  dispatch(name) { this.listeners[name]?.({ target: this }); }
+  click() { this.listeners.click?.(); }
+}
+const root = new Element('main');
+const error = new Element('div');
+global.window = {};
+global.location = { reload() {} };
+global.localStorage = {
+  getItem(key) { return storage.get(key) ?? null; },
+  setItem(key, value) { storage.set(key, String(value)); },
+};
+global.document = {
+  querySelector(selector) { return selector === '#app' ? root : error; },
+  createElement(tagName) { return new Element(tagName); },
+};
+global.setInterval = () => 0;
+global.fetch = async (url) => url === './app.wasm'
+  ? { ok: true, arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) }
+  : { ok: false, text: async () => '' };
+vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
+(async () => {
+  for (let attempt = 0; attempt < 100 && !window.synthetix; attempt++)
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  if (!window.synthetix) throw new Error('Todo runtime did not instantiate verified WASM');
+  const input = root.children.find((node) => node.tagName === 'input');
+  if (input.type !== 'text') throw new Error(`unexpected text state input type: ${input.type}`);
+  input.value = 'Task';
+  input.dispatch('change');
+  root.children.find((node) => node.tagName === 'button' && node.textContent === '추가').click();
+
+  let row = root.children.find((node) => node.tagName === 'ul')?.children[0];
+  const initial = [window.synthetix.state.draft, window.synthetix.state.todos.length,
+    window.synthetix.state.todos[0]?.title, String(window.synthetix.state.todos[0]?.done),
+    row?.children.find((node) => node.tagName === 'output')?.textContent].join('|');
+  row?.children.find((node) => node.tagName === 'button' && node.textContent === '완료 전환').click();
+
+  row = root.children.find((node) => node.tagName === 'ul')?.children[0];
+  const saved = JSON.parse(storage.get('synthetix:Todo:todos'));
+  const completed = [window.synthetix.state.todos[0]?.done,
+    row?.children.find((node) => node.tagName === 'output')?.textContent,
+    row?.children.find((node) => node.tagName === 'p')?.textContent,
+    saved[0]?.done, window.synthetix.lastError?.category ?? 'none'].join('|');
+  process.stdout.write([initial, completed].join('\n'));
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"#;
+        let result = std::process::Command::new("node")
+            .arg("-e")
+            .arg(script)
+            .env("AXIOM_TEST_JS", output.join("app.js"))
+            .env("AXIOM_TEST_WASM", output.join("app.wasm"))
+            .output()
+            .expect("Node.js is required to execute the generated browser runtime");
+        assert!(
+            result.status.success(),
+            "Todo data boundary runtime failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let stdout = String::from_utf8(result.stdout).unwrap();
+        let mut lines = stdout.lines();
+        assert_eq!(lines.next(), Some("Task|1|Task|false|Task"));
+        assert_eq!(lines.next(), Some("true|Task|완료됨|true|none"));
+        assert!(lines.next().is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn reducer_transitions_are_ordered_deterministic_and_atomic() {
         let root = std::env::temp_dir().join(format!(
             "synthetix-web-transition-{}",
