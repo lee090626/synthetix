@@ -90,6 +90,43 @@ validation uses `BoundaryError`; rejected preconditions, WASM runtime failures,
 output-lifting failures, and adapter failures use `BoundaryFailure`. These
 application failures are not reported as proof counterexamples.
 
+## v5.1 Thin Web Runtime
+
+Generated `app.js` instantiates `app.wasm` and calls only its verified exports.
+`window.synthetix.call(name, args)` and page actions check argument count and
+`u32`/`i32`/`bool` types before lowering values to the WASM ABI, then lift the
+result by the declared return type. Required preconditions run through a
+generated WASM predicate export using the same scalar lowering as the verified
+contract. Top-level page inputs accept `text`,
+`number` (`u32`), `i32`, or `bool`; nested inputs and application collections
+remain unsupported by this bridge. A page state is updated from the WASM result
+and the DOM is rendered again.
+
+The outer host can register one `window.synthetix.registerEffectAdapter`
+callback and submit `{ name, inputs }` through
+`window.synthetix.requestEffect(request, statePath)`. The adapter result may be
+written to application state and rendered. It does not enter WASM or become a
+proof assumption. Missing adapters, rejected requests, invalid inputs, and
+runtime traps are surfaced as `APPLICATION_RUNTIME_ERROR` with the source file;
+contract calls also include the contract name. They do not use `ProofResult`
+states.
+
+The generated runtime evaluates page/UI expressions for display and state
+initialization. It does not translate contract bodies into JavaScript. The
+v5.1 integration test builds an actual project, instantiates its generated WASM
+in Node.js, drives numeric and boolean inputs through state and contract calls,
+checks rendered values, and exercises successful and failing effect adapters.
+
+## v5.2 State Transitions
+
+A reducer button stages ordered updates against a clone of current application
+state. Each later update reads earlier staged values. The runtime commits the
+new state only after every verified WASM call succeeds, and exposes the
+`APPLIED` or `FAILED` transition result through `window.synthetix.lastTransition`.
+A failed update preserves the original state and reports
+`APPLICATION_TRANSITION_FAILURE` with its event, update index, source, and
+application cause.
+
 ## v5.0 Scope
 
 This baseline does not implement full records, lists, strings, state

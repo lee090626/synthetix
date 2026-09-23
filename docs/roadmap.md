@@ -627,6 +627,40 @@ HTTP/storage dependency 부재를 확인했다.
 | 의존성 | v5.0 경계 분류 이후 진행한다. |
 | 범위 밖 | React 대체, 자체 component ecosystem, DOM 전체 증명. |
 
+### v5.1 구현 기록
+
+상태: **완료**
+
+- Generated runtime이 verified WASM export만 호출하고, `u32`/`i32`/`bool`
+  입력과 결과를 선언 타입에 맞춰 lowering/lifting한다.
+- top-level `text`, `number`, `i32`, `bool` 입력을 state에 반영하고,
+  scalar state input과 WASM 결과를 화면에 렌더링한다. collection과 nested
+  field input은 거부한다.
+- 계약의 `requires` 조건도 같은 AMI predicate를 별도 WASM export로 실행해
+  입력을 거부하며 JavaScript에서 proof 의미를 재구현하지 않는다.
+- host effect adapter 등록 및 `{ name, inputs }` 요청 경로를 제공한다.
+  응답 state 반영과 render를 확인했고 adapter 오류는 application runtime
+  오류로 전달한다.
+- runtime 오류에 source 경로를 담고 `APPLICATION_RUNTIME_ERROR`로 표시한다.
+  proof result 및 counterexample로 분류하지 않는다.
+- 검증된 contract body는 JavaScript에 복제하지 않고 WASM export에서 실행한다.
+
+검증:
+
+- `built_web_app_runs_input_state_verified_wasm_and_effect_runtime`: 실제
+  `.ax` 프로젝트 build, generated WASM instantiate, scalar/boolean input,
+  state update, 결과 render, WASM precondition rejection, effect
+  success/failure 실행.
+- `generated_browser_runtime_instantiates_wasm_and_matches_scalar_backends`:
+  reference/AMI/Z3/WASM 결과와 JS runtime 결과 비교 및 runtime 오류 분류.
+- `cargo test --workspace`: 107개 통과
+- `cargo clippy --workspace --all-targets -- -D warnings` 통과
+- `cargo fmt --all -- --check`, `git diff --check` 통과
+- `cargo build --release -p axiom-cli` 통과
+
+검증 환경은 Node.js JS runtime과 테스트용 DOM shim이며, 별도 headless
+browser 검증은 v5.7 integration 범위에 남긴다.
+
 ## v5.2 — State Transition
 
 | 항목 | 내용 |
@@ -635,6 +669,31 @@ HTTP/storage dependency 부재를 확인했다.
 | 주요 작업·완료 | event, reducer, 초기 상태, 실패한 전이, 검증된 scalar contract 호출을 테스트한다. |
 | 의존성 | v5.1 runtime bridge가 필요하다. |
 | 범위 밖 | 분산 상태, 서버 동시성, 무제한 actor model. |
+
+### v5.2 구현 기록
+
+상태: **완료**
+
+- page state 초기값, click event, reducer update를 generated runtime에서
+  transition으로 실행한다. 각 update는 앞선 staged 결과를 읽는다.
+- 모든 update가 성공했을 때만 state를 commit한다. 중간 contract/precondition
+  실패 시 기존 state를 유지하고 `FAILED`, 실패 update index, 원래 state를
+  transition result에 기록한다.
+- 같은 초기 state와 event는 동일한 결과를 내고, event 순서가 바뀌면
+  sequence 결과가 달라지는 예제를 실행했다.
+- reducer 내부 contract는 build 단계에서 proof와 WASM 생성이 완료된 함수만
+  사용한다. 실패는 `APPLICATION_TRANSITION_FAILURE`와 별도 application
+  cause로 전달하고 proof counterexample 상태로 만들지 않는다.
+
+검증:
+
+- `reducer_transitions_are_ordered_deterministic_and_atomic`: 실제 project
+  build와 generated WASM runtime에서 update 순서, deterministic replay,
+  event 순서, 두 번째 update precondition failure rollback을 확인.
+- `cargo test --workspace`: 108개 통과
+- `cargo clippy --workspace --all-targets -- -D warnings` 통과
+- `cargo fmt --all -- --check`, `git diff --check` 통과
+- `cargo build --release -p axiom-cli` 통과
 
 ## v5.3 — Data Boundary
 
@@ -829,8 +888,9 @@ v6의 loop, recursion, array, map, set은 단순한 문법 추가가 아니다. 
 
 ## 현재 다음 작업
 
-v4.1 Semantic Baseline부터 v4.9 Freeze와 v5.0 Application Boundary
-Baseline까지 완료되었다. 다음 milestone은 v5.1 Thin Web Runtime이다.
+v4.1 Semantic Baseline부터 v4.9 Freeze까지와 v5.0 Application Boundary
+Baseline, v5.1 Thin Web Runtime, v5.2 State Transition이 완료되었다. 다음
+milestone은 v5.3 Data Boundary이다.
 
 ```text
 v4.1 완료
@@ -843,10 +903,11 @@ v4.1 완료
   → v4.8 완료
   → v4.9 완료
   → v5.0 완료
-  → v5.1 Thin Web Runtime
+  → v5.1 완료
+  → v5.2 완료
+  → v5.3 Data Boundary
 ```
 
 v4.9에서 의미론, 결과 상태, supported grammar, negative fixture, release
-검증 기준을 동결했고 v5.0에서 core와 application/effect 책임을 분리했다.
-v5.1 runtime 구현은 이 milestone 작업 범위에 포함되지 않는다. 일반 재귀,
-loop invariant, 무제한 호출도 시작하지 않는다.
+검증 기준을 동결했고 v5.0~v5.2에서 core와 application/effect 실행 및 state
+transition 경계를 분리했다. 일반 재귀, loop invariant, 무제한 호출은 시작하지 않는다.
