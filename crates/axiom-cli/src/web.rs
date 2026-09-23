@@ -264,6 +264,10 @@ let __lastError = null;
 let __lastTransition = null;
 let __lastEffect = null;
 let __effectAdapter = null;
+let __nextEffectId = 0;
+let __latestEffectId = 0;
+const __effectRuns = new Map();
+const __effectRetries = new Map();
 let __storageMigration = typeof window.synthetixStorageMigration === 'function'
   ? window.synthetixStorageMigration
   : null;
@@ -744,7 +748,34 @@ async function boot() {
       if (typeof adapter !== 'function') throw reportApplicationError(new TypeError('effect adapter must be a function'));
       __effectAdapter = adapter;
     },
+    cancelEffect(target = null) {
+      let cancelled = false;
+      for (const run of __effectRuns.values()) {
+        if (run.status !== 'LOADING'
+          || (target !== null && run.targetState !== target && run.name !== target)) continue;
+        run.status = 'CANCELLED';
+        run.controller.abort();
+        if (__latestEffectId === run.id)
+          __lastEffect = { name: run.name, status: 'CANCELLED', requestId: run.id, targetState: run.targetState };
+        cancelled = true;
+      }
+      return cancelled;
+    },
+    retryEffect(target = null) {
+      const latest = __lastEffect;
+      const key = target === null
+        ? latest?.targetState !== null && latest?.targetState !== undefined
+          ? `state:${latest.targetState}`
+          : `effect:${latest?.name}`
+        : `state:${target}`;
+      let retry = __effectRetries.get(key);
+      if (!retry && target !== null)
+        retry = [...__effectRetries.values()].find((candidate) => candidate.request.name === target);
+      if (!retry) throw reportApplicationError(new Error('No failed effect request to retry'));
+      return window.synthetix.requestEffect(retry.request, retry.targetState);
+    },
     async requestExtern(name, args, targetState = null) {
+      let requestId = null;
       try {
         const declaration = __externs[name];
         if (!declaration) throw new Error(`Missing extern declaration: ${name}`);
@@ -756,42 +787,90 @@ async function boot() {
           if (!state || state.type !== declaration.result)
             throw new TypeError(`${name}: target state must have type ${declaration.result}`);
         }
-        return await window.synthetix.requestEffect({
+        const pending = window.synthetix.requestEffect({
           name,
           source: declaration.source,
           inputs: args,
           responseType: declaration.result,
         }, targetState);
+        requestId = __lastEffect?.requestId ?? null;
+        return await pending;
       } catch (error) {
         const failure = reportApplicationError(error, null, __externs[name]?.source);
-        __lastEffect = { name, status: 'ERROR', error: failure };
+        if (requestId === null) __lastEffect = { name, status: 'ERROR', error: failure };
+        else if (__lastEffect?.requestId === requestId)
+          __lastEffect = { ...__lastEffect, name, status: 'ERROR', error: failure };
         throw failure;
       }
     },
     async requestEffect(request, targetState = null) {
       const name = typeof request?.name === 'string' ? request.name : null;
-      __lastEffect = { name, status: 'LOADING' };
+      const key = targetState === null ? `effect:${name}` : `state:${targetState}`;
+      const previous = __effectRuns.get(key);
+      if (previous?.status === 'LOADING') {
+        previous.status = 'STALE';
+        previous.controller.abort();
+      }
+      const controller = new AbortController();
+      const run = { id: ++__nextEffectId, key, name, targetState, controller, status: 'LOADING' };
+      __effectRuns.set(key, run);
+      __effectRetries.delete(key);
+      __latestEffectId = run.id;
+      __lastEffect = { name, status: 'LOADING', requestId: run.id, targetState };
+      let retryRequest = null;
       try {
         if (!request || typeof request.name !== 'string' || !Array.isArray(request.inputs))
           throw new TypeError('effect request must contain a name and inputs');
         if (!request.inputs.every((value) => isApplicationValue(value)))
           throw new TypeError('effect request contains an unsupported input value');
         if (!__effectAdapter) throw new Error(`No effect adapter registered for ${request.name}`);
-        const result = validateEffectResponse(
-          await __effectAdapter(request),
-          request.responseType ?? null,
-        );
+        retryRequest = { ...request, inputs: JSON.parse(JSON.stringify(request.inputs)) };
+        const signal = controller.signal;
+        let abortListener;
+        const aborted = new Promise((_, reject) => {
+          abortListener = () => {
+            const error = new Error('effect request cancelled');
+            error.name = 'AbortError';
+            reject(error);
+          };
+          signal.addEventListener('abort', abortListener, { once: true });
+          if (signal.aborted) abortListener();
+        });
+        let response;
+        try {
+          response = await Promise.race([
+            Promise.resolve().then(() => __effectAdapter(request, { signal, requestId: run.id })),
+            aborted,
+          ]);
+        } finally {
+          signal.removeEventListener('abort', abortListener);
+        }
+        if (signal.aborted || __effectRuns.get(key) !== run) return undefined;
+        const result = validateEffectResponse(response, request.responseType ?? null);
         if (targetState !== null) {
           setPath(__state, targetState, result);
           saveState();
           render();
         }
-        __lastEffect = { name, status: 'SUCCEEDED', response: result };
-        clearApplicationError();
+        run.status = 'SUCCEEDED';
+        if (__latestEffectId === run.id) {
+          __lastEffect = { name, status: 'SUCCEEDED', response: result, requestId: run.id, targetState };
+          clearApplicationError();
+        }
         return result;
       } catch (error) {
+        if (__effectRuns.get(key) !== run) return undefined;
+        if (controller.signal.aborted || error?.name === 'AbortError') {
+          run.status = 'CANCELLED';
+          if (__latestEffectId === run.id)
+            __lastEffect = { name, status: 'CANCELLED', requestId: run.id, targetState };
+          return undefined;
+        }
         const failure = reportApplicationError(error, null, request?.source);
-        __lastEffect = { name, status: 'ERROR', error: failure };
+        run.status = 'ERROR';
+        if (retryRequest) __effectRetries.set(key, { request: retryRequest, targetState });
+        if (__latestEffectId === run.id)
+          __lastEffect = { name, status: 'ERROR', error: failure, requestId: run.id, targetState };
         throw failure;
       }
     },
@@ -2330,7 +2409,72 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
   const unsupported = await window.synthetix.requestEffect({ name: 'unsupported', inputs: [] }).catch((failure) => failure);
   const unsupportedResult = [unsupported.category, window.synthetix.lastEffect.status,
     String(error.textContent.includes('COUNTEREXAMPLE'))].join('|');
-  process.stdout.write([success, invalidResult, networkResult, unsupportedResult].join('\n'));
+
+  let staleResolve;
+  let staleSignal;
+  let staleRequestId;
+  let latestRequestId;
+  window.synthetix.registerEffectAdapter(async (request, { signal, requestId }) => {
+    if (request.inputs[0] === 10) {
+      staleSignal = signal;
+      staleRequestId = requestId;
+      return new Promise((resolve) => { staleResolve = resolve; });
+    }
+    latestRequestId = requestId;
+    return request.inputs[0];
+  });
+  const staleRequest = window.synthetix.requestExtern('lookup', [10], 'count');
+  for (let attempt = 0; attempt < 100 && !staleResolve; attempt++) await Promise.resolve();
+  const latestValue = await window.synthetix.requestExtern('lookup', [20], 'count');
+  const staleValue = await staleRequest;
+  staleResolve(10);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const staleResult = [latestValue, String(staleValue === undefined), window.synthetix.state.count,
+    window.synthetix.lastEffect.response, window.synthetix.lastEffect.status,
+    String(staleSignal.aborted), String(Number.isInteger(staleRequestId) && latestRequestId > staleRequestId)].join('|');
+
+  let cancelResolve;
+  let cancelSignal;
+  window.synthetix.registerEffectAdapter(async (_request, { signal }) => {
+    cancelSignal = signal;
+    return new Promise((resolve) => { cancelResolve = resolve; });
+  });
+  const cancelRequest = window.synthetix.requestExtern('lookup', [30], 'count');
+  for (let attempt = 0; attempt < 100 && !cancelResolve; attempt++) await Promise.resolve();
+  const didCancel = window.synthetix.cancelEffect('count');
+  const cancelValue = await cancelRequest;
+  cancelResolve(30);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const cancelResult = [String(didCancel), String(cancelValue === undefined), String(cancelSignal.aborted),
+    window.synthetix.state.count, window.synthetix.lastEffect.status].join('|');
+
+  let retryCalls = 0;
+  window.synthetix.registerEffectAdapter(async (request) => {
+    retryCalls++;
+    if (retryCalls === 1) throw new Error('temporary failure');
+    return request.inputs[0];
+  });
+  const retryFailure = await window.synthetix.requestExtern('lookup', [40], 'count').catch((failure) => failure);
+  const retryStatus = window.synthetix.lastEffect.status;
+  const retriedValue = await window.synthetix.retryEffect('count');
+  const retryResult = [retryFailure.category, retryStatus, retriedValue,
+    window.synthetix.state.count, retryCalls, window.synthetix.lastEffect.status].join('|');
+
+  window.synthetix.state.ready = false;
+  window.synthetix.registerEffectAdapter(async (request) => {
+    if (request.name === 'lookup') return 50;
+    throw new Error('readiness endpoint unavailable');
+  });
+  const partial = await Promise.allSettled([
+    window.synthetix.requestExtern('lookup', [50], 'count'),
+    window.synthetix.requestExtern('readiness', [1], 'ready'),
+  ]);
+  const partialError = partial[1].reason;
+  const partialResult = [partial[0].status, partial[1].status, window.synthetix.state.count,
+    window.synthetix.state.ready, partialError.category, window.synthetix.lastEffect.status,
+    String(error.textContent.includes('COUNTEREXAMPLE'))].join('|');
+  process.stdout.write([success, invalidResult, networkResult, unsupportedResult,
+    staleResult, cancelResult, retryResult, partialResult].join('\n'));
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 "#;
         let result = std::process::Command::new("node")
@@ -2360,6 +2504,16 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
             Some("APPLICATION_RUNTIME_ERROR|api.ax|ERROR|false")
         );
         assert_eq!(lines.next(), Some("APPLICATION_RUNTIME_ERROR|ERROR|false"));
+        assert_eq!(lines.next(), Some("20|true|20|20|SUCCEEDED|true|true"));
+        assert_eq!(lines.next(), Some("true|true|true|20|CANCELLED"));
+        assert_eq!(
+            lines.next(),
+            Some("APPLICATION_RUNTIME_ERROR|ERROR|40|40|2|SUCCEEDED")
+        );
+        assert_eq!(
+            lines.next(),
+            Some("fulfilled|rejected|50|false|APPLICATION_RUNTIME_ERROR|ERROR|false")
+        );
         assert!(lines.next().is_none());
         std::fs::remove_dir_all(root).unwrap();
     }

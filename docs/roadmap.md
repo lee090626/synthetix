@@ -813,6 +813,27 @@ browser 검증은 v5.7 integration 범위에 남긴다.
 | 의존성 | v5.2 state transition과 v5.5 adapter가 필요하다. |
 | 범위 밖 | 분산 시스템 전체의 formal verification. |
 
+### v5.6 구현 기록
+
+상태: **완료**
+
+- 같은 target state의 새 요청은 이전 요청을 취소하고, 늦게 도착한 결과가
+  state, error, 최신 effect status를 덮어쓰지 못하게 한다.
+- adapter에 `AbortSignal`과 request id를 전달한다. `cancelEffect`는 요청
+  하나 또는 진행 중인 요청을 취소하고, `retryEffect`는 마지막 실패 입력을
+  다시 실행한다.
+- target이 다른 effect는 독립적으로 완료된다. 하나의 API 실패가 다른
+  target의 성공한 state 갱신을 되돌리지 않는다.
+- generated project 테스트가 실제 WASM을 instantiate해 늦은 stale 응답,
+  명시적 취소, 일시 실패 후 재시도, 부분 성공/실패를 검사한다.
+
+검증:
+
+- `cargo test --workspace`: 114개 통과 (16 suites)
+- `cargo clippy --workspace --all-targets -- -D warnings` 통과
+- `cargo fmt --all -- --check`, `git diff --check` 통과
+- `cargo build --release -p axiom-cli` 통과
+
 ## v5.7 — Web Integration Test
 
 | 항목 | 내용 |
@@ -972,8 +993,8 @@ v6의 loop, recursion, array, map, set은 단순한 문법 추가가 아니다. 
 
 v4.1 Semantic Baseline부터 v4.9 Freeze까지와 v5.0 Application Boundary
 Baseline, v5.1 Thin Web Runtime, v5.2 State Transition, v5.3 Data Boundary,
-v5.4 Browser Effect와 Persistence, v5.5 External Adapter가 완료되었다. 다음
-milestone은 v5.6 Async와 실패 흐름이다.
+v5.4 Browser Effect와 Persistence, v5.5 External Adapter, v5.6 Async와 실패
+흐름이 완료되었다. 다음 milestone은 v5.7 Web Integration Test다.
 
 ```text
 v4.1 완료
@@ -991,7 +1012,8 @@ v4.1 완료
   → v5.3 완료
   → v5.4 완료
   → v5.5 완료
-  → v5.6 Async와 실패 흐름
+  → v5.6 완료
+  → v5.7 Web Integration Test
 ```
 
 v4.9에서 의미론, 결과 상태, supported grammar, negative fixture, release
