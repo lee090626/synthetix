@@ -127,6 +127,22 @@ A failed update preserves the original state and reports
 `APPLICATION_TRANSITION_FAILURE` with its event, update index, source, and
 application cause.
 
+## v5.3 Application Data
+
+`ApplicationValue` represents integer, boolean, text, list, and record data and
+uses a tagged JSON form for serialization. `list_item` and `record_field` make
+extraction explicit; `verified_scalar` accepts only integer or boolean values.
+`ApplicationCall` then checks the extracted scalar against the contract's
+declared type and range before lowering it to WASM. Scalar results are lifted
+back into `ApplicationValue`. Text, lists, and records are never passed to the
+verified core as collections.
+
+The v3 Todo project keeps its text draft and list of record values in
+application state. Its `done` field is explicitly supplied as a boolean to the
+verified `toggle` contract, and the WASM result updates the record and rendered
+list. Serialization round-trip and malformed JSON are checked separately from
+contract verification.
+
 ## v5.0 Scope
 
 This baseline does not implement full records, lists, strings, state

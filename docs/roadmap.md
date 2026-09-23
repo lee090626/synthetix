@@ -704,6 +704,33 @@ browser 검증은 v5.7 integration 범위에 남긴다.
 | 의존성 | v5.0의 boundary 분류와 v5.2 상태 모델에 의존한다. |
 | 범위 밖 | 임의의 list/map 알고리즘에 대한 완전한 Z3 검증. |
 
+### v5.3 구현 기록
+
+상태: **완료**
+
+- `ApplicationValue`에 tagged JSON 직렬화/역직렬화를 추가했다. 잘못된 JSON,
+  variant, scalar payload는 `ApplicationDataError::Serialization`으로 거부한다.
+- list item과 record field를 명시적으로 추출하고 integer/boolean만
+  `verified_scalar()`를 통과시킨다. `ApplicationCall`은 이후에도 contract
+  타입과 범위를 검사하며 list, record, text는 core 입력으로 직접 받지 않는다.
+- `examples/v3-todo-v31`의 실제 web build/runtime에서 text draft와
+  list-of-record state를 사용하고, `done: bool`만 verified `toggle` WASM에
+  전달했다. 결과로 record state와 Todo 렌더링이 바뀌고 persisted record도
+  갱신됨을 확인했다.
+
+검증:
+
+- `application_data_round_trips_and_rejects_malformed_json`: nested list/record/text
+  round-trip 및 malformed JSON 거부.
+- `only_explicit_scalar_extraction_crosses_into_verified_wasm`: text/list/record
+  implicit lowering 거부, 추출된 bool만 verified contract에 전달.
+- `todo_example_keeps_application_data_outside_verified_scalars`: fixture의 실제
+  generated WASM 호출, record/list/text state, rendered result 및 storage 반영.
+- `cargo test --workspace`: 111개 통과
+- `cargo clippy --workspace --all-targets -- -D warnings` 통과
+- `cargo fmt --all -- --check`, `git diff --check` 통과
+- `cargo build --release -p axiom-cli` 통과
+
 ## v5.4 — Browser Effect와 Persistence
 
 | 항목 | 내용 |
@@ -889,8 +916,8 @@ v6의 loop, recursion, array, map, set은 단순한 문법 추가가 아니다. 
 ## 현재 다음 작업
 
 v4.1 Semantic Baseline부터 v4.9 Freeze까지와 v5.0 Application Boundary
-Baseline, v5.1 Thin Web Runtime, v5.2 State Transition이 완료되었다. 다음
-milestone은 v5.3 Data Boundary이다.
+Baseline, v5.1 Thin Web Runtime, v5.2 State Transition, v5.3 Data Boundary가
+완료되었다. 다음 milestone은 v5.4 Browser Effect와 Persistence이다.
 
 ```text
 v4.1 완료
@@ -905,9 +932,10 @@ v4.1 완료
   → v5.0 완료
   → v5.1 완료
   → v5.2 완료
-  → v5.3 Data Boundary
+  → v5.3 완료
+  → v5.4 Browser Effect와 Persistence
 ```
 
 v4.9에서 의미론, 결과 상태, supported grammar, negative fixture, release
-검증 기준을 동결했고 v5.0~v5.2에서 core와 application/effect 실행 및 state
-transition 경계를 분리했다. 일반 재귀, loop invariant, 무제한 호출은 시작하지 않는다.
+검증 기준을 동결했고 v5.0~v5.3에서 core와 application/effect 실행, state
+transition, data boundary를 분리했다. 일반 재귀, loop invariant, 무제한 호출은 시작하지 않는다.

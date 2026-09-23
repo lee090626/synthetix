@@ -459,6 +459,77 @@ mod tests {
     }
 
     #[test]
+    fn application_data_round_trips_and_rejects_malformed_json() {
+        let value = ApplicationValue::List(vec![
+            ApplicationValue::Text("할 일".into()),
+            ApplicationValue::Record(BTreeMap::from([
+                ("done".into(), ApplicationValue::Boolean(true)),
+                ("count".into(), ApplicationValue::Integer(3)),
+            ])),
+        ]);
+        let serialized = value.to_json().unwrap();
+        assert_eq!(ApplicationValue::from_json(&serialized).unwrap(), value);
+
+        for malformed in [
+            "",
+            "{",
+            r#"{"kind":"unknown","value":0}"#,
+            r#"{"kind":"integer","value":"not an integer"}"#,
+        ] {
+            assert!(matches!(
+                ApplicationValue::from_json(malformed),
+                Err(ApplicationDataError::Serialization(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn only_explicit_scalar_extraction_crosses_into_verified_wasm() {
+        let todo = ApplicationValue::Record(BTreeMap::from([
+            ("title".into(), ApplicationValue::Text("ship it".into())),
+            ("done".into(), ApplicationValue::Boolean(false)),
+        ]));
+        let todos = ApplicationValue::List(vec![todo]);
+        assert!(matches!(
+            todos.verified_scalar(),
+            Err(ApplicationDataError::NotScalar("list"))
+        ));
+        assert!(matches!(
+            todos
+                .list_item(0)
+                .unwrap()
+                .record_field("title")
+                .unwrap()
+                .verified_scalar(),
+            Err(ApplicationDataError::NotScalar("text"))
+        ));
+
+        let done = todos
+            .list_item(0)
+            .unwrap()
+            .record_field("done")
+            .unwrap()
+            .verified_scalar()
+            .unwrap();
+        let contract =
+            parse("contract toggle(done: bool) -> bool { ensures result == (done != true); }")
+                .unwrap();
+        let verified = VerifiedComputation::synthesize(&contract).unwrap();
+        let result = ApplicationCall::new(verified.clone(), &[done])
+            .unwrap()
+            .execute()
+            .unwrap();
+        assert_eq!(result, ApplicationValue::Boolean(true));
+
+        for value in [todos, ApplicationValue::Text("false".into())] {
+            assert!(matches!(
+                ApplicationCall::new(verified.clone(), &[value]),
+                Err(BoundaryError::ValueTypeMismatch { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn application_precondition_failure_is_not_a_proof_counterexample() {
         let contract = parse(
             "contract guarded(value: u32) -> u32 { requires value > 0; ensures result == value; }",
