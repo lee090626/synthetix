@@ -196,6 +196,18 @@ errors. The generated-runtime test covers late stale responses, explicit cancel,
 retry after a transient failure, and partial success/failure with real generated
 WASM.
 
+## v5.7 Web Integration
+
+The Node integration tests instantiate generated `app.wasm` through generated
+`app.js`, compare scalar calls with the reference evaluator and Z3 point proofs,
+and check the rendered state, invalid input, extern/API errors, storage failures,
+and source locations. A dev-project test changes a real source file through
+valid, invalid, and recovered builds, then reads the version, source error, and
+generated bundle through the HTTP routes. The runtime polling callback is
+executed to verify reload on version change and removal of a recovered error.
+The same server test checks `app.proof.json` maps a verified contract to its
+project-relative source file.
+
 ## v5.0 Scope
 
 This baseline does not implement full records, lists, strings, state
