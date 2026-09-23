@@ -1,0 +1,7 @@
+// The implementation is intentionally omitted.
+// Synthetix must find a value that is at least both inputs and one of them.
+contract maximum(first: u32, second: u32) -> u32 {
+  ensures result >= first;
+  ensures result >= second;
+  ensures result == first || result == second;
+}

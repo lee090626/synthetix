@@ -6,6 +6,9 @@ pub enum Token {
     Export,
     From,
     Contract,
+    Fn,
+    Extern,
+    Return,
     Requires,
     Ensures,
     If,
@@ -57,7 +60,11 @@ pub enum Token {
     OrOr,    // ||
     MulWrap, // *%
     AddWrap, // +%
+    SubWrap, // -%
     Shl,     // <<
+    BitAnd,  // &
+    BitOr,   // |
+    BitXor,  // ^
     Eof,
 }
 
@@ -161,8 +168,11 @@ impl<'a> Lexer<'a> {
                 if self.chars.peek() == Some(&'>') {
                     self.take_char();
                     Ok(Token::Arrow)
+                } else if self.chars.peek() == Some(&'%') {
+                    self.take_char();
+                    Ok(Token::SubWrap)
                 } else {
-                    Err(self.error("Unexpected character after '-'"))
+                    Err(self.error("Unexpected '-' (use '-%' for wrapping sub)"))
                 }
             }
             '=' => {
@@ -186,7 +196,7 @@ impl<'a> Lexer<'a> {
                     self.take_char();
                     Ok(Token::AndAnd)
                 } else {
-                    Err(self.error("Unexpected '&' (expected '&&')"))
+                    Ok(Token::BitAnd)
                 }
             }
             '|' => {
@@ -194,9 +204,10 @@ impl<'a> Lexer<'a> {
                     self.take_char();
                     Ok(Token::OrOr)
                 } else {
-                    Err(self.error("Unexpected '|' (expected '||')"))
+                    Ok(Token::BitOr)
                 }
             }
+            '^' => Ok(Token::BitXor),
             '*' => {
                 if self.chars.peek() == Some(&'%') {
                     self.take_char();
@@ -286,6 +297,9 @@ impl<'a> Lexer<'a> {
                     "export" => Ok(Token::Export),
                     "from" => Ok(Token::From),
                     "contract" | "program" => Ok(Token::Contract),
+                    "fn" => Ok(Token::Fn),
+                    "extern" => Ok(Token::Extern),
+                    "return" => Ok(Token::Return),
                     "requires" => Ok(Token::Requires),
                     "ensures" | "gives" => Ok(Token::Ensures),
                     "if" => Ok(Token::If),
@@ -317,6 +331,7 @@ impl<'a> Lexer<'a> {
                     "and" => Ok(Token::AndAnd),
                     "or" => Ok(Token::OrOr),
                     "plus" => Ok(Token::AddWrap),
+                    "minus" => Ok(Token::SubWrap),
                     "times" => Ok(Token::MulWrap),
                     "shift_left" => Ok(Token::Shl),
                     "answer" => Ok(Token::Ident("result".to_string())),

@@ -1,0 +1,4 @@
+// A bit mask keeps only the bits enabled by `bits`.
+contract mask(value: u32, bits: u32) -> u32 {
+  ensures result == value & bits;
+}

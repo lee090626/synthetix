@@ -65,7 +65,7 @@ impl<'a> Parser<'a> {
 
     /// Parses the legacy single-contract input and rejects module declarations.
     pub fn parse_contract(&mut self) -> Result<Contract, String> {
-        let contract = self.parse_contract_decl(false)?;
+        let contract = self.parse_declaration(false)?;
         if self.current != Token::Eof {
             return Err(self.error(format!(
                 "Unexpected token after contract: {:?}",
@@ -90,13 +90,15 @@ impl<'a> Parser<'a> {
                 Token::Component => components.push(self.parse_component()?),
                 Token::Export => {
                     self.advance()?;
-                    contracts.push(self.parse_contract_decl(true)?);
+                    contracts.push(self.parse_declaration(true)?);
                 }
                 Token::Contract => contracts.push(self.parse_contract_decl(false)?),
+                Token::Fn => contracts.push(self.parse_fn_decl(false)?),
+                Token::Extern => contracts.push(self.parse_extern_decl(false)?),
                 Token::Page => pages.push(self.parse_page()?),
                 ref other => {
                     return Err(self.error(format!(
-                        "Expected import, record, component, contract, or page, found {:?}",
+                        "Expected import, record, component, contract, fn, extern, or page, found {:?}",
                         other
                     )));
                 }
@@ -192,8 +194,64 @@ impl<'a> Parser<'a> {
         Ok(Component { name, elements })
     }
 
+    fn parse_declaration(&mut self, exported: bool) -> Result<Contract, String> {
+        match self.current {
+            Token::Contract => self.parse_contract_decl(exported),
+            Token::Fn => self.parse_fn_decl(exported),
+            Token::Extern => self.parse_extern_decl(exported),
+            ref other => Err(self.error(format!(
+                "Expected contract, fn, or extern, found {:?}",
+                other
+            ))),
+        }
+    }
+
     fn parse_contract_decl(&mut self, exported: bool) -> Result<Contract, String> {
         self.expect(Token::Contract)?;
+        let (name, params, return_type) = self.parse_signature()?;
+        self.parse_body(
+            DeclarationKind::Contract,
+            exported,
+            name,
+            params,
+            return_type,
+            false,
+        )
+    }
+
+    fn parse_fn_decl(&mut self, exported: bool) -> Result<Contract, String> {
+        self.expect(Token::Fn)?;
+        let (name, params, return_type) = self.parse_signature()?;
+        self.parse_body(
+            DeclarationKind::Function,
+            exported,
+            name,
+            params,
+            return_type,
+            true,
+        )
+    }
+
+    fn parse_extern_decl(&mut self, exported: bool) -> Result<Contract, String> {
+        self.expect(Token::Extern)?;
+        self.expect(Token::Fn)?;
+        let (name, params, return_type) = self.parse_signature()?;
+        self.expect(Token::Semi)?;
+        Ok(Contract {
+            kind: DeclarationKind::Extern,
+            exported,
+            name,
+            params,
+            return_type,
+            implementation: None,
+            requires: Vec::new(),
+            ensures: Vec::new(),
+            requires_spans: Vec::new(),
+            ensures_spans: Vec::new(),
+        })
+    }
+
+    fn parse_signature(&mut self) -> Result<(String, Vec<Param>, Type), String> {
         let name = self.expect_ident()?;
 
         self.expect(Token::LParen)?;
@@ -228,7 +286,20 @@ impl<'a> Parser<'a> {
         self.expect(Token::Arrow)?;
         let return_type = self.parse_type()?;
 
+        Ok((name, params, return_type))
+    }
+
+    fn parse_body(
+        &mut self,
+        kind: DeclarationKind,
+        exported: bool,
+        name: String,
+        params: Vec<Param>,
+        return_type: Type,
+        allow_return: bool,
+    ) -> Result<Contract, String> {
         self.expect(Token::LBrace)?;
+        let mut implementation = None;
         let mut requires = Vec::new();
         let mut ensures = Vec::new();
         let mut requires_spans = Vec::new();
@@ -236,6 +307,14 @@ impl<'a> Parser<'a> {
 
         while self.current != Token::RBrace && self.current != Token::Eof {
             match self.current {
+                Token::Return if allow_return => {
+                    self.advance()?;
+                    if implementation.is_some() {
+                        return Err(self.error("function can only have one return expression"));
+                    }
+                    implementation = Some(self.parse_expr(0)?);
+                    self.expect(Token::Semi)?;
+                }
                 Token::Requires | Token::When => {
                     requires_spans.push(Span {
                         line: self.current_position.line,
@@ -258,7 +337,7 @@ impl<'a> Parser<'a> {
                 }
                 _ => {
                     return Err(self.error(format!(
-                        "Unexpected token inside contract body: {:?}",
+                        "Unexpected token inside declaration body: {:?}",
                         self.current
                     )));
                 }
@@ -267,10 +346,12 @@ impl<'a> Parser<'a> {
         self.expect(Token::RBrace)?;
 
         Ok(Contract {
+            kind,
             exported,
             name,
             params,
             return_type,
+            implementation,
             requires,
             ensures,
             requires_spans,
@@ -667,9 +748,13 @@ impl<'a> Parser<'a> {
                 Token::Le => (BinaryOp::Le, 7, 8),
                 Token::Gt => (BinaryOp::Gt, 7, 8),
                 Token::Ge => (BinaryOp::Ge, 7, 8),
-                Token::AddWrap => (BinaryOp::AddWrap, 9, 10),
-                Token::Shl => (BinaryOp::Shl, 11, 12),
-                Token::MulWrap => (BinaryOp::MulWrap, 13, 14),
+                Token::BitOr => (BinaryOp::BitOr, 9, 10),
+                Token::BitXor => (BinaryOp::BitXor, 11, 12),
+                Token::BitAnd => (BinaryOp::BitAnd, 13, 14),
+                Token::AddWrap => (BinaryOp::AddWrap, 15, 16),
+                Token::SubWrap => (BinaryOp::SubWrap, 15, 16),
+                Token::Shl => (BinaryOp::Shl, 17, 18),
+                Token::MulWrap => (BinaryOp::MulWrap, 19, 20),
                 _ => break,
             };
 

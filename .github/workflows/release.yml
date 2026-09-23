@@ -39,6 +39,17 @@ jobs:
             platform: darwin-x64
     steps:
       - uses: actions/checkout@v4
+      - name: Initialize native CLI evidence
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/native-cli-evidence"
+          {
+            echo "# Native CLI verification"
+            echo
+            echo "- Runner: $RUNNER_OS / $RUNNER_ARCH"
+            echo "- Target: ${{ matrix.target }}"
+            echo "- Platform: ${{ matrix.platform }}"
+          } > "$RUNNER_TEMP/native-cli-evidence/summary.md"
       - name: Cache Rust build
         uses: actions/cache@v4
         with:
@@ -50,9 +61,94 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ matrix.target }}-
       - name: Build release CLI
+        id: build_cli
         run: |
           rustup target add ${{ matrix.target }}
           cargo build --release -p axiom-cli --target ${{ matrix.target }}
+      - name: Smoke test native release CLI
+        id: smoke_cli
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            cli="target/${{ matrix.target }}/release/axiom.exe"
+          else
+            cli="target/${{ matrix.target }}/release/axiom"
+          fi
+          evidence="$RUNNER_TEMP/native-cli-evidence"
+
+          "$cli" check examples/basics/mul8.ax > "$evidence/check.log" 2>&1
+          grep -F "contract_check: VALID" "$evidence/check.log"
+          printf '\n- Check representative .ax: PASS\n' >> "$evidence/summary.md"
+
+          "$cli" build examples/basics/mul8.ax \
+            -o "$evidence/mul8-build.wasm" \
+            --report "$evidence/mul8-build.json" \
+            > "$evidence/build.log" 2>&1
+          test -s "$evidence/mul8-build.wasm"
+          node -e 'const fs = require("node:fs"); const r = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); if (r.proof_result !== "VERIFIED" || !r.wasm_hash || !r.output) process.exit(1);' \
+            "$evidence/mul8-build.json"
+          printf '%s\n' "- Build verified .ax and emitted WASM: PASS" >> "$evidence/summary.md"
+
+          mul8_output=$("$cli" run examples/basics/mul8.ax -- 5 -o "$evidence/mul8-run.wasm" 2>&1)
+          [[ "$mul8_output" == *"result: 40"* ]]
+          test -s "$evidence/mul8-run.wasm"
+          printf '%s\n' "- mul8(5) = 40: PASS" >> "$evidence/summary.md"
+
+          signed_output=$("$cli" run examples/basics/signed_min.ax -- -1 1 -o "$evidence/signed-min.wasm" 2>&1)
+          [[ "$signed_output" == *"result: -1"* ]]
+          test -s "$evidence/signed-min.wasm"
+          printf '%s\n' "- signed_min(-1, 1) = -1: PASS" >> "$evidence/summary.md"
+
+          for fixture_case in \
+            "UNSATISFIABLE_PRECONDITION:examples/errors/unsat_precondition.ax" \
+            "UNSATISFIABLE_POSTCONDITION:examples/errors/unsat_postcondition.ax"; do
+            expected="${fixture_case%%:*}"
+            fixture="${fixture_case#*:}"
+            name="$(basename "$fixture" .ax)"
+            check_log="$evidence/$name-check.log"
+            if "$cli" check "$fixture" > "$check_log" 2>&1; then
+              cat "$check_log"
+              echo "expected $expected from $fixture check"
+              exit 1
+            else
+              status=$?
+            fi
+            [[ "$status" -eq 1 ]]
+            grep -F "$expected" "$check_log"
+
+            wasm="$evidence/$name.wasm"
+            report="$evidence/$name.json"
+            build_log="$evidence/$name-build.log"
+            if "$cli" build "$fixture" -o "$wasm" --report "$report" > "$build_log" 2>&1; then
+              cat "$build_log"
+              echo "expected $expected from $fixture build"
+              exit 1
+            else
+              status=$?
+            fi
+            [[ "$status" -eq 1 ]]
+            grep -F "$expected" "$build_log"
+            test -s "$report"
+            node -e 'const fs = require("node:fs"); const r = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); if (r.contract_check !== process.argv[2] || r.wasm_hash !== null || r.output !== null) process.exit(1);' \
+              "$report" "$expected"
+            [[ ! -e "$wasm" ]]
+            printf '%s\n' "- $fixture returns $expected (exit 1; no WASM): PASS" >> "$evidence/summary.md"
+          done
+      - name: Publish native CLI summary
+        if: always()
+        shell: bash
+        run: |
+          echo "- Release build step: ${{ steps.build_cli.outcome }}" >> "$RUNNER_TEMP/native-cli-evidence/summary.md"
+          echo "- Smoke step: ${{ steps.smoke_cli.outcome }}" >> "$RUNNER_TEMP/native-cli-evidence/summary.md"
+          cat "$RUNNER_TEMP/native-cli-evidence/summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload native CLI evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-cli-${{ matrix.platform }}
+          path: ${{ runner.temp }}/native-cli-evidence/
+          if-no-files-found: error
       - name: Package Unix binary
         if: runner.os != 'Windows'
         shell: bash
@@ -101,6 +197,7 @@ jobs:
           mkdir -p ../../release
           version=$(node -p "require('./package.json').version")
           npx --yes @vscode/vsce package --out "../../release/synthetix-vscode-${version}.vsix"
+          node ./check-vsix.js "../../release/synthetix-vscode-${version}.vsix"
       - uses: actions/upload-artifact@v4
         with:
           name: synthetix-vscode

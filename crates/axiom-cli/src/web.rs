@@ -61,6 +61,9 @@ pub fn build(config_path: &Path, output_dir: &Path) -> Result<BuildResult, Strin
     )?;
 
     println!("target: web");
+    println!("contract_check: VALID");
+    println!("synthesis_result: FOUND");
+    println!("proof_result: VERIFIED");
     println!("verified: {} contract(s)", compiled.len());
     println!("wrote: {}", output_dir.display());
     Ok(BuildResult {
@@ -76,6 +79,9 @@ pub fn check(config_path: &Path) -> Result<(), String> {
     println!("files: {}", project.files.len());
     println!("contracts: {}", compiled.len());
     println!("pages: {}", project.pages.len());
+    println!("contract_check: VALID");
+    println!("synthesis_result: FOUND");
+    println!("proof_result: VERIFIED");
     println!("verified: true");
     Ok(())
 }
@@ -136,6 +142,43 @@ fn compile_contracts(project: &Project) -> Result<Vec<CompiledFunction>, String>
         }
         let candidate = axiom_synth::synthesize(&linked.contract)
             .map_err(|error| format!("{}:{}: {error}", linked.source.display(), name))?;
+        let composition = project
+            .verify_compositional(linked, &candidate)
+            .map_err(|error| format!("{}:{}: {error}", linked.source.display(), name))?;
+        match (composition.proof, composition.diagnostic) {
+            (
+                Some(axiom_verify::ProofResult::Verified),
+                None | Some(axiom_verify::Diagnostic::AmbiguousCandidates),
+            ) => {}
+            (None, Some(axiom_verify::Diagnostic::CallPreconditionViolation { callee, span })) => {
+                let (line, column) = span.map(|span| (span.line, span.column)).unwrap_or((1, 1));
+                return Err(format!(
+                    "{}:{line}:{column}: call-site precondition for {callee} is not established",
+                    linked.source.display()
+                ));
+            }
+            (Some(axiom_verify::ProofResult::Counterexample(values)), _) => {
+                return Err(format!(
+                    "{}:{}: COUNTEREXAMPLE: compositional postcondition fails for {values:?}",
+                    linked.source.display(),
+                    linked.contract.name
+                ));
+            }
+            (Some(axiom_verify::ProofResult::SolverUnknown), _) => {
+                return Err(format!(
+                    "{}:{}: SOLVER_UNKNOWN: compositional verification returned unknown",
+                    linked.source.display(),
+                    linked.contract.name
+                ));
+            }
+            _ => {
+                return Err(format!(
+                    "{}:{}: compositional verification did not produce a proof",
+                    linked.source.display(),
+                    linked.contract.name
+                ));
+            }
+        }
         println!("verified: {name}");
         compiled.push(CompiledFunction {
             name,
@@ -659,8 +702,12 @@ fn expr_json(expr: &SpecExpr) -> Result<String, String> {
 fn binary_name(op: &BinaryOp) -> &'static str {
     match op {
         BinaryOp::AddWrap => "add",
+        BinaryOp::SubWrap => "sub",
         BinaryOp::MulWrap => "mul",
         BinaryOp::Shl => "shl",
+        BinaryOp::BitAnd => "bit_and",
+        BinaryOp::BitOr => "bit_or",
+        BinaryOp::BitXor => "bit_xor",
         BinaryOp::Eq => "eq",
         BinaryOp::Ne => "ne",
         BinaryOp::Lt => "lt",
@@ -683,7 +730,7 @@ fn proof_json(project: &Project, compiled: &[CompiledFunction]) -> String {
                 .display()
                 .to_string();
             format!(
-                "{{\"name\":{},\"source\":{},\"verified\":true,\"candidate\":{}}}",
+                "{{\"name\":{},\"source\":{},\"contract_check\":\"VALID\",\"synthesis_result\":\"FOUND\",\"proof_result\":\"VERIFIED\",\"diagnostic\":null,\"verified\":true,\"candidate\":{}}}",
                 json_string(&function.name),
                 json_string(&source),
                 json_string(&format!("{:?}", function.candidate))
@@ -691,7 +738,7 @@ fn proof_json(project: &Project, compiled: &[CompiledFunction]) -> String {
         })
         .collect::<Vec<_>>();
     format!(
-        "{{\n  \"version\": 2,\n  \"target\": \"web\",\n  \"verified\": true,\n  \"contracts\": [{}]\n}}\n",
+        "{{\n  \"version\": 3,\n  \"target\": \"web\",\n  \"contract_check\": \"VALID\",\n  \"synthesis_result\": \"FOUND\",\n  \"proof_result\": \"VERIFIED\",\n  \"diagnostic\": null,\n  \"verified\": true,\n  \"contracts\": [{}]\n}}\n",
         contracts.join(",")
     )
 }
@@ -886,3 +933,339 @@ button { border: 0; border-radius: .5rem; padding: .7rem 1rem; color: white; bac
 button:hover { background: #1d4ed8; }
 #synthetix-error { position: fixed; inset: 1rem; padding: 1rem; white-space: pre-wrap; color: #fecaca; background: #450a0a; border: 1px solid #ef4444; border-radius: .5rem; }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axiom_parser::{Page, State, Type};
+    use axiom_project::{LinkedContract, ProjectConfig};
+
+    #[test]
+    fn generated_runtime_routes_verified_calls_to_wasm() {
+        let contract = axiom_parser::parse(
+            "contract add(x: u32, y: u32) -> u32 { ensures result == x +% y; }",
+        )
+        .unwrap();
+        let project = Project {
+            config: ProjectConfig {
+                root: PathBuf::from("/tmp/synthetix"),
+                entry: PathBuf::from("/tmp/synthetix/main.ax"),
+                target: "web".to_string(),
+            },
+            contracts: vec![LinkedContract {
+                source: PathBuf::from("/tmp/synthetix/main.ax"),
+                contract,
+            }],
+            verification_summaries: Vec::new(),
+            verification_callees: HashMap::new(),
+            pages: Vec::new(),
+            files: Vec::new(),
+        };
+
+        let javascript = page_javascript(&project);
+        assert!(javascript.contains("WebAssembly.instantiate(bytes, {})"));
+        assert!(javascript.contains("const fn = __exports[element.function]"));
+        assert!(javascript.contains("const fn = __exports[update.function]"));
+        assert!(javascript.contains("fetch('./app.wasm')"));
+    }
+
+    #[test]
+    fn project_build_path_verifies_imported_requires_from_summaries() {
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-web-composition-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("positive.ax"),
+            "export contract positive(value: u32) -> u32 {\n requires value > 0;\n ensures result == value;\n}\n",
+        )
+        .unwrap();
+        let entry = root.join("entry.ax");
+        std::fs::write(
+            &entry,
+            "import { positive } from \"./positive.ax\";\ncontract total(value: u32) -> u32 {\n requires value > 0;\n ensures result == positive(value);\n}\n",
+        )
+        .unwrap();
+        let config = root.join("synthetix.toml");
+        std::fs::write(
+            &config,
+            "[project]\nentry = \"entry.ax\"\ntarget = \"web\"\n",
+        )
+        .unwrap();
+
+        let output = root.join("dist");
+        build(&config, &output).unwrap();
+        assert!(output.join("app.wasm").is_file());
+
+        std::fs::write(
+            &entry,
+            "import { positive } from \"./positive.ax\";\ncontract total(value: u32) -> u32 {\n ensures result == positive(value);\n}\n",
+        )
+        .unwrap();
+        let failed_output = root.join("failed-dist");
+        let error = build(&config, &failed_output).unwrap_err();
+        assert!(error.contains(&format!("{}:3:", entry.display())));
+        assert!(error.contains("call-site precondition for positive"));
+        assert!(!failed_output.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn generated_browser_runtime_instantiates_wasm_and_matches_scalar_backends() {
+        let definitions = [
+            (
+                "add_wrap",
+                "contract add_wrap(x: u32, y: u32) -> u32 { ensures result == x +% y; }",
+                Expr::Add(Box::new(Expr::Arg(0)), Box::new(Expr::Arg(1))),
+            ),
+            (
+                "mul_wrap",
+                "contract mul_wrap(x: u32, y: u32) -> u32 { ensures result == x *% y; }",
+                Expr::Mul(Box::new(Expr::Arg(0)), Box::new(Expr::Arg(1))),
+            ),
+            (
+                "signed_lt",
+                "contract signed_lt(x: i32, y: i32) -> bool { ensures result == (x < y); }",
+                Expr::SLt(Box::new(Expr::Arg(0)), Box::new(Expr::Arg(1))),
+            ),
+            (
+                "unsigned_lt",
+                "contract unsigned_lt(x: u32, y: u32) -> bool { ensures result == (x < y); }",
+                Expr::Lt(Box::new(Expr::Arg(0)), Box::new(Expr::Arg(1))),
+            ),
+            (
+                "bool_identity",
+                "contract bool_identity(x: bool) -> bool { ensures result == x; }",
+                Expr::Arg(0),
+            ),
+        ];
+        let mut contracts = Vec::new();
+        let mut exports = Vec::new();
+        let mut candidates = HashMap::new();
+        for (name, source, candidate) in &definitions {
+            let contract = axiom_parser::parse(source).unwrap();
+            exports.push((*name, candidate, contract.params.len() as u32));
+            candidates.insert(*name, candidate.clone());
+            contracts.push(LinkedContract {
+                source: PathBuf::from("/tmp/synthetix/main.ax"),
+                contract,
+            });
+        }
+
+        let buttons = definitions
+            .iter()
+            .map(|(name, _, _)| PageElement::Button {
+                label: (*name).to_string(),
+                state: "result".to_string(),
+                function: (*name).to_string(),
+                args: vec![
+                    SpecExpr::Ident("x".to_string()),
+                    SpecExpr::Ident("y".to_string()),
+                ]
+                .into_iter()
+                .take(if *name == "bool_identity" { 1 } else { 2 })
+                .collect(),
+            })
+            .collect();
+        let page = Page {
+            name: "Conformance".to_string(),
+            states: vec![
+                State {
+                    name: "x".to_string(),
+                    ty: Type::U32,
+                    initial: SpecExpr::Number(0),
+                },
+                State {
+                    name: "y".to_string(),
+                    ty: Type::U32,
+                    initial: SpecExpr::Number(0),
+                },
+                State {
+                    name: "result".to_string(),
+                    ty: Type::U32,
+                    initial: SpecExpr::Number(0),
+                },
+            ],
+            persisted: Vec::new(),
+            reducers: Vec::new(),
+            elements: buttons,
+        };
+        let contracts_for_project = contracts.clone();
+        let project = Project {
+            config: ProjectConfig {
+                root: PathBuf::from("/tmp/synthetix"),
+                entry: PathBuf::from("/tmp/synthetix/main.ax"),
+                target: "web".to_string(),
+            },
+            contracts,
+            verification_summaries: contracts_for_project,
+            verification_callees: HashMap::new(),
+            pages: vec![LinkedPage {
+                source: PathBuf::from("/tmp/synthetix/main.ax"),
+                page,
+            }],
+            files: Vec::new(),
+        };
+        let javascript = page_javascript(&project);
+        let wasm = axiom_wasm::emit_functions(&exports).unwrap();
+        let cases = [
+            ("add_wrap", [u32::MAX, 1]),
+            ("add_wrap", [0x7fff_ffff, 1]),
+            ("mul_wrap", [u32::MAX, 2]),
+            ("signed_lt", [u32::MAX, 1]),
+            ("signed_lt", [0x7fff_ffff, 0x8000_0000]),
+            ("unsigned_lt", [u32::MAX, 1]),
+            ("unsigned_lt", [0, 1]),
+            ("bool_identity", [0, 0]),
+            ("bool_identity", [1, 0]),
+        ];
+
+        for (name, inputs) in cases {
+            let candidate = &candidates[name];
+            let linked = project
+                .verification_summaries
+                .iter()
+                .find(|linked| linked.contract.name == name)
+                .unwrap();
+            let values = &inputs[..linked.contract.params.len()];
+            let expected = axiom_verify::reference::eval_ami(candidate, values).unwrap();
+            assert_eq!(candidate.eval(values), expected);
+            let point = point_contract(&linked.contract, &inputs, expected);
+            assert_eq!(
+                axiom_verify::verify(&point, candidate).unwrap(),
+                axiom_verify::ProofResult::Verified,
+                "Z3 point proof failed for {name}({inputs:?})"
+            );
+            let single_wasm =
+                axiom_wasm::emit(candidate, linked.contract.params.len() as u32).unwrap();
+            assert_eq!(
+                axiom_wasm::run_with_args(&single_wasm, values).unwrap(),
+                expected
+            );
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-browser-wasm-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let javascript_path = root.join("app.js");
+        let wasm_path = root.join("app.wasm");
+        std::fs::write(&javascript_path, javascript).unwrap();
+        std::fs::write(&wasm_path, wasm).unwrap();
+        let cases_js = cases
+            .iter()
+            .map(|(name, inputs)| format!("{{name:'{name}',inputs:[{},{}]}}", inputs[0], inputs[1]))
+            .collect::<Vec<_>>()
+            .join(",");
+        let script = format!(
+            r#"
+const fs = require('node:fs');
+const vm = require('node:vm');
+const bytes = fs.readFileSync(process.env.AXIOM_TEST_WASM);
+const cases = [{cases_js}];
+class Element {{
+  constructor(tagName) {{ this.tagName = tagName; this.children = []; this.listeners = {{}}; }}
+  append(...items) {{ this.children.push(...items); }}
+  replaceChildren() {{ this.children = []; }}
+  addEventListener(name, callback) {{ this.listeners[name] = callback; }}
+  click() {{ this.listeners.click?.(); }}
+}}
+const root = new Element('main');
+const error = new Element('div');
+global.window = {{}};
+global.location = {{ reload() {{}} }};
+global.localStorage = {{ getItem() {{ return null; }}, setItem() {{}} }};
+global.document = {{
+  querySelector(selector) {{ return selector === '#app' ? root : error; }},
+  createElement(tagName) {{ return new Element(tagName); }},
+}};
+global.setInterval = () => 0;
+global.fetch = async (url) => url === './app.wasm'
+  ? {{ ok: true, arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) }}
+  : {{ ok: false, text: async () => '' }};
+vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
+(async () => {{
+  for (let attempt = 0; attempt < 100 && !window.synthetix; attempt++)
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  if (!window.synthetix) throw new Error('generated runtime did not instantiate WASM');
+  const output = [];
+  for (const item of cases) {{
+    window.synthetix.state.x = item.inputs[0];
+    window.synthetix.state.y = item.inputs[1];
+    const button = root.children.find((node) => node.tagName === 'button' && node.textContent === item.name);
+    if (!button) throw new Error(`missing generated button: ${{item.name}}`);
+    button.click();
+    output.push(window.synthetix.state.result >>> 0);
+  }}
+  process.stdout.write(output.join(','));
+}})().catch((error) => {{ console.error(error); process.exitCode = 1; }});
+"#
+        );
+        let result = std::process::Command::new("node")
+            .arg("-e")
+            .arg(script)
+            .env("AXIOM_TEST_JS", &javascript_path)
+            .env("AXIOM_TEST_WASM", &wasm_path)
+            .output()
+            .expect("Node.js is required to execute the generated browser runtime");
+        assert!(
+            result.status.success(),
+            "browser runtime failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let browser_results = String::from_utf8(result.stdout)
+            .unwrap()
+            .split(',')
+            .map(|value| value.parse::<u32>().unwrap())
+            .collect::<Vec<_>>();
+        let expected_results = cases
+            .iter()
+            .map(|(name, inputs)| candidates[name].eval(inputs))
+            .collect::<Vec<_>>();
+        assert_eq!(browser_results, expected_results);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn point_contract(
+        contract: &axiom_parser::Contract,
+        inputs: &[u32; 2],
+        expected: u32,
+    ) -> axiom_parser::Contract {
+        let mut point = contract.clone();
+        point.requires = contract
+            .params
+            .iter()
+            .enumerate()
+            .map(|(index, param)| {
+                let value = match &param.ty {
+                    Type::Bool => SpecExpr::Bool(inputs[index] != 0),
+                    _ => SpecExpr::Number(inputs[index]),
+                };
+                SpecExpr::Binary(
+                    BinaryOp::Eq,
+                    Box::new(SpecExpr::Ident(param.name.clone())),
+                    Box::new(value),
+                )
+            })
+            .collect();
+        let expected = if contract.return_type == Type::Bool {
+            SpecExpr::Bool(expected != 0)
+        } else {
+            SpecExpr::Number(expected)
+        };
+        point.ensures = vec![SpecExpr::Binary(
+            BinaryOp::Eq,
+            Box::new(SpecExpr::Ident("result".to_string())),
+            Box::new(expected),
+        )];
+        point
+    }
+}

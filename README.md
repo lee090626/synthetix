@@ -77,7 +77,8 @@ synthetix/
 ├── docs/
 │   ├── architecture.md    # Component responsibilities & design principles
 │   ├── semantics.md       # Bit-vector modulo 2^32 semantics
-│   ├── roadmap.md         # Milestone plan from v0.1 to production
+│   ├── roadmap.md         # Official v4-v6 product and verification roadmap
+│   ├── v4-migration.md    # v4 frozen boundary and migration notes
 │   └── setup.md           # Fresh-checkout setup and smoke test
 ├── crates/
 │   ├── axiom-ami/         # Implemented: AMI definition and interpreter
@@ -90,7 +91,10 @@ synthetix/
 ├── editors/
 │   └── vscode/             # Initial: .ax syntax and Run command
 └── examples/
-    ├── mul8.ax
+    ├── basics/         # 기본 계약과 산술 예제
+    ├── properties/     # 구현 없이 속성만 적는 계약
+    ├── friendly/       # 쉬운 단어 문법 예제
+    ├── errors/         # 오류 메시지 확인용 예제
     ├── web-counter/       # v2: multi-file browser example
     ├── v3-status/         # v3: typed state and conditional UI
     ├── v3-todo/           # v3: state-based checklist
@@ -113,16 +117,16 @@ cargo test --workspace
 cargo build -p axiom-cli
 
 # Check a contract
-cargo run -p axiom-cli -- check examples/mul8.ax
+cargo run -p axiom-cli -- check examples/basics/mul8.ax
 
 # Synthesize and write the WASM result
-cargo run -p axiom-cli -- build examples/mul8.ax -o mul8.wasm
+cargo run -p axiom-cli -- build examples/basics/mul8.ax -o mul8.wasm
 
 # Synthesize, verify, execute, and print a result
-cargo run -p axiom-cli -- run examples/mul8.ax -- 5
+cargo run -p axiom-cli -- run examples/basics/mul8.ax -- 5
 
 # Optional JSON report and synthesis timeout
-cargo run -p axiom-cli -- run examples/mul8.ax -- 5 --report /tmp/mul8.json --timeout-ms 10000
+cargo run -p axiom-cli -- run examples/basics/mul8.ax -- 5 --report /tmp/mul8.json --timeout-ms 10000
 ```
 
 For VSCode development, open `editors` as an extension project and start the
@@ -131,8 +135,10 @@ button. The command asks for a `u32` input, runs the generated WASM, and shows
 the result in `Output → Synthetix`. See [the VSCode guide](docs/vscode.md).
 
 The proof core supports pure `u32`, signed `i32`, and `bool` values with finite conditional values.
-v3.1 adds verified scalar reducers around browser-side records, lists, text
-inputs, components, and explicit localStorage persistence. See [the v2 specification](docs/v2.md), [the v3 specification](docs/v3.md), and [the roadmap](docs/roadmap.md) for the web build boundary.
+v3.1 adds browser-side records, lists, text inputs, components, and explicit
+localStorage persistence around verified scalar reducers. See [the v2
+specification](docs/v2.md), [the v3 specification](docs/v3.md), and [the
+roadmap](docs/roadmap.md) for the web build boundary.
 
 For the browser workflow:
 
@@ -163,12 +169,14 @@ This example uses a verified `bool` contract to conditionally show a message.
 The state-based checklist example is in `examples/v3-todo`.
 
 Signed contracts and conditional numeric examples are available in
-`examples/signed_min.ax`, `examples/easy_min.ax`, `examples/easy_max.ax`, and
-`examples/easy_clamp.ax`:
+`examples/basics/signed_min.ax`, `examples/friendly/easy_min.ax`,
+`examples/friendly/easy_max.ax`, and `examples/friendly/easy_clamp.ax`:
 
 ```bash
-cargo run -p axiom-cli -- run examples/signed_min.ax -- -1 1
+cargo run -p axiom-cli -- run examples/basics/signed_min.ax -- -1 1
 ```
+
+예제 목록과 역할은 [examples/README.md](examples/README.md)에 정리되어 있습니다.
 
 ## Easy-word syntax
 

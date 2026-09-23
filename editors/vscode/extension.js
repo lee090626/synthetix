@@ -59,7 +59,7 @@ function activate(context) {
       key,
       setTimeout(() => {
         validationTimers.delete(key);
-        validateDocument(document, diagnostics);
+        validateDocument(document, diagnostics, output);
       }, 200)
     );
   };
@@ -96,6 +96,9 @@ function completionItems(document) {
   const items = [
     completion("contract", vscode.CompletionItemKind.Keyword),
     completion("program", vscode.CompletionItemKind.Keyword),
+    completion("fn", vscode.CompletionItemKind.Keyword),
+    completion("extern", vscode.CompletionItemKind.Keyword),
+    completion("return", vscode.CompletionItemKind.Keyword),
     completion("import", vscode.CompletionItemKind.Keyword),
     completion("export", vscode.CompletionItemKind.Keyword),
     completion("from", vscode.CompletionItemKind.Keyword),
@@ -193,6 +196,15 @@ function completionItems(document) {
     "program ${1:name}(${2:x}: number) -> number {\n\tgives answer equals ${2} plus ${3:1};\n}"
   );
   items.push(program);
+
+  const functionTemplate = new vscode.CompletionItem(
+    "fn template",
+    vscode.CompletionItemKind.Snippet
+  );
+  functionTemplate.insertText = new vscode.SnippetString(
+    "fn ${1:name}(${2:x: u32}) -> u32 {\n\treturn ${3:x};\n\tensures result == ${3};\n}"
+  );
+  items.push(functionTemplate);
 
   const requires = new vscode.CompletionItem(
     "requires clause",
@@ -323,7 +335,7 @@ function formatDocument(document) {
   return edits;
 }
 
-function validateDocument(document, diagnostics) {
+function validateDocument(document, diagnostics, output) {
   const workspace = vscode.workspace.getWorkspaceFolder(document.uri);
   const workspacePath =
     workspace?.uri.fsPath ?? path.dirname(document.uri.fsPath);
@@ -352,7 +364,13 @@ function validateDocument(document, diagnostics) {
   child.on("close", (code) => {
     if (code === 0) {
       diagnostics.delete(document.uri);
+      output.appendLine(
+        `contract_check: VALID (${path.basename(document.uri.fsPath)})`
+      );
     } else {
+      output.appendLine(
+        `contract_check: ${statusFromMessage(stderr)}`
+      );
       setDiagnostic(
         diagnostics,
         document,
@@ -534,10 +552,6 @@ function resolveAxiomPath(configuredPath, workspacePath) {
   if (configuredPath !== "axiom") {
     return configuredPath;
   }
-  const bundled = bundledAxiomPath();
-  if (bundled) {
-    return bundled;
-  }
   let current = workspacePath;
   for (let depth = 0; depth < 5; depth += 1) {
     for (const candidate of [
@@ -551,6 +565,10 @@ function resolveAxiomPath(configuredPath, workspacePath) {
     const parent = path.dirname(current);
     if (parent === current) break;
     current = parent;
+  }
+  const bundled = bundledAxiomPath();
+  if (bundled) {
+    return bundled;
   }
   return configuredPath;
 }
@@ -569,6 +587,14 @@ function bundledAxiomPath() {
 function setError(diagnostics, document, message) {
   setDiagnostic(diagnostics, document, message);
   vscode.window.showErrorMessage(message);
+}
+
+function statusFromMessage(message) {
+  return (
+    message.match(
+      /\b(?:INVALID|UNSATISFIABLE_PRECONDITION|UNSATISFIABLE_POSTCONDITION|NO_CANDIDATE|TIMEOUT|RESOURCE_LIMIT|SOLVER_UNKNOWN|COUNTEREXAMPLE)\b/
+    )?.[0] ?? "INVALID"
+  );
 }
 
 function setDiagnostic(diagnostics, document, message) {

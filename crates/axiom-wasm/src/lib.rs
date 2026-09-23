@@ -8,8 +8,12 @@ pub fn instruction_cost(expr: &Expr) -> usize {
     match expr {
         Expr::Arg(_) | Expr::Const(_) => 1,
         Expr::Add(lhs, rhs)
+        | Expr::Sub(lhs, rhs)
         | Expr::Mul(lhs, rhs)
         | Expr::Shl(lhs, rhs)
+        | Expr::BitAnd(lhs, rhs)
+        | Expr::BitOr(lhs, rhs)
+        | Expr::BitXor(lhs, rhs)
         | Expr::Eq(lhs, rhs)
         | Expr::Ne(lhs, rhs)
         | Expr::Lt(lhs, rhs)
@@ -141,6 +145,11 @@ fn encode_expr(expr: &Expr, param_count: u32, output: &mut Vec<u8>) -> Result<()
             encode_expr(rhs, param_count, output)?;
             output.push(0x6a); // i32.add
         }
+        Expr::Sub(lhs, rhs) => {
+            encode_expr(lhs, param_count, output)?;
+            encode_expr(rhs, param_count, output)?;
+            output.push(0x6b); // i32.sub
+        }
         Expr::Mul(lhs, rhs) => {
             encode_expr(lhs, param_count, output)?;
             encode_expr(rhs, param_count, output)?;
@@ -150,6 +159,21 @@ fn encode_expr(expr: &Expr, param_count: u32, output: &mut Vec<u8>) -> Result<()
             encode_expr(lhs, param_count, output)?;
             encode_expr(rhs, param_count, output)?;
             output.push(0x74); // i32.shl
+        }
+        Expr::BitAnd(lhs, rhs) => {
+            encode_expr(lhs, param_count, output)?;
+            encode_expr(rhs, param_count, output)?;
+            output.push(0x71); // i32.and
+        }
+        Expr::BitOr(lhs, rhs) => {
+            encode_expr(lhs, param_count, output)?;
+            encode_expr(rhs, param_count, output)?;
+            output.push(0x72); // i32.or
+        }
+        Expr::BitXor(lhs, rhs) => {
+            encode_expr(lhs, param_count, output)?;
+            encode_expr(rhs, param_count, output)?;
+            output.push(0x73); // i32.xor
         }
         Expr::Eq(lhs, rhs) => {
             encode_expr(lhs, param_count, output)?;
@@ -293,6 +317,13 @@ mod tests {
     }
 
     #[test]
+    fn emits_and_runs_zero_argument_module() {
+        let module = emit(&Expr::Const(42), 0).unwrap();
+
+        assert_eq!(run_with_args(&module, &[]).unwrap(), 42);
+    }
+
+    #[test]
     fn counts_emitted_expression_instructions() {
         let expr = Expr::Shl(Box::new(Expr::Arg(0)), Box::new(Expr::Const(3)));
 
@@ -319,6 +350,17 @@ mod tests {
 
         assert_eq!(run_with_args(&module, &[u32::MAX, 1]).unwrap(), 1);
         assert_eq!(run_with_args(&module, &[1, u32::MAX]).unwrap(), 0);
+    }
+
+    #[test]
+    fn emits_and_runs_scalar_bitwise_ops() {
+        let expr = Expr::BitXor(
+            Box::new(Expr::BitAnd(Box::new(Expr::Arg(0)), Box::new(Expr::Arg(1)))),
+            Box::new(Expr::Sub(Box::new(Expr::Arg(0)), Box::new(Expr::Const(1)))),
+        );
+        let module = emit(&expr, 2).unwrap();
+
+        assert_eq!(run_with_args(&module, &[0b1100, 0b1010]).unwrap(), 0b0011);
     }
 
     #[test]

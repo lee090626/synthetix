@@ -23,6 +23,7 @@ cd /Users/ihyeongseog/Developer/synthetix/editors/vscode
 mkdir -p bin/darwin-arm64
 cp ../../target/release/axiom bin/darwin-arm64/axiom
 npx --yes @vscode/vsce package --out /tmp/synthetix-vscode.vsix
+node ./check-vsix.js /tmp/synthetix-vscode.vsix
 code --install-extension /tmp/synthetix-vscode.vsix --force
 ```
 
@@ -48,8 +49,8 @@ finally falls back to `axiom` on `PATH`. The current local artifact includes mac
 It writes the generated
 WASM under `.synthetix/build/` while preserving the source's relative path,
 then executes its `run` export. For example,
-`examples/easy_mul8.ax` produces
-`.synthetix/build/examples/easy_mul8.wasm`.
+`examples/friendly/easy_mul8.ax` produces
+`.synthetix/build/examples/friendly/easy_mul8.wasm`.
 
 Typing in an `.ax` file opens completion suggestions for Axiom keywords,
 types, parameters, `result`, operators, records, lists, inputs, reducers,

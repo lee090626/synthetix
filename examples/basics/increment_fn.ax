@@ -1,0 +1,5 @@
+// A fn has a user-written implementation that the verifier checks.
+fn increment(value: u32) -> u32 {
+  return value +% 1;
+  ensures result == value +% 1;
+}

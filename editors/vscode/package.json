@@ -2,7 +2,7 @@
   "name": "synthetix-vscode",
   "displayName": "Synthetix",
   "description": "Build and run Synthetix .ax web projects with verified logic.",
-  "version": "0.14.0",
+  "version": "0.14.1",
   "publisher": "synthetix",
   "engines": {
     "vscode": "^1.85.0"
@@ -84,7 +84,7 @@
         "synthetix.axiomPath": {
           "type": "string",
           "default": "axiom",
-          "description": "Path to the axiom executable. The bundled CLI is preferred; the workspace CLI is used as fallback."
+          "description": "Path to the axiom executable. The workspace CLI is preferred; the bundled CLI is used as fallback."
         },
         "synthetix.runInput": {
           "type": "string",

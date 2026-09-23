@@ -1,0 +1,6 @@
+// v4 freeze fixture: the input domain is empty.
+contract unsat_precondition(value: u32) -> u32 {
+    requires value > 10;
+    requires value < 5;
+    ensures result == value;
+}

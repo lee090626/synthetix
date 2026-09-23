@@ -1,0 +1,5 @@
+// A constant can appear in the synthesized condition and branch.
+contract at_least_ten(value: u32) -> u32 {
+  ensures value >= 10 || result == 10;
+  ensures value < 10 || result == value;
+}

@@ -1,0 +1,312 @@
+//! Small executable reference semantics for the scalar Synthetix subset.
+//!
+//! This module deliberately does not call the AMI evaluator or Z3. It is the
+//! independent comparison point for AMI, verification, and WASM tests.
+
+use std::collections::HashMap;
+
+use axiom_ami::Expr;
+use axiom_parser::{BinaryOp, Contract, SpecExpr, Type};
+
+type Numeric = (u32, bool);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Value {
+    U32(u32),
+    I32(i32),
+    Bool(bool),
+}
+
+impl Value {
+    pub fn bits(self) -> u32 {
+        match self {
+            Self::U32(value) => value,
+            Self::I32(value) => value as u32,
+            Self::Bool(value) => u32::from(value),
+        }
+    }
+}
+
+/// Evaluates an AMI expression without using `Expr::eval`.
+pub fn eval_ami(expr: &Expr, args: &[u32]) -> Result<u32, String> {
+    match expr {
+        Expr::Arg(index) => args
+            .get(*index as usize)
+            .copied()
+            .ok_or_else(|| format!("candidate references missing argument {index}")),
+        Expr::Const(value) => Ok(*value),
+        Expr::Add(lhs, rhs) => Ok(eval_ami(lhs, args)?.wrapping_add(eval_ami(rhs, args)?)),
+        Expr::Sub(lhs, rhs) => Ok(eval_ami(lhs, args)?.wrapping_sub(eval_ami(rhs, args)?)),
+        Expr::Mul(lhs, rhs) => Ok(eval_ami(lhs, args)?.wrapping_mul(eval_ami(rhs, args)?)),
+        Expr::Shl(lhs, rhs) => Ok(eval_ami(lhs, args)?.wrapping_shl(eval_ami(rhs, args)? & 31)),
+        Expr::BitAnd(lhs, rhs) => Ok(eval_ami(lhs, args)? & eval_ami(rhs, args)?),
+        Expr::BitOr(lhs, rhs) => Ok(eval_ami(lhs, args)? | eval_ami(rhs, args)?),
+        Expr::BitXor(lhs, rhs) => Ok(eval_ami(lhs, args)? ^ eval_ami(rhs, args)?),
+        Expr::Eq(lhs, rhs) => Ok(u32::from(eval_ami(lhs, args)? == eval_ami(rhs, args)?)),
+        Expr::Ne(lhs, rhs) => Ok(u32::from(eval_ami(lhs, args)? != eval_ami(rhs, args)?)),
+        Expr::Lt(lhs, rhs) => Ok(u32::from(eval_ami(lhs, args)? < eval_ami(rhs, args)?)),
+        Expr::Le(lhs, rhs) => Ok(u32::from(eval_ami(lhs, args)? <= eval_ami(rhs, args)?)),
+        Expr::Gt(lhs, rhs) => Ok(u32::from(eval_ami(lhs, args)? > eval_ami(rhs, args)?)),
+        Expr::Ge(lhs, rhs) => Ok(u32::from(eval_ami(lhs, args)? >= eval_ami(rhs, args)?)),
+        Expr::SLt(lhs, rhs) => Ok(u32::from(
+            (eval_ami(lhs, args)? as i32) < (eval_ami(rhs, args)? as i32),
+        )),
+        Expr::SLe(lhs, rhs) => Ok(u32::from(
+            (eval_ami(lhs, args)? as i32) <= (eval_ami(rhs, args)? as i32),
+        )),
+        Expr::SGt(lhs, rhs) => Ok(u32::from(
+            (eval_ami(lhs, args)? as i32) > (eval_ami(rhs, args)? as i32),
+        )),
+        Expr::SGe(lhs, rhs) => Ok(u32::from(
+            (eval_ami(lhs, args)? as i32) >= (eval_ami(rhs, args)? as i32),
+        )),
+        Expr::And(lhs, rhs) => Ok(u32::from(
+            eval_ami(lhs, args)? != 0 && eval_ami(rhs, args)? != 0,
+        )),
+        Expr::Or(lhs, rhs) => Ok(u32::from(
+            eval_ami(lhs, args)? != 0 || eval_ami(rhs, args)? != 0,
+        )),
+        Expr::Select {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            if eval_ami(condition, args)? != 0 {
+                eval_ami(then_branch, args)
+            } else {
+                eval_ami(else_branch, args)
+            }
+        }
+    }
+}
+
+/// Evaluates a scalar specification expression using the documented rules.
+pub fn eval_spec(
+    expr: &SpecExpr,
+    contract: &Contract,
+    args: &[u32],
+    result: u32,
+) -> Result<Value, String> {
+    if args.len() != contract.params.len() {
+        return Err(format!(
+            "expected {} inputs, got {}",
+            contract.params.len(),
+            args.len()
+        ));
+    }
+    eval_spec_with_locals(expr, contract, args, result, &HashMap::new())
+}
+
+/// Checks a concrete input using the contract implication
+/// `requires -> ensures`.
+pub fn contract_holds(contract: &Contract, candidate: &Expr, args: &[u32]) -> Result<bool, String> {
+    let result = eval_ami(candidate, args)?;
+    for param in contract.params.iter().enumerate() {
+        if param.1.ty == Type::Bool && args[param.0] > 1 {
+            return Err(format!("bool argument {} must be 0 or 1", param.1.name));
+        }
+    }
+
+    let requires = contract
+        .requires
+        .iter()
+        .map(|expr| eval_spec(expr, contract, args, result))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .try_fold(true, |all, value| match value {
+            Value::Bool(value) => Ok(all && value),
+            _ => Err("requires clause must be boolean".to_string()),
+        })?;
+
+    if !requires {
+        return Ok(true);
+    }
+
+    contract
+        .ensures
+        .iter()
+        .map(|expr| eval_spec(expr, contract, args, result))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .try_fold(true, |all, value| match value {
+            Value::Bool(value) => Ok(all && value),
+            _ => Err("ensures clause must be boolean".to_string()),
+        })
+}
+
+fn eval_spec_with_locals(
+    expr: &SpecExpr,
+    contract: &Contract,
+    args: &[u32],
+    result: u32,
+    locals: &HashMap<String, Value>,
+) -> Result<Value, String> {
+    match expr {
+        SpecExpr::Ident(name) if name == "result" => match contract.return_type {
+            Type::U32 => Ok(Value::U32(result)),
+            Type::I32 => Ok(Value::I32(result as i32)),
+            Type::Bool => Ok(Value::Bool(result != 0)),
+            _ => Err("non-scalar contract result cannot be evaluated".to_string()),
+        },
+        SpecExpr::Ident(name) if locals.contains_key(name) => Ok(locals[name]),
+        SpecExpr::Ident(name) => {
+            let index = contract
+                .params
+                .iter()
+                .position(|param| param.name == *name)
+                .ok_or_else(|| format!("unknown identifier: {name}"))?;
+            let value = args[index];
+            match contract.params[index].ty {
+                Type::U32 => Ok(Value::U32(value)),
+                Type::I32 => Ok(Value::I32(value as i32)),
+                Type::Bool => Ok(Value::Bool(value != 0)),
+                _ => Err(format!("non-scalar parameter cannot be evaluated: {name}")),
+            }
+        }
+        SpecExpr::Number(value) => Ok(Value::U32(*value)),
+        SpecExpr::Bool(value) => Ok(Value::Bool(*value)),
+        SpecExpr::Text(_) | SpecExpr::List(_) | SpecExpr::Record { .. } | SpecExpr::Field(_, _) => {
+            Err("non-scalar expressions cannot be evaluated as contracts".to_string())
+        }
+        SpecExpr::Let(name, value, body) => {
+            let value = eval_spec_with_locals(value, contract, args, result, locals)?;
+            let mut nested = locals.clone();
+            nested.insert(name.clone(), value);
+            eval_spec_with_locals(body, contract, args, result, &nested)
+        }
+        SpecExpr::If(condition, then_branch, else_branch) => {
+            let condition = match eval_spec_with_locals(condition, contract, args, result, locals)?
+            {
+                Value::Bool(value) => value,
+                _ => return Err("if condition must be boolean".to_string()),
+            };
+            let then_branch = eval_spec_with_locals(then_branch, contract, args, result, locals)?;
+            let else_branch = eval_spec_with_locals(else_branch, contract, args, result, locals)?;
+            if std::mem::discriminant(&then_branch) != std::mem::discriminant(&else_branch) {
+                return Err("if branches must have the same type".to_string());
+            }
+            Ok(if condition { then_branch } else { else_branch })
+        }
+        SpecExpr::Call(name, _) => Err(format!("unresolved contract call: {name}")),
+        SpecExpr::Binary(op, lhs, rhs) => {
+            let lhs = eval_spec_with_locals(lhs, contract, args, result, locals)?;
+            let rhs = eval_spec_with_locals(rhs, contract, args, result, locals)?;
+            eval_binary(op, lhs, rhs)
+        }
+    }
+}
+
+fn eval_binary(op: &BinaryOp, lhs: Value, rhs: Value) -> Result<Value, String> {
+    match op {
+        BinaryOp::AddWrap => numeric(lhs, rhs, u32::wrapping_add),
+        BinaryOp::SubWrap => numeric(lhs, rhs, u32::wrapping_sub),
+        BinaryOp::MulWrap => numeric(lhs, rhs, u32::wrapping_mul),
+        BinaryOp::Shl => numeric(lhs, rhs, |lhs, rhs| lhs.wrapping_shl(rhs & 31)),
+        BinaryOp::BitAnd => numeric(lhs, rhs, |lhs, rhs| lhs & rhs),
+        BinaryOp::BitOr => numeric(lhs, rhs, |lhs, rhs| lhs | rhs),
+        BinaryOp::BitXor => numeric(lhs, rhs, |lhs, rhs| lhs ^ rhs),
+        BinaryOp::Eq => equality(lhs, rhs, false),
+        BinaryOp::Ne => equality(lhs, rhs, true),
+        BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+            let (lhs, rhs) = numeric_bits(lhs, rhs)?;
+            let result = if lhs.1 || rhs.1 {
+                compare_signed(op, lhs.0 as i32, rhs.0 as i32)
+            } else {
+                compare_unsigned(op, lhs.0, rhs.0)
+            };
+            Ok(Value::Bool(result))
+        }
+        BinaryOp::And | BinaryOp::Or => match (lhs, rhs) {
+            (Value::Bool(lhs), Value::Bool(rhs)) => Ok(Value::Bool(if *op == BinaryOp::And {
+                lhs && rhs
+            } else {
+                lhs || rhs
+            })),
+            _ => Err(format!("operator {op:?} requires boolean operands")),
+        },
+    }
+}
+
+fn numeric(
+    lhs: Value,
+    rhs: Value,
+    operation: impl FnOnce(u32, u32) -> u32,
+) -> Result<Value, String> {
+    let (lhs, rhs) = numeric_bits(lhs, rhs)?;
+    let result = operation(lhs.0, rhs.0);
+    Ok(if lhs.1 || rhs.1 {
+        Value::I32(result as i32)
+    } else {
+        Value::U32(result)
+    })
+}
+
+fn numeric_bits(lhs: Value, rhs: Value) -> Result<(Numeric, Numeric), String> {
+    match (lhs, rhs) {
+        (Value::U32(lhs), Value::U32(rhs)) => Ok(((lhs, false), (rhs, false))),
+        (Value::I32(lhs), Value::I32(rhs)) => Ok(((lhs as u32, true), (rhs as u32, true))),
+        (Value::I32(lhs), Value::U32(rhs)) => Ok(((lhs as u32, true), (rhs, false))),
+        (Value::U32(lhs), Value::I32(rhs)) => Ok(((lhs, false), (rhs as u32, true))),
+        _ => Err("operator requires numeric operands".to_string()),
+    }
+}
+
+fn equality(lhs: Value, rhs: Value, negate: bool) -> Result<Value, String> {
+    let equal = match (lhs, rhs) {
+        (Value::Bool(lhs), Value::Bool(rhs)) => lhs == rhs,
+        (lhs, rhs) => {
+            let (lhs, rhs) = numeric_bits(lhs, rhs)?;
+            lhs.0 == rhs.0
+        }
+    };
+    Ok(Value::Bool(if negate { !equal } else { equal }))
+}
+
+fn compare_unsigned(op: &BinaryOp, lhs: u32, rhs: u32) -> bool {
+    match op {
+        BinaryOp::Lt => lhs < rhs,
+        BinaryOp::Le => lhs <= rhs,
+        BinaryOp::Gt => lhs > rhs,
+        BinaryOp::Ge => lhs >= rhs,
+        _ => unreachable!("numeric comparison expected"),
+    }
+}
+
+fn compare_signed(op: &BinaryOp, lhs: i32, rhs: i32) -> bool {
+    match op {
+        BinaryOp::Lt => lhs < rhs,
+        BinaryOp::Le => lhs <= rhs,
+        BinaryOp::Gt => lhs > rhs,
+        BinaryOp::Ge => lhs >= rhs,
+        _ => unreachable!("numeric comparison expected"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axiom_parser::parse;
+
+    #[test]
+    fn evaluates_wrapping_and_signed_boundaries() {
+        let expression = Expr::Sub(Box::new(Expr::Const(0)), Box::new(Expr::Const(1)));
+        assert_eq!(eval_ami(&expression, &[]).unwrap(), u32::MAX);
+
+        let expression = Expr::SLt(Box::new(Expr::Arg(0)), Box::new(Expr::Arg(1)));
+        assert_eq!(eval_ami(&expression, &[u32::MAX, 1]).unwrap(), 1);
+    }
+
+    #[test]
+    fn evaluates_specification_values() {
+        let contract = parse("contract f(x: i32) -> i32 { ensures result == x +% 1; }").unwrap();
+        let expr = &contract.ensures[0];
+        assert_eq!(
+            eval_spec(expr, &contract, &[u32::MAX], 1).unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            eval_spec(expr, &contract, &[u32::MAX], 0).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}

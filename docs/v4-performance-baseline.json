@@ -1,0 +1,5 @@
+{"format_version":1,"purpose":"non-guarantee synthesis baseline","profile":"release","os":"macos","arch":"aarch64","benchmarks":[
+{"benchmark":"mul8","status":"FOUND","candidate_count":2,"elapsed_ms":11.575,"candidate":"Shl(Arg(0), Const(3))","search_bounds":{"timeout_ms":null,"max_candidates":50000,"max_memory_bytes":67108864}},
+{"benchmark":"property_max","status":"FOUND","candidate_count":2,"elapsed_ms":16.656,"candidate":"Select { condition: Gt(Arg(0), Arg(1)), then_branch: Arg(0), else_branch: Arg(1) }","search_bounds":{"timeout_ms":null,"max_candidates":50000,"max_memory_bytes":67108864}},
+{"benchmark":"property_clamp","status":"FOUND","candidate_count":2,"elapsed_ms":150.601,"candidate":"Select { condition: Lt(Arg(0), Arg(1)), then_branch: Arg(1), else_branch: Select { condition: Gt(Arg(0), Arg(2)), then_branch: Arg(2), else_branch: Arg(0) } }","search_bounds":{"timeout_ms":null,"max_candidates":50000,"max_memory_bytes":67108864}}
+]}

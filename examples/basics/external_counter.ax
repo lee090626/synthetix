@@ -1,0 +1,3 @@
+// An extern declaration names an implementation supplied by a runtime adapter.
+// It can be checked as a boundary declaration, but cannot be synthesized alone.
+extern fn read_count(key: u32) -> u32;

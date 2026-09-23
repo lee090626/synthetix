@@ -1,0 +1,4 @@
+// Wrapping subtraction: 0 -% 1 becomes 2^32 - 1.
+contract subtract_one(value: u32) -> u32 {
+  ensures result == value -% 1;
+}

@@ -18,6 +18,13 @@ pub struct Param {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclarationKind {
+    Contract,
+    Function,
+    Extern,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
     pub line: usize,
     pub column: usize,
@@ -26,8 +33,12 @@ pub struct Span {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BinaryOp {
     AddWrap, // +%
+    SubWrap, // -%
     MulWrap, // *%
     Shl,     // <<
+    BitAnd,  // &
+    BitOr,   // |
+    BitXor,  // ^
     Eq,      // ==
     Ne,      // !=
     Lt,      // <
@@ -58,10 +69,12 @@ pub enum SpecExpr {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Contract {
+    pub kind: DeclarationKind,
     pub exported: bool,
     pub name: String,
     pub params: Vec<Param>,
     pub return_type: Type,
+    pub implementation: Option<SpecExpr>,
     pub requires: Vec<SpecExpr>,
     pub ensures: Vec<SpecExpr>,
     pub requires_spans: Vec<Span>,
