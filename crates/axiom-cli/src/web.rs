@@ -899,7 +899,7 @@ let __devVersion = null;
     const errorNode = document.querySelector('#synthetix-error');
     const error = await errorResponse.text();
     errorNode.hidden = !error;
-    if (error) errorNode.textContent = error;
+    errorNode.textContent = error;
   } catch (_) {}
 }, 500);
 "#
@@ -1310,12 +1310,7 @@ fn proof_json(project: &Project, compiled: &[CompiledFunction]) -> String {
     let contracts = compiled
         .iter()
         .map(|function| {
-            let source = function
-                .source
-                .strip_prefix(&project.config.root)
-                .unwrap_or(&function.source)
-                .display()
-                .to_string();
+            let source = source_label(&project.config.root, &function.source);
             format!(
                 "{{\"name\":{},\"source\":{},\"contract_check\":\"VALID\",\"synthesis_result\":\"FOUND\",\"proof_result\":\"VERIFIED\",\"diagnostic\":null,\"verified\":true,\"candidate\":{}}}",
                 json_string(&function.name),
@@ -1343,28 +1338,45 @@ fn watch_project(
     let mut snapshot = file_snapshot_for(&watched_files);
     loop {
         thread::sleep(Duration::from_millis(300));
-        if let Ok(project) = axiom_project::load(&config_path) {
-            watched_files = project.files;
-            watched_files.push(config_path.clone());
+        rebuild_if_changed(
+            &config_path,
+            &output_dir,
+            &state,
+            &mut watched_files,
+            &mut snapshot,
+        );
+    }
+}
+
+fn rebuild_if_changed(
+    config_path: &Path,
+    output_dir: &Path,
+    state: &Arc<Mutex<DevState>>,
+    watched_files: &mut Vec<PathBuf>,
+    snapshot: &mut HashMap<PathBuf, (u64, u64)>,
+) -> bool {
+    if let Ok(project) = axiom_project::load(config_path) {
+        *watched_files = project.files;
+        watched_files.push(config_path.to_path_buf());
+    }
+    let current = file_snapshot_for(watched_files);
+    if current == *snapshot {
+        return false;
+    }
+    *snapshot = current;
+    let mut guard = state.lock().expect("dev state lock poisoned");
+    match build(config_path, output_dir) {
+        Ok(_) => {
+            guard.version = guard.version.saturating_add(1);
+            guard.error = None;
+            println!("rebuilt successfully (version {})", guard.version);
         }
-        let current = file_snapshot_for(&watched_files);
-        if current == snapshot {
-            continue;
-        }
-        snapshot = current;
-        let mut guard = state.lock().expect("dev state lock poisoned");
-        match build(&config_path, &output_dir) {
-            Ok(_) => {
-                guard.version = guard.version.saturating_add(1);
-                guard.error = None;
-                println!("rebuilt successfully (version {})", guard.version);
-            }
-            Err(error) => {
-                guard.error = Some(error.clone());
-                eprintln!("build error: {error}");
-            }
+        Err(error) => {
+            guard.error = Some(error.clone());
+            eprintln!("build error: {error}");
         }
     }
+    true
 }
 
 fn file_snapshot_for(files: &[PathBuf]) -> HashMap<PathBuf, (u64, u64)> {
@@ -1555,6 +1567,127 @@ mod tests {
         assert!(javascript.contains("callContract(element.function"));
         assert!(javascript.contains("requestEffect(request, targetState"));
         assert!(javascript.contains("fetch('./app.wasm')"));
+    }
+
+    #[test]
+    fn dev_rebuild_routes_propagate_live_reload_version_and_source_errors() {
+        fn get(address: std::net::SocketAddr, path: &str) -> String {
+            use std::io::{Read, Write};
+
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream
+                .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            response
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-dev-live-reload-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("main.ax");
+        let config = root.join("synthetix.toml");
+        let output_dir = root.join(".synthetix/dev");
+        std::fs::write(
+            &source,
+            "contract value(x: u32) -> u32 { ensures result == x; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &config,
+            "[project]\nentry = \"main.ax\"\ntarget = \"web\"\n",
+        )
+        .unwrap();
+        build(&config, &output_dir).unwrap();
+        let project = axiom_project::load(&config).unwrap();
+        let mut watched_files = project.files;
+        watched_files.push(config.clone());
+        let mut snapshot = file_snapshot_for(&watched_files);
+        let state = Arc::new(Mutex::new(DevState {
+            version: 1,
+            error: None,
+        }));
+
+        std::fs::write(
+            &source,
+            "contract value(x: u32) -> u32 { ensures result == x +% 1; }\n",
+        )
+        .unwrap();
+        assert!(rebuild_if_changed(
+            &config,
+            &output_dir,
+            &state,
+            &mut watched_files,
+            &mut snapshot,
+        ));
+        assert_eq!(state.lock().unwrap().version, 2);
+
+        std::fs::write(&source, "contract value(x: u32) -> u32 {\n").unwrap();
+        assert!(rebuild_if_changed(
+            &config,
+            &output_dir,
+            &state,
+            &mut watched_files,
+            &mut snapshot,
+        ));
+        assert_eq!(state.lock().unwrap().version, 2);
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("main.ax")
+        );
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_state = Arc::clone(&state);
+        let server_output = output_dir.clone();
+        let server = thread::spawn(move || {
+            for _ in 0..6 {
+                let (stream, _) = listener.accept().unwrap();
+                handle_request(stream, &server_output, &server_state);
+            }
+        });
+        let failed_version = get(address, "/__synthetix/version");
+        assert!(failed_version.starts_with("HTTP/1.1 200 OK"));
+        assert_eq!(failed_version.split("\r\n\r\n").nth(1), Some("2"));
+        let failed_error = get(address, "/__synthetix/error");
+        assert!(failed_error.contains("main.ax"));
+
+        std::fs::write(
+            &source,
+            "contract value(x: u32) -> u32 { ensures result == x +% 2; }\n",
+        )
+        .unwrap();
+        assert!(rebuild_if_changed(
+            &config,
+            &output_dir,
+            &state,
+            &mut watched_files,
+            &mut snapshot,
+        ));
+        assert_eq!(state.lock().unwrap().version, 3);
+        assert!(state.lock().unwrap().error.is_none());
+        let recovered_version = get(address, "/__synthetix/version");
+        assert_eq!(recovered_version.split("\r\n\r\n").nth(1), Some("3"));
+        let recovered_error = get(address, "/__synthetix/error");
+        assert_eq!(recovered_error.split("\r\n\r\n").nth(1), Some(""));
+        let bundle = get(address, "/app.js");
+        assert!(bundle.contains("200 OK"));
+        assert!(bundle.contains("WebAssembly.instantiate"));
+        let proof_map = get(address, "/app.proof.json");
+        assert!(proof_map.contains("\"source\":\"main.ax\""));
+        server.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1781,7 +1914,7 @@ const vm = require('node:vm');
 const bytes = fs.readFileSync(process.env.AXIOM_TEST_WASM);
 const cases = [{cases_js}];
 class Element {{
-  constructor(tagName) {{ this.tagName = tagName; this.children = []; this.listeners = {{}}; this.dataset = {{}}; this.value = ''; this.checked = false; }}
+  constructor(tagName) {{ this.tagName = tagName; this.children = []; this.listeners = {{}}; this.dataset = {{}}; this.value = ''; this.checked = false; this.hidden = true; this.textContent = ''; }}
   append(...items) {{ this.children.push(...items); }}
   replaceChildren() {{ this.children = []; }}
   addEventListener(name, callback) {{ this.listeners[name] = callback; }}
@@ -1790,17 +1923,24 @@ class Element {{
 }}
 const root = new Element('main');
 const error = new Element('div');
+let reloadCount = 0;
+let devVersion = '1';
+let devError = '';
+let poll;
 global.window = {{}};
-global.location = {{ reload() {{}} }};
+global.location = {{ reload() {{ reloadCount++; }} }};
 global.localStorage = {{ getItem() {{ return null; }}, setItem() {{}} }};
 global.document = {{
   querySelector(selector) {{ return selector === '#app' ? root : error; }},
   createElement(tagName) {{ return new Element(tagName); }},
 }};
-global.setInterval = () => 0;
-global.fetch = async (url) => url === './app.wasm'
-  ? {{ ok: true, arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) }}
-  : {{ ok: false, text: async () => '' }};
+global.setInterval = (callback) => {{ poll = callback; return 0; }};
+global.fetch = async (url) => {{
+  if (url === './app.wasm') return {{ ok: true, arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) }};
+  if (url === '/__synthetix/version') return {{ ok: true, text: async () => devVersion }};
+  if (url === '/__synthetix/error') return {{ ok: true, text: async () => devError }};
+  return {{ ok: false, text: async () => '' }};
+}};
 vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
 (async () => {{
   for (let attempt = 0; attempt < 100 && !window.synthetix; attempt++)
@@ -1847,7 +1987,15 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
 
   const effectFailure = await window.synthetix.requestEffect({{ name: 'offline', inputs: [] }}, 'result').catch((failure) => failure);
   const effectFailureLine = [effectFailure?.category, effectFailure?.source, window.synthetix.state.result, String(error.textContent.includes('COUNTEREXAMPLE'))].join('|');
-  process.stdout.write([output.join(','), invalidLine, flowLine, effectLine, callErrorLine, effectFailureLine].join('\n'));
+  devError = 'main.ax:3:1: rebuild failed';
+  await poll();
+  const reloadErrorLine = [reloadCount, String(error.hidden), error.textContent].join('|');
+  devVersion = '2';
+  devError = '';
+  await poll();
+  const reloadLine = [reloadCount, String(error.hidden), error.textContent].join('|');
+  process.stdout.write([output.join(','), invalidLine, flowLine, effectLine, callErrorLine,
+    effectFailureLine, reloadErrorLine, reloadLine].join('\n'));
 }})().catch((error) => {{ console.error(error); process.exitCode = 1; }});
 "#
         );
@@ -1890,6 +2038,8 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
             lines.next(),
             Some("APPLICATION_RUNTIME_ERROR|main.ax|6|false")
         );
+        assert_eq!(lines.next(), Some("0|false|main.ax:3:1: rebuild failed"));
+        assert_eq!(lines.next(), Some("1|true|"));
         assert!(lines.next().is_none());
         std::fs::remove_dir_all(root).unwrap();
     }

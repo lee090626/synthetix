@@ -843,6 +843,29 @@ browser 검증은 v5.7 integration 범위에 남긴다.
 | 의존성 | v5.1~v5.6 runtime과 effect 흐름 이후 진행한다. |
 | 범위 밖 | DOM/CSS 시각 결과의 수학적 증명. |
 
+### v5.7 구현 기록
+
+상태: **완료**
+
+- generated `app.js`가 실제 `app.wasm`을 instantiate하고 WASM 결과를
+  reference evaluator, Z3 point proof, rendered UI state와 대조한다.
+- generated runtime 통합 테스트가 invalid input, extern/API 실패, storage
+  실패, contract/API source location 및 proof 상태와 application error의
+  분리를 검사한다.
+- dev rebuild 테스트가 실제 project source를 수정해 성공 → 실패 → 복구
+  경로를 실행한다. HTTP version/error/bundle routes의 출력과 generated
+  runtime polling의 reload 및 오류 배너 해제를 확인한다.
+- HTTP에서 제공한 `app.proof.json`이 contract source를 project-relative
+  경로로 매핑하는지 검사한다. canonical path가 symlink 경로와 달라도
+  기존 `source_label` 규칙을 재사용한다.
+
+검증:
+
+- `cargo test --workspace`: 115개 통과 (16 suites)
+- `cargo clippy --workspace --all-targets -- -D warnings` 통과
+- `cargo fmt --all -- --check`, `git diff --check` 통과
+- `cargo build --release -p axiom-cli` 통과
+
 ## v5.8 — Packaging과 Deployment
 
 | 항목 | 내용 |
@@ -994,7 +1017,8 @@ v6의 loop, recursion, array, map, set은 단순한 문법 추가가 아니다. 
 v4.1 Semantic Baseline부터 v4.9 Freeze까지와 v5.0 Application Boundary
 Baseline, v5.1 Thin Web Runtime, v5.2 State Transition, v5.3 Data Boundary,
 v5.4 Browser Effect와 Persistence, v5.5 External Adapter, v5.6 Async와 실패
-흐름이 완료되었다. 다음 milestone은 v5.7 Web Integration Test다.
+흐름, v5.7 Web Integration Test가 완료되었다. 다음 milestone은 v5.8
+Packaging과 Deployment다.
 
 ```text
 v4.1 완료
@@ -1013,10 +1037,11 @@ v4.1 완료
   → v5.4 완료
   → v5.5 완료
   → v5.6 완료
-  → v5.7 Web Integration Test
+  → v5.7 완료
+  → v5.8 Packaging과 Deployment
 ```
 
 v4.9에서 의미론, 결과 상태, supported grammar, negative fixture, release
-검증 기준을 동결했고 v5.0~v5.5에서 core와 application/effect 실행,
+검증 기준을 동결했고 v5.0~v5.7에서 core와 application/effect 실행,
 state transition, data/persistence boundary, typed external adapter를
 분리했다. 일반 재귀, loop invariant, 무제한 호출은 시작하지 않는다.
