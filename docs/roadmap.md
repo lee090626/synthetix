@@ -53,7 +53,7 @@ DB, 인증 내부까지 Synthetix가 증명하는 것은 목표가 아니다.
 | v6.6 | budget 실패 뒤 proof-checked fallback과 benchmark 계측 완료 |
 | v6.7 | WASI/Node/Edge 제품 수요 없음 (DEFERRED) |
 | v6.8 | extern effect와 unverified trust boundary 완료 |
-| **현재 다음 단계** | **v6.9 Freeze** |
+| v6.9 | Freeze 완료: native CLI 4개 플랫폼 검증 완료 |
 
 v4.9와 v5.9는 각각 proof와 application 경계를 동결했다. v6.0 benchmark는
 검증된 배열 입력이 거부되는 expressiveness 경계를 재현했고, v6.1은 앱
@@ -70,7 +70,16 @@ v6.7 검토에서는 delivered runtime이 browser/WASM이고 Node.js는
 integration/benchmark test host임을 확인했다. WASI/Node/Edge deployment에 대한
 실제 제품 요구가 없어 새 target은 보류한다. v6.8은 proof artifact에서 검증된
 WASM contract와 host가 제공하는 미검증 extern 구현을 분리하고, typed effect와
-명시적 가정 및 audit 미제공 상태를 기록한다.
+명시적 가정 및 audit 미제공 상태를 기록한다. v6.9는 release regression을 고정하고,
+commit `2e355cb91c872963048fe6a6dd167be75568e469`의 [GitHub Actions run]
+(36029482437)에서 Linux x64, Windows x64, macOS arm64, macOS x64 native CLI
+build/smoke와 VSIX packaging이 모두 성공했다. 각 runner의 `native-cli-*` evidence
+artifact에는 대표 check/build, `mul8(5) = 40`, signed 결과 `-1`, 두 UNSAT fixture의
+exit code와 WASM 미생성, v6 release fixture 결과가 기록됐다. 전체 workflow의 별도
+Workspace tests job은 기록 시점에 실행 중이었으며, 로컬 전체 workspace tests는 146개
+통과했다.
+
+[GitHub Actions run]: https://github.com/lee090626/synthetix/actions/runs/36029482437
 
 ## 공통 완료 기준
 
@@ -1203,6 +1212,10 @@ application runtime 오류는 proof counterexample가 아니다. 외부 구현�
 | 주요 작업·완료 | 배열·제한된 loop·필요한 collection·incremental proof·외부 경계를 안정화한다. |
 | 의존성 | 선택된 v6 연구 트랙의 실제 완료 결과에 의존한다. |
 | 범위 밖 | Python 수준의 모든 기능, 무제한 recursion, 자동 ML 최적화. |
+| 검증 결과 | PASS: release E2E, 로컬 회귀 146개, native CLI matrix 4/4, VSIX packaging. |
+| hosted evidence | [Actions run 36029482437]의 matrix/evidence artifact; SHA `2e355cb91c872963048fe6a6dd167be75568e469`. Workspace tests job은 기록 시점에 진행 중이었다. |
+
+[Actions run 36029482437]: https://github.com/lee090626/synthetix/actions/runs/36029482437
 
 ---
 
@@ -1243,7 +1256,8 @@ v6.0 Scale Benchmark, v6.1 제한된 배열, v6.2 제한된 반복문, v6.3 구�
 재귀, v6.5 대규모 Modular Proof, v6.8 FFI trust boundary가 완료되었고 v6.4 검증된 Collection은
 근거에 따라 보류되었다. v6.6은 같은 bounded search에서 세 measured resource
 limit 사례를 proof-checked fallback으로 구제했다. v6.7 추가 runtime target은
-현재 제품 수요가 없어 보류했다. 현재 다음 단계는 v6.9 Freeze다.
+현재 제품 수요가 없어 보류했다. v6.9 Freeze는 native CLI matrix와 release
+regression 검증을 마쳤다.
 
 ```text
 v4.1 완료
@@ -1274,7 +1288,7 @@ v4.1 완료
   → v6.6 완료
   → v6.7 DEFERRED
   → v6.8 완료
-  → v6.9 진행 전
+  → v6.9 완료
 ```
 
 v4.9에서 의미론, 결과 상태, supported grammar, negative fixture, release
