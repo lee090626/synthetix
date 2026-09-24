@@ -76,8 +76,8 @@ commit `2e355cb91c872963048fe6a6dd167be75568e469`의 [GitHub Actions run]
 build/smoke와 VSIX packaging이 모두 성공했다. 각 runner의 `native-cli-*` evidence
 artifact에는 대표 check/build, `mul8(5) = 40`, signed 결과 `-1`, 두 UNSAT fixture의
 exit code와 WASM 미생성, v6 release fixture 결과가 기록됐다. 전체 workflow의 별도
-Workspace tests job은 기록 시점에 실행 중이었으며, 로컬 전체 workspace tests는 146개
-통과했다.
+Workspace tests job까지 완료되어 workflow가 `success`였고, hosted workspace tests와
+로컬 전체 workspace tests가 각각 146개 통과했다.
 
 [GitHub Actions run]: https://github.com/lee090626/synthetix/actions/runs/36029482437
 
@@ -1213,7 +1213,7 @@ application runtime 오류는 proof counterexample가 아니다. 외부 구현�
 | 의존성 | 선택된 v6 연구 트랙의 실제 완료 결과에 의존한다. |
 | 범위 밖 | Python 수준의 모든 기능, 무제한 recursion, 자동 ML 최적화. |
 | 검증 결과 | PASS: release E2E, 로컬 회귀 146개, native CLI matrix 4/4, VSIX packaging. |
-| hosted evidence | [Actions run 36029482437]의 matrix/evidence artifact; SHA `2e355cb91c872963048fe6a6dd167be75568e469`. Workspace tests job은 기록 시점에 진행 중이었다. |
+| hosted evidence | [Actions run 36029482437] 전체 `success`; 네 native matrix와 VSIX package 성공, Workspace tests 146개 통과. SHA `2e355cb91c872963048fe6a6dd167be75568e469`. |
 
 [Actions run 36029482437]: https://github.com/lee090626/synthetix/actions/runs/36029482437
 
