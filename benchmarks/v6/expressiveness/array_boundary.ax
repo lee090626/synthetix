@@ -1,0 +1,3 @@
+contract sum_list(values: list<u32>) -> u32 {
+    ensures result == 0;
+}

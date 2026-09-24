@@ -1,0 +1,3 @@
+contract power5(value: u32) -> u32 {
+    ensures result == ((((value *% value) *% value) *% value) *% value);
+}

@@ -1,0 +1,5 @@
+contract minimum(a: u32, b: u32) -> u32 {
+    ensures result <= a;
+    ensures result <= b;
+    ensures result == a || result == b;
+}

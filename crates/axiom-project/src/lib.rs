@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 
 use axiom_ami::Expr;
 use axiom_parser::{
-    Component, Contract, Import, Module, Page, PageElement, RecordDef, Reducer, SpecExpr, Type,
+    Component, Contract, Import, Module, Page, PageElement, RecordDef, Reducer, Span, SpecExpr,
+    Type,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +24,21 @@ pub struct LinkedContract {
     pub contract: Contract,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ContractId {
+    pub source: PathBuf,
+    pub name: String,
+}
+
+impl From<&LinkedContract> for ContractId {
+    fn from(linked: &LinkedContract) -> Self {
+        Self {
+            source: linked.source.clone(),
+            name: linked.contract.name.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LinkedPage {
     pub source: PathBuf,
@@ -37,28 +53,129 @@ pub struct Project {
     pub verification_summaries: Vec<LinkedContract>,
     /// Imported signatures keyed by the importing module and local name.
     pub verification_callees: HashMap<PathBuf, HashMap<String, Contract>>,
+    /// Imported contract identities keyed by the importing module and local name.
+    pub verification_callee_ids: HashMap<PathBuf, HashMap<String, ContractId>>,
+    /// Dependency-first order for verifying summaries.
+    pub verification_order: Vec<ContractId>,
     pub pages: Vec<LinkedPage>,
     pub files: Vec<PathBuf>,
 }
 
 impl Project {
-    /// Verifies a linked contract against imported signature summaries.
+    /// Verifies a linked contract against the project's closed contract summaries.
     pub fn verify_compositional(
         &self,
         linked: &LinkedContract,
         candidate: &Expr,
     ) -> Result<axiom_verify::CompositionalProof, String> {
-        let summary = self
-            .verification_summaries
+        let summaries = self.all_linked_summaries();
+        self.verify_compositional_with_verified_summaries(linked, candidate, &summaries)
+    }
+
+    pub fn verify_compositional_with_metrics(
+        &self,
+        linked: &LinkedContract,
+        candidate: &Expr,
+    ) -> Result<
+        (
+            axiom_verify::CompositionalProof,
+            axiom_verify::VerificationMetrics,
+        ),
+        String,
+    > {
+        let summaries = self.all_linked_summaries();
+        self.verify_compositional_with_verified_summaries_and_metrics(linked, candidate, &summaries)
+    }
+
+    /// Verifies a source summary using only dependency summaries already accepted by the caller.
+    pub fn verify_compositional_with_verified_summaries(
+        &self,
+        linked: &LinkedContract,
+        candidate: &Expr,
+        verified_summaries: &HashMap<ContractId, Contract>,
+    ) -> Result<axiom_verify::CompositionalProof, String> {
+        let summary = self.source_summary(linked)?;
+        let callees = self.verified_callees(linked, summary, verified_summaries)?;
+        axiom_verify::verify_compositional(&summary.contract, candidate, &callees)
+    }
+
+    pub fn verify_compositional_with_verified_summaries_and_metrics(
+        &self,
+        linked: &LinkedContract,
+        candidate: &Expr,
+        verified_summaries: &HashMap<ContractId, Contract>,
+    ) -> Result<
+        (
+            axiom_verify::CompositionalProof,
+            axiom_verify::VerificationMetrics,
+        ),
+        String,
+    > {
+        let summary = self.source_summary(linked)?;
+        let callees = self.verified_callees(linked, summary, verified_summaries)?;
+        axiom_verify::verify_compositional_with_metrics(&summary.contract, candidate, &callees)
+    }
+
+    fn source_summary(&self, linked: &LinkedContract) -> Result<&LinkedContract, String> {
+        self.verification_summaries
             .iter()
             .find(|item| item.source == linked.source && item.contract.name == linked.contract.name)
-            .ok_or_else(|| format!("missing verification summary: {}", linked.contract.name))?;
-        let callees = self
-            .verification_callees
-            .get(&linked.source)
-            .cloned()
-            .unwrap_or_default();
-        axiom_verify::verify_compositional(&summary.contract, candidate, &callees)
+            .ok_or_else(|| format!("missing verification summary: {}", linked.contract.name))
+    }
+
+    fn all_linked_summaries(&self) -> HashMap<ContractId, Contract> {
+        self.contracts
+            .iter()
+            .map(|linked| (ContractId::from(linked), linked.contract.clone()))
+            .collect()
+    }
+
+    fn verified_callees(
+        &self,
+        linked: &LinkedContract,
+        summary: &LinkedContract,
+        verified_summaries: &HashMap<ContractId, Contract>,
+    ) -> Result<HashMap<String, Contract>, String> {
+        let identities = self.verification_callee_ids.get(&linked.source);
+        let signatures = self.verification_callees.get(&linked.source);
+        let mut dependencies = Vec::new();
+        for clause in summary
+            .contract
+            .requires
+            .iter()
+            .chain(&summary.contract.ensures)
+        {
+            collect_contract_dependencies(clause, None, &mut dependencies);
+        }
+        let mut names = dependencies
+            .into_iter()
+            .map(|dependency| dependency.call_name)
+            .collect::<Vec<_>>();
+        names.sort();
+        names.dedup();
+
+        let mut callees = HashMap::new();
+        for name in names {
+            let id = identities
+                .and_then(|identities| identities.get(&name))
+                .ok_or_else(|| format!("unknown callee `{name}` in {}", linked.contract.name))?;
+            if let Some(contract) = verified_summaries.get(id) {
+                callees.insert(name, contract.clone());
+                continue;
+            }
+            if let Some(signature) = signatures
+                .and_then(|signatures| signatures.get(&name))
+                .filter(|contract| contract.kind == axiom_parser::DeclarationKind::Extern)
+            {
+                callees.insert(name, signature.clone());
+                continue;
+            }
+            return Err(format!(
+                "unverified callee summary `{name}` required by `{}`",
+                linked.contract.name
+            ));
+        }
+        Ok(callees)
     }
 }
 
@@ -73,6 +190,12 @@ struct Definition {
 struct ModuleInfo {
     path: PathBuf,
     module: Module,
+}
+
+#[derive(Debug, Clone)]
+struct ContractDependency {
+    call_name: String,
+    span: Option<Span>,
 }
 
 /// Loads a project from `synthetix.toml` and links every imported module.
@@ -347,6 +470,26 @@ fn link_project(config: ProjectConfig, modules: Vec<ModuleInfo>) -> Result<Proje
         }
     }
 
+    let verification_order = verification_order(&definitions, &scopes)?;
+    let verification_callee_ids = scopes
+        .iter()
+        .map(|(source, scope)| {
+            let ids = scope
+                .iter()
+                .map(|(name, key)| {
+                    (
+                        name.clone(),
+                        ContractId {
+                            source: key.0.clone(),
+                            name: key.1.clone(),
+                        },
+                    )
+                })
+                .collect();
+            (source.clone(), ids)
+        })
+        .collect();
+
     let mut cache = HashMap::new();
     let verification_callees = scopes
         .iter()
@@ -406,9 +549,152 @@ fn link_project(config: ProjectConfig, modules: Vec<ModuleInfo>) -> Result<Proje
         contracts,
         verification_summaries,
         verification_callees,
+        verification_callee_ids,
+        verification_order,
         pages,
         files: modules.into_iter().map(|module| module.path).collect(),
     })
+}
+
+fn verification_order(
+    definitions: &HashMap<ContractKey, Definition>,
+    scopes: &HashMap<PathBuf, HashMap<String, ContractKey>>,
+) -> Result<Vec<ContractId>, String> {
+    fn visit(
+        key: &ContractKey,
+        definitions: &HashMap<ContractKey, Definition>,
+        scopes: &HashMap<PathBuf, HashMap<String, ContractKey>>,
+        visiting: &mut Vec<ContractKey>,
+        visited: &mut HashSet<ContractKey>,
+        ordered: &mut Vec<ContractId>,
+    ) -> Result<(), String> {
+        if visited.contains(key) {
+            return Ok(());
+        }
+        let definition = definitions
+            .get(key)
+            .ok_or_else(|| format!("contract not found: {}", key.1))?;
+        visiting.push(key.clone());
+        let mut dependencies = Vec::new();
+        for (clauses, spans) in [
+            (
+                &definition.contract.requires,
+                &definition.contract.requires_spans,
+            ),
+            (
+                &definition.contract.ensures,
+                &definition.contract.ensures_spans,
+            ),
+        ] {
+            for (index, clause) in clauses.iter().enumerate() {
+                collect_contract_dependencies(clause, spans.get(index).copied(), &mut dependencies);
+            }
+        }
+        let scope = scopes
+            .get(&key.0)
+            .ok_or_else(|| format!("missing module scope: {}", key.0.display()))?;
+        for dependency in dependencies {
+            let Some(target) = scope.get(&dependency.call_name) else {
+                let (line, column) = dependency
+                    .span
+                    .map(|span| (span.line, span.column))
+                    .unwrap_or((1, 1));
+                return Err(format!(
+                    "{}:{line}:{column}: unknown contract call `{}` in `{}`",
+                    key.0.display(),
+                    dependency.call_name,
+                    key.1
+                ));
+            };
+            if let Some(cycle_start) = visiting.iter().position(|item| item == target) {
+                let chain = visiting[cycle_start..]
+                    .iter()
+                    .map(|item| item.1.as_str())
+                    .chain(std::iter::once(target.1.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(" -> ");
+                let (line, column) = dependency
+                    .span
+                    .map(|span| (span.line, span.column))
+                    .unwrap_or((1, 1));
+                return Err(format!(
+                    "{}:{line}:{column}: circular contract call: {chain} (caller={}, callee={}, call_chain={chain})",
+                    key.0.display(),
+                    key.1,
+                    dependency.call_name
+                ));
+            }
+            visit(target, definitions, scopes, visiting, visited, ordered)?;
+        }
+        visiting.pop();
+        visited.insert(key.clone());
+        ordered.push(ContractId {
+            source: key.0.clone(),
+            name: key.1.clone(),
+        });
+        Ok(())
+    }
+
+    let mut roots = definitions.keys().cloned().collect::<Vec<_>>();
+    roots.sort();
+    let mut visiting = Vec::new();
+    let mut visited = HashSet::new();
+    let mut ordered = Vec::with_capacity(roots.len());
+    for key in roots {
+        visit(
+            &key,
+            definitions,
+            scopes,
+            &mut visiting,
+            &mut visited,
+            &mut ordered,
+        )?;
+    }
+    Ok(ordered)
+}
+
+fn collect_contract_dependencies(
+    expr: &SpecExpr,
+    span: Option<Span>,
+    dependencies: &mut Vec<ContractDependency>,
+) {
+    match expr {
+        SpecExpr::Call(name, args) => {
+            // The target is resolved against the caller's scope during graph traversal.
+            dependencies.push(ContractDependency {
+                call_name: name.clone(),
+                span,
+            });
+            for arg in args {
+                collect_contract_dependencies(arg, span, dependencies);
+            }
+        }
+        SpecExpr::Binary(_, lhs, rhs) => {
+            collect_contract_dependencies(lhs, span, dependencies);
+            collect_contract_dependencies(rhs, span, dependencies);
+        }
+        SpecExpr::If(condition, then_branch, else_branch) => {
+            collect_contract_dependencies(condition, span, dependencies);
+            collect_contract_dependencies(then_branch, span, dependencies);
+            collect_contract_dependencies(else_branch, span, dependencies);
+        }
+        SpecExpr::Let(_, value, body) => {
+            collect_contract_dependencies(value, span, dependencies);
+            collect_contract_dependencies(body, span, dependencies);
+        }
+        SpecExpr::List(values) => {
+            for value in values {
+                collect_contract_dependencies(value, span, dependencies);
+            }
+        }
+        SpecExpr::Record { fields, .. } => {
+            for (_, value) in fields {
+                collect_contract_dependencies(value, span, dependencies);
+            }
+        }
+        SpecExpr::Field(value, _) => collect_contract_dependencies(value, span, dependencies),
+        SpecExpr::Ident(_) | SpecExpr::Number(_) | SpecExpr::Bool(_) | SpecExpr::Text(_) => {}
+    }
 }
 
 fn expand_contract(
@@ -1253,7 +1539,141 @@ mod tests {
 
         let error = load(root.join("synthetix.toml")).unwrap_err();
         assert!(error.contains(&entry.display().to_string()));
+        assert!(error.contains(&format!("{}:2:", entry.display())));
         assert!(error.contains("circular contract call: first"));
+        assert!(error.contains("caller=second"));
+        assert!(error.contains("callee=first"));
+        assert!(error.contains("call_chain=first -> second -> first"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_missing_contract_call_with_source_location() {
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-project-missing-call-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let entry = root.join("entry.ax");
+        fs::write(
+            &entry,
+            "contract caller(value: u32) -> u32 {\n ensures result == missing(value);\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("synthetix.toml"),
+            "[project]\nentry = \"entry.ax\"\ntarget = \"web\"\n",
+        )
+        .unwrap();
+
+        let error = load(root.join("synthetix.toml")).unwrap_err();
+        assert!(error.contains(&format!("{}:2:", entry.display())));
+        assert!(error.contains("unknown contract call `missing` in `caller`"));
+        assert!(!error.contains("COUNTEREXAMPLE"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn verification_order_is_deterministic_and_dependency_first() {
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-project-order-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("entry.ax"),
+            "contract root(value: u32) -> u32 { requires value > 0; ensures result == middle(value); }\n\
+             contract middle(value: u32) -> u32 { requires value > 0; ensures result == leaf(value); }\n\
+             contract leaf(value: u32) -> u32 { requires value > 0; ensures result == value; }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("synthetix.toml"),
+            "[project]\nentry = \"entry.ax\"\ntarget = \"web\"\n",
+        )
+        .unwrap();
+
+        let first = load(root.join("synthetix.toml")).unwrap();
+        let second = load(root.join("synthetix.toml")).unwrap();
+        assert_eq!(first.verification_order, second.verification_order);
+        let positions = first
+            .verification_order
+            .iter()
+            .enumerate()
+            .map(|(index, id)| (id.name.as_str(), index))
+            .collect::<HashMap<_, _>>();
+        assert!(positions["leaf"] < positions["middle"]);
+        assert!(positions["middle"] < positions["root"]);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reports_deep_postcondition_counterexample_after_verified_summaries() {
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-project-deep-counterexample-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("entry.ax"),
+            "contract level0(value: u32) -> u32 { requires value > 0; ensures result == value; }\n\
+             contract level1(value: u32) -> u32 { requires value > 0; ensures result == level0(value); }\n\
+             contract level2(value: u32) -> u32 { requires value > 0; ensures result == level1(value); }\n\
+             contract root(value: u32) -> u32 { requires value > 0; ensures result == level2(value); }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("synthetix.toml"),
+            "[project]\nentry = \"entry.ax\"\ntarget = \"web\"\n",
+        )
+        .unwrap();
+
+        let project = load(root.join("synthetix.toml")).unwrap();
+        let mut verified = HashMap::new();
+        let root_id = ContractId {
+            source: fs::canonicalize(root.join("entry.ax")).unwrap(),
+            name: "root".to_string(),
+        };
+        for id in &project.verification_order {
+            if *id == root_id {
+                break;
+            }
+            let linked = project
+                .contracts
+                .iter()
+                .find(|linked| ContractId::from(*linked) == *id)
+                .unwrap();
+            let proof = project
+                .verify_compositional_with_verified_summaries(linked, &Expr::Arg(0), &verified)
+                .unwrap();
+            assert_eq!(proof.proof, Some(axiom_verify::ProofResult::Verified));
+            verified.insert(id.clone(), linked.contract.clone());
+        }
+        let linked_root = project
+            .contracts
+            .iter()
+            .find(|linked| ContractId::from(*linked) == root_id)
+            .unwrap();
+        let proof = project
+            .verify_compositional_with_verified_summaries(linked_root, &Expr::Const(0), &verified)
+            .unwrap();
+        assert!(matches!(
+            proof.proof,
+            Some(axiom_verify::ProofResult::Counterexample(_))
+        ));
+        assert_eq!(proof.diagnostic, None);
 
         fs::remove_dir_all(root).unwrap();
     }

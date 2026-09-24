@@ -1,6 +1,6 @@
 //! SMT verification for the initial u32 contract subset.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Instant};
 
 use axiom_ami::Expr;
 use axiom_parser::{BinaryOp, Contract, Span, SpecExpr, Type};
@@ -72,9 +72,50 @@ pub enum PreconditionResult {
     SolverUnknown,
 }
 
+/// Optional timing and call-count data for benchmark runs. Normal verifier APIs
+/// do not collect it, so production verification does not pay the timing cost.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VerificationMetrics {
+    pub solver_invocations: usize,
+    pub solver_time_ns: u128,
+}
+
+impl VerificationMetrics {
+    pub fn merge(&mut self, other: Self) {
+        self.solver_invocations += other.solver_invocations;
+        self.solver_time_ns += other.solver_time_ns;
+    }
+}
+
+fn solver_check(solver: &Solver, metrics: &mut Option<&mut VerificationMetrics>) -> SatResult {
+    let Some(metrics) = metrics.as_deref_mut() else {
+        return solver.check();
+    };
+    let started = Instant::now();
+    let result = solver.check();
+    metrics.solver_invocations += 1;
+    metrics.solver_time_ns += started.elapsed().as_nanos();
+    result
+}
+
 /// Checks whether the conjunction of all `requires` clauses has at least one
 /// valid scalar input.
 pub fn check_preconditions(contract: &Contract) -> Result<PreconditionResult, String> {
+    check_preconditions_inner(contract, &mut None)
+}
+
+pub fn check_preconditions_with_metrics(
+    contract: &Contract,
+) -> Result<(PreconditionResult, VerificationMetrics), String> {
+    let mut metrics = VerificationMetrics::default();
+    let result = check_preconditions_inner(contract, &mut Some(&mut metrics))?;
+    Ok((result, metrics))
+}
+
+fn check_preconditions_inner(
+    contract: &Contract,
+    metrics: &mut Option<&mut VerificationMetrics>,
+) -> Result<PreconditionResult, String> {
     let args = symbolic_args(contract)?;
     let result = BV::new_const("__axiom_result", 32);
     let requires = preconditions_to_bool(contract, &args, &result)?;
@@ -82,7 +123,7 @@ pub fn check_preconditions(contract: &Contract) -> Result<PreconditionResult, St
     constrain_bool_parameters(&solver, contract, &args);
     solver.assert(&requires);
 
-    match solver.check() {
+    match solver_check(&solver, metrics) {
         SatResult::Sat => Ok(PreconditionResult::Satisfiable),
         SatResult::Unsat => Ok(PreconditionResult::UnsatisfiablePrecondition),
         SatResult::Unknown => Ok(PreconditionResult::SolverUnknown),
@@ -91,6 +132,21 @@ pub fn check_preconditions(contract: &Contract) -> Result<PreconditionResult, St
 
 /// Checks syntax/type validity and whether the contract has any model.
 pub fn check_contract(contract: &Contract) -> Result<ContractCheck, String> {
+    check_contract_inner(contract, &mut None)
+}
+
+pub fn check_contract_with_metrics(
+    contract: &Contract,
+) -> Result<(ContractCheck, VerificationMetrics), String> {
+    let mut metrics = VerificationMetrics::default();
+    let result = check_contract_inner(contract, &mut Some(&mut metrics))?;
+    Ok((result, metrics))
+}
+
+fn check_contract_inner(
+    contract: &Contract,
+    metrics: &mut Option<&mut VerificationMetrics>,
+) -> Result<ContractCheck, String> {
     if let Err(error) = axiom_parser::validate(contract) {
         return Ok(ContractCheck::Invalid(error));
     }
@@ -99,7 +155,7 @@ pub fn check_contract(contract: &Contract) -> Result<ContractCheck, String> {
         return Ok(ContractCheck::Valid);
     }
 
-    match check_preconditions(contract)? {
+    match check_preconditions_inner(contract, metrics)? {
         PreconditionResult::Satisfiable => {}
         PreconditionResult::UnsatisfiablePrecondition => {
             return Ok(ContractCheck::UnsatisfiablePrecondition);
@@ -117,13 +173,13 @@ pub fn check_contract(contract: &Contract) -> Result<ContractCheck, String> {
     constrain_bool_parameters(&solver, contract, &args);
     solver.assert(Bool::and(&[&requires, &ensures]));
 
-    match solver.check() {
+    match solver_check(&solver, metrics) {
         SatResult::Sat if contract.kind == axiom_parser::DeclarationKind::Function => {
             let candidate = match implementation_to_ami(contract) {
                 Ok(candidate) => candidate,
                 Err(error) => return Ok(ContractCheck::Invalid(error)),
             };
-            match verify(contract, &candidate)? {
+            match verify_inner(contract, &candidate, metrics)? {
                 ProofResult::Verified => Ok(ContractCheck::Valid),
                 ProofResult::Counterexample(values) => Ok(ContractCheck::Invalid(format!(
                     "fn implementation violates its contract at {values:?}"
@@ -238,7 +294,24 @@ enum Value {
 
 /// Proves that `candidate` satisfies every `ensures` clause under `requires`.
 pub fn verify(contract: &Contract, candidate: &Expr) -> Result<ProofResult, String> {
-    match check_preconditions(contract)? {
+    verify_inner(contract, candidate, &mut None)
+}
+
+pub fn verify_with_metrics(
+    contract: &Contract,
+    candidate: &Expr,
+) -> Result<(ProofResult, VerificationMetrics), String> {
+    let mut metrics = VerificationMetrics::default();
+    let result = verify_inner(contract, candidate, &mut Some(&mut metrics))?;
+    Ok((result, metrics))
+}
+
+fn verify_inner(
+    contract: &Contract,
+    candidate: &Expr,
+    metrics: &mut Option<&mut VerificationMetrics>,
+) -> Result<ProofResult, String> {
+    match check_preconditions_inner(contract, metrics)? {
         PreconditionResult::Satisfiable => {}
         PreconditionResult::UnsatisfiablePrecondition => {
             return Err(
@@ -280,7 +353,7 @@ pub fn verify(contract: &Contract, candidate: &Expr) -> Result<ProofResult, Stri
     let solver = Solver::new();
     constrain_bool_parameters(&solver, contract, &args);
     solver.assert(&violation);
-    match solver.check() {
+    match solver_check(&solver, metrics) {
         SatResult::Unsat => Ok(ProofResult::Verified),
         SatResult::Unknown => Ok(ProofResult::SolverUnknown),
         SatResult::Sat => {
@@ -332,6 +405,25 @@ pub fn verify_compositional(
     candidate: &Expr,
     callees: &HashMap<String, Contract>,
 ) -> Result<CompositionalProof, String> {
+    verify_compositional_inner(contract, candidate, callees, &mut None)
+}
+
+pub fn verify_compositional_with_metrics(
+    contract: &Contract,
+    candidate: &Expr,
+    callees: &HashMap<String, Contract>,
+) -> Result<(CompositionalProof, VerificationMetrics), String> {
+    let mut metrics = VerificationMetrics::default();
+    let proof = verify_compositional_inner(contract, candidate, callees, &mut Some(&mut metrics))?;
+    Ok((proof, metrics))
+}
+
+fn verify_compositional_inner(
+    contract: &Contract,
+    candidate: &Expr,
+    callees: &HashMap<String, Contract>,
+    metrics: &mut Option<&mut VerificationMetrics>,
+) -> Result<CompositionalProof, String> {
     if contract.ensures.is_empty() {
         return Err("contract must have at least one ensures clause".to_string());
     }
@@ -372,7 +464,7 @@ pub fn verify_compositional(
     let requires = Bool::and(&requires_refs);
     let caller_solver = solver_with_calls(contract, &args, &calls.constraints);
     caller_solver.assert(&requires);
-    match caller_solver.check() {
+    match solver_check(&caller_solver, metrics) {
         SatResult::Unsat => {
             return Err(
                 "UNSATISFIABLE_PRECONDITION: requires clauses are contradictory".to_string(),
@@ -415,7 +507,7 @@ pub fn verify_compositional(
         let solver = solver_with_calls(contract, &args, &calls.constraints);
         solver.assert(&requires);
         solver.assert(&obligation.violation);
-        match solver.check() {
+        match solver_check(&solver, metrics) {
             SatResult::Sat => {
                 return Ok(CompositionalProof {
                     proof: None,
@@ -437,7 +529,7 @@ pub fn verify_compositional(
 
     let solver = solver_with_calls(contract, &args, &calls.constraints);
     solver.assert(requires & ensures.not());
-    match solver.check() {
+    match solver_check(&solver, metrics) {
         SatResult::Unsat => Ok(CompositionalProof {
             proof: Some(ProofResult::Verified),
             diagnostic: None,

@@ -1,0 +1,4 @@
+contract hidden_nine(value: u32) -> bool {
+    ensures result == true;
+    ensures if value == 9 { result == false } else { true };
+}
