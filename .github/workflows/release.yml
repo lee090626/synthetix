@@ -71,9 +71,9 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            cli="target/${{ matrix.target }}/release/axiom.exe"
+            cli="$(pwd -P)/target/${{ matrix.target }}/release/axiom.exe"
           else
-            cli="target/${{ matrix.target }}/release/axiom"
+            cli="$(pwd -P)/target/${{ matrix.target }}/release/axiom"
           fi
           evidence="$RUNNER_TEMP/native-cli-evidence"
 
