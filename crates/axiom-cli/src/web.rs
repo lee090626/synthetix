@@ -9,7 +9,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use axiom_ami::Expr;
 use axiom_parser::{BinaryOp, DeclarationKind, PageElement, Reducer, SpecExpr, Type};
-use axiom_project::{LinkedPage, Project};
+use axiom_project::{ContractId, LinkedPage, Project};
 
 #[derive(Debug, Clone)]
 struct CompiledFunction {
@@ -152,7 +152,6 @@ fn compile_contracts(project: &Project) -> Result<Vec<CompiledFunction>, String>
             return Err(format!("duplicate web extern {}", linked.contract.name));
         }
     }
-    let mut compiled = Vec::new();
     for linked in &project.contracts {
         if linked.contract.kind == DeclarationKind::Extern {
             continue;
@@ -168,6 +167,24 @@ fn compile_contracts(project: &Project) -> Result<Vec<CompiledFunction>, String>
         if !export_names.insert(name.clone()) {
             return Err(format!("duplicate web export {name}"));
         }
+    }
+
+    let mut verified_summaries = HashMap::new();
+    let mut compiled_by_id = HashMap::new();
+    let linked_by_id = project
+        .contracts
+        .iter()
+        .map(|linked| (ContractId::from(linked), linked))
+        .collect::<HashMap<_, _>>();
+    for id in &project.verification_order {
+        let linked = linked_by_id
+            .get(id)
+            .copied()
+            .ok_or_else(|| format!("missing linked contract {}", id.name))?;
+        if linked.contract.kind == DeclarationKind::Extern {
+            continue;
+        }
+        let name = linked.contract.name.clone();
         let candidate = axiom_synth::synthesize(&linked.contract)
             .map_err(|error| format!("{}:{}: {error}", linked.source.display(), name))?;
         let requires = axiom_synth::lower_requires(&linked.contract)
@@ -183,7 +200,7 @@ fn compile_contracts(project: &Project) -> Result<Vec<CompiledFunction>, String>
             ));
         }
         let composition = project
-            .verify_compositional(linked, &candidate)
+            .verify_compositional_with_verified_summaries(linked, &candidate, &verified_summaries)
             .map_err(|error| format!("{}:{}: {error}", linked.source.display(), name))?;
         match (composition.proof, composition.diagnostic) {
             (
@@ -193,8 +210,8 @@ fn compile_contracts(project: &Project) -> Result<Vec<CompiledFunction>, String>
             (None, Some(axiom_verify::Diagnostic::CallPreconditionViolation { callee, span })) => {
                 let (line, column) = span.map(|span| (span.line, span.column)).unwrap_or((1, 1));
                 return Err(format!(
-                    "{}:{line}:{column}: call-site precondition for {callee} is not established",
-                    linked.source.display()
+                    "{}:{line}:{column}: call-site precondition for {callee} in {name} is not established",
+                    linked.source.display(),
                 ));
             }
             (Some(axiom_verify::ProofResult::Counterexample(values)), _) => {
@@ -219,17 +236,25 @@ fn compile_contracts(project: &Project) -> Result<Vec<CompiledFunction>, String>
                 ));
             }
         }
+        verified_summaries.insert(ContractId::from(linked), linked.contract.clone());
         println!("verified: {name}");
-        compiled.push(CompiledFunction {
-            name,
-            source: linked.source.clone(),
-            params: linked.contract.params.len() as u32,
-            candidate,
-            requires,
-            requires_export,
-        });
+        compiled_by_id.insert(
+            ContractId::from(linked),
+            CompiledFunction {
+                name,
+                source: linked.source.clone(),
+                params: linked.contract.params.len() as u32,
+                candidate,
+                requires,
+                requires_export,
+            },
+        );
     }
-    Ok(compiled)
+    Ok(project
+        .contracts
+        .iter()
+        .filter_map(|linked| compiled_by_id.remove(&ContractId::from(linked)))
+        .collect())
 }
 
 fn page_html(project: &Project) -> String {
@@ -1567,6 +1592,8 @@ mod tests {
             }],
             verification_summaries: Vec::new(),
             verification_callees: HashMap::new(),
+            verification_callee_ids: HashMap::new(),
+            verification_order: Vec::new(),
             pages: Vec::new(),
             files: Vec::new(),
         };
@@ -1576,6 +1603,88 @@ mod tests {
         assert!(javascript.contains("callContract(element.function"));
         assert!(javascript.contains("requestEffect(request, targetState"));
         assert!(javascript.contains("fetch('./app.wasm')"));
+    }
+
+    #[test]
+    fn production_build_verifies_nested_contract_chains_at_depth_1_2_4_8() {
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-web-summary-depth-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        for depth in [1, 2, 4, 8] {
+            let project_dir = root.join(format!("depth-{depth}"));
+            fs::create_dir_all(&project_dir).unwrap();
+            let mut source = String::new();
+            for index in 0..depth {
+                let value = if index == 0 {
+                    "value".to_string()
+                } else {
+                    format!("level{}(value)", index - 1)
+                };
+                source.push_str(&format!(
+                    "contract level{index}(value: u32) -> u32 {{ requires value > 0; ensures result == {value}; }}\n"
+                ));
+            }
+            source.push_str(&format!(
+                "contract root(value: u32) -> u32 {{ requires value > 0; ensures result == level{}(value); }}\n",
+                depth - 1
+            ));
+            fs::write(project_dir.join("entry.ax"), source).unwrap();
+            let config = project_dir.join("synthetix.toml");
+            fs::write(
+                &config,
+                "[project]\nentry = \"entry.ax\"\ntarget = \"web\"\n",
+            )
+            .unwrap();
+
+            let output = project_dir.join("dist");
+            build(&config, &output).unwrap();
+            let wasm = fs::read(output.join("app.wasm")).unwrap();
+            assert!(
+                wasm.starts_with(b"\0asm"),
+                "depth {depth} did not emit WASM"
+            );
+            assert!(fs::metadata(output.join("app.proof.json")).unwrap().len() > 0);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn production_build_reports_middle_callee_precondition_without_wasm() {
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-web-middle-precondition-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("entry.ax"),
+            "contract positive(value: u32) -> u32 { requires value > 0; ensures result == value; }\n\
+             contract middle(value: u32) -> u32 { requires value >= 0; ensures result == positive(value); }\n\
+             contract root(value: u32) -> u32 { requires value > 0; ensures result == middle(value); }\n",
+        )
+        .unwrap();
+        let config = root.join("synthetix.toml");
+        fs::write(
+            &config,
+            "[project]\nentry = \"entry.ax\"\ntarget = \"web\"\n",
+        )
+        .unwrap();
+
+        let output = root.join("dist");
+        let error = build(&config, &output).unwrap_err();
+        assert!(error.contains("entry.ax:2:"), "{error}");
+        assert!(error.contains("call-site precondition for positive in middle"));
+        assert!(!error.contains("COUNTEREXAMPLE"));
+        assert!(!output.join("app.wasm").exists());
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1958,6 +2067,8 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
             contracts,
             verification_summaries: contracts_for_project,
             verification_callees: HashMap::new(),
+            verification_callee_ids: HashMap::new(),
+            verification_order: Vec::new(),
             pages: vec![LinkedPage {
                 source: PathBuf::from("/tmp/synthetix/main.ax"),
                 page,

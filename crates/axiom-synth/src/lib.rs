@@ -57,6 +57,46 @@ impl SynthesisResult {
             Self::ResourceLimit { .. } => "RESOURCE_LIMIT",
         }
     }
+
+    pub fn candidates_checked(&self) -> usize {
+        match self {
+            Self::Found {
+                candidates_checked, ..
+            }
+            | Self::NoCandidate {
+                candidates_checked, ..
+            }
+            | Self::Timeout { candidates_checked }
+            | Self::ResourceLimit {
+                candidates_checked, ..
+            } => *candidates_checked,
+        }
+    }
+}
+
+/// Optional search and solver counters for benchmark runs. Normal synthesis
+/// APIs keep their existing uninstrumented path.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SynthesisMetrics {
+    pub candidate_count: usize,
+    pub generated_candidate_count: usize,
+    pub synthesis_iterations: usize,
+    pub search_batches: usize,
+    pub counterexample_count: usize,
+    pub initial_sample_count: usize,
+    pub peak_sample_count: usize,
+    pub candidate_generation_time_ns: u128,
+    pub sample_generation_time_ns: u128,
+    pub solver_invocations: usize,
+    pub solver_time_ns: u128,
+    pub peak_resource_estimate_bytes: usize,
+}
+
+impl SynthesisMetrics {
+    fn merge_verification(&mut self, metrics: axiom_verify::VerificationMetrics) {
+        self.solver_invocations += metrics.solver_invocations;
+        self.solver_time_ns += metrics.solver_time_ns;
+    }
 }
 
 /// Finds the first verified candidate in the bounded search space.
@@ -69,13 +109,40 @@ pub fn synthesize_result_with_options(
     contract: &Contract,
     options: SynthesisOptions,
 ) -> Result<SynthesisResult, String> {
+    synthesize_result_inner(contract, options, &mut None)
+}
+
+/// Runs the same bounded search as `synthesize_result_with_options` and also
+/// collects counters for benchmark reporting.
+pub fn synthesize_result_with_metrics(
+    contract: &Contract,
+    options: SynthesisOptions,
+) -> Result<(SynthesisResult, SynthesisMetrics), String> {
+    let mut metrics = SynthesisMetrics::default();
+    let result = synthesize_result_inner(contract, options, &mut Some(&mut metrics))?;
+    metrics.candidate_count = metrics.synthesis_iterations;
+    Ok((result, metrics))
+}
+
+fn synthesize_result_inner(
+    contract: &Contract,
+    options: SynthesisOptions,
+    metrics: &mut Option<&mut SynthesisMetrics>,
+) -> Result<SynthesisResult, String> {
     if contract.kind == DeclarationKind::Extern {
         return Err(
             "EXTERN_OUTSIDE_VERIFICATION_BOUNDARY: extern declarations require a runtime adapter"
                 .to_string(),
         );
     }
-    match check_contract(contract)? {
+    let contract_check = if let Some(metrics) = metrics.as_deref_mut() {
+        let (result, solver_metrics) = axiom_verify::check_contract_with_metrics(contract)?;
+        metrics.merge_verification(solver_metrics);
+        result
+    } else {
+        check_contract(contract)?
+    };
+    match contract_check {
         ContractCheck::Valid => {}
         ContractCheck::Invalid(error) => return Err(format!("INVALID: {error}")),
         ContractCheck::UnsatisfiablePrecondition => {
@@ -98,7 +165,7 @@ pub fn synthesize_result_with_options(
             candidates_checked: 0,
         });
     }
-    search_with_options(contract, options)
+    search_with_options(contract, options, metrics)
 }
 
 /// Finds the cheapest verified candidate within the configured bounded search.
@@ -115,8 +182,16 @@ pub fn synthesize_with_options(
 fn search_with_options(
     contract: &Contract,
     options: SynthesisOptions,
+    metrics: &mut Option<&mut SynthesisMetrics>,
 ) -> Result<SynthesisResult, String> {
-    match check_preconditions(contract)? {
+    let preconditions = if let Some(metrics) = metrics.as_deref_mut() {
+        let (result, solver_metrics) = axiom_verify::check_preconditions_with_metrics(contract)?;
+        metrics.merge_verification(solver_metrics);
+        result
+    } else {
+        check_preconditions(contract)?
+    };
+    match preconditions {
         PreconditionResult::Satisfiable => {}
         PreconditionResult::UnsatisfiablePrecondition => {
             return Err(
@@ -141,6 +216,7 @@ fn search_with_options(
     let sample_limit = options
         .max_candidates
         .min((options.max_memory_bytes / 4) / bytes_per_sample);
+    let sample_started = metrics.as_ref().is_some().then(Instant::now);
     let mut cegis = match CegisState::new(contract, sample_limit, started, options.timeout) {
         Ok(state) => state,
         Err(SampleError::Timeout) => {
@@ -155,6 +231,12 @@ fn search_with_options(
             });
         }
     };
+    if let (Some(metrics), Some(sample_started)) = (metrics.as_deref_mut(), sample_started) {
+        metrics.sample_generation_time_ns += sample_started.elapsed().as_nanos();
+        metrics.initial_sample_count = cegis.samples.len();
+        metrics.peak_sample_count = cegis.samples.len();
+        metrics.peak_resource_estimate_bytes = cegis.samples.len().saturating_mul(bytes_per_sample);
+    }
     let mut first_verified = None;
     let generation_limit = options
         .max_candidates
@@ -165,9 +247,17 @@ fn search_with_options(
         && let Some(candidate) = candidate_from_contract(contract)?
         && cegis.matches(contract, &candidate)
     {
-        match verify(contract, &candidate)? {
+        if let Some(metrics) = metrics.as_deref_mut() {
+            metrics.synthesis_iterations += 1;
+        }
+        match verify_for_search(contract, &candidate, metrics)? {
             ProofResult::Verified => first_verified = Some(candidate),
             ProofResult::Counterexample(values) => {
+                if let Some(metrics) = metrics.as_deref_mut() {
+                    metrics.counterexample_count += 1;
+                    metrics.peak_sample_count =
+                        metrics.peak_sample_count.max(cegis.samples.len() + 1);
+                }
                 if !cegis.observe(values) {
                     return Ok(SynthesisResult::ResourceLimit {
                         candidates_checked: checked,
@@ -183,6 +273,7 @@ fn search_with_options(
 
     let mut generation_truncated = generation_limit == 0;
     for batch_index in 0..6 {
+        let generation_started = metrics.as_ref().is_some().then(Instant::now);
         let candidates = match batch_index {
             0 => base_candidates(
                 contract.params.len(),
@@ -231,6 +322,13 @@ fn search_with_options(
             ),
             _ => unreachable!("fixed synthesis batch index"),
         };
+        if let (Some(metrics), Some(generation_started)) =
+            (metrics.as_deref_mut(), generation_started)
+        {
+            metrics.search_batches += 1;
+            metrics.generated_candidate_count += candidates.len();
+            metrics.candidate_generation_time_ns += generation_started.elapsed().as_nanos();
+        }
         generation_truncated |= generation_limit > 0 && candidates.len() >= generation_limit;
         if timed_out(started, options.timeout) {
             if let Some(candidate) = first_verified.clone() {
@@ -249,6 +347,12 @@ fn search_with_options(
             .iter()
             .map(estimated_candidate_bytes)
             .sum::<usize>();
+        if let Some(metrics) = metrics.as_deref_mut() {
+            let sample_bytes = cegis.samples.len().saturating_mul(bytes_per_sample);
+            metrics.peak_resource_estimate_bytes = metrics
+                .peak_resource_estimate_bytes
+                .max(sample_bytes.saturating_add(estimated_memory));
+        }
         if estimated_memory > options.max_memory_bytes {
             return Ok(SynthesisResult::ResourceLimit {
                 candidates_checked: checked,
@@ -288,7 +392,10 @@ fn search_with_options(
                 continue;
             }
             checked += 1;
-            match verify(contract, &candidate)? {
+            if let Some(metrics) = metrics.as_deref_mut() {
+                metrics.synthesis_iterations += 1;
+            }
+            match verify_for_search(contract, &candidate, metrics)? {
                 ProofResult::Verified => {
                     if let Some(first) = &first_verified {
                         if first != &candidate {
@@ -303,6 +410,11 @@ fn search_with_options(
                     }
                 }
                 ProofResult::Counterexample(values) => {
+                    if let Some(metrics) = metrics.as_deref_mut() {
+                        metrics.counterexample_count += 1;
+                        metrics.peak_sample_count =
+                            metrics.peak_sample_count.max(cegis.samples.len() + 1);
+                    }
                     if !cegis.observe(values) {
                         return Ok(SynthesisResult::ResourceLimit {
                             candidates_checked: checked,
@@ -336,6 +448,20 @@ fn search_with_options(
         candidates_checked: checked,
         last_counterexample: cegis.last_counterexample,
     })
+}
+
+fn verify_for_search(
+    contract: &Contract,
+    candidate: &Expr,
+    metrics: &mut Option<&mut SynthesisMetrics>,
+) -> Result<ProofResult, String> {
+    if let Some(metrics) = metrics.as_deref_mut() {
+        let (result, solver_metrics) = axiom_verify::verify_with_metrics(contract, candidate)?;
+        metrics.merge_verification(solver_metrics);
+        Ok(result)
+    } else {
+        verify(contract, candidate)
+    }
 }
 
 fn format_synthesis_result(result: &SynthesisResult) -> String {

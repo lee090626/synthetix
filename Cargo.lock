@@ -29,6 +29,8 @@ dependencies = [
  "axiom-synth",
  "axiom-verify",
  "axiom-wasm",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
