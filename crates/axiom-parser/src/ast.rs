@@ -5,11 +5,19 @@ pub enum Type {
     U32,
     I32,
     Bool,
+    FixedArray(Box<Type>, usize),
     Text,
     Record(String),
     List(Box<Type>),
     Unknown,
 }
+
+/// The largest fixed array accepted by the v6.1 proof core.
+pub const MAX_VERIFIED_ARRAY_LEN: usize = 16;
+pub const MAX_VERIFIED_LOOP_ITERATIONS: u32 = 16;
+pub const MAX_VERIFIED_RECURSION_DEPTH: u32 = 16;
+/// Bump when verified expression, type, or lowering semantics change.
+pub const VERIFIED_SEMANTICS_VERSION: &str = "v6.3-bounded-program-model";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Param {
@@ -61,6 +69,17 @@ pub enum SpecExpr {
         fields: Vec<(String, SpecExpr)>,
     },
     Field(Box<SpecExpr>, String),
+    Index(Box<SpecExpr>, Box<SpecExpr>),
+    ArrayUpdate(Box<SpecExpr>, Box<SpecExpr>, Box<SpecExpr>),
+    For {
+        index: String,
+        start: u32,
+        end: u32,
+        accumulator: String,
+        initial: Box<SpecExpr>,
+        invariant: Box<SpecExpr>,
+        body: Box<SpecExpr>,
+    },
     Binary(BinaryOp, Box<SpecExpr>, Box<SpecExpr>),
     Let(String, Box<SpecExpr>, Box<SpecExpr>),
     If(Box<SpecExpr>, Box<SpecExpr>, Box<SpecExpr>),

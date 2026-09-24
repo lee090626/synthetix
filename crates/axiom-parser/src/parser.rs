@@ -588,6 +588,33 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type(&mut self) -> Result<Type, String> {
+        if self.current == Token::LBracket {
+            self.advance()?;
+            let element = self.parse_type()?;
+            self.expect(Token::Semi)?;
+            let length = match self.current {
+                Token::Number(length) => {
+                    self.advance()?;
+                    length as usize
+                }
+                ref other => {
+                    return Err(
+                        self.error(format!("Expected a fixed array length, found {:?}", other))
+                    );
+                }
+            };
+            self.expect(Token::RBracket)?;
+            if element != Type::U32 {
+                return Err(self.error("v6.1 fixed arrays currently require u32 elements"));
+            }
+            if length == 0 || length > MAX_VERIFIED_ARRAY_LEN {
+                return Err(self.error(format!(
+                    "fixed array length must be between 1 and {}",
+                    MAX_VERIFIED_ARRAY_LEN
+                )));
+            }
+            return Ok(Type::FixedArray(Box::new(element), length));
+        }
         if self.current == Token::List {
             self.advance()?;
             self.expect(Token::Lt)?;
@@ -630,6 +657,57 @@ impl<'a> Parser<'a> {
         Ok(args)
     }
 
+    fn parse_for_expr(&mut self) -> Result<SpecExpr, String> {
+        let index = self.expect_ident()?;
+        self.expect(Token::In)?;
+        let start = match self.current {
+            Token::Number(value) => {
+                self.advance()?;
+                value
+            }
+            ref other => {
+                return Err(self.error(format!("Expected static loop start, found {other:?}")));
+            }
+        };
+        self.expect(Token::Range)?;
+        let end = match self.current {
+            Token::Number(value) => {
+                self.advance()?;
+                value
+            }
+            ref other => {
+                return Err(self.error(format!("Expected static loop bound, found {other:?}")));
+            }
+        };
+        if end < start || end - start > MAX_VERIFIED_LOOP_ITERATIONS {
+            return Err(self.error(format!(
+                "bounded loop must have 0..={} iterations",
+                MAX_VERIFIED_LOOP_ITERATIONS
+            )));
+        }
+        self.expect(Token::With)?;
+        let accumulator = self.expect_ident()?;
+        if accumulator == index {
+            return Err(self.error("loop index and accumulator must have different names"));
+        }
+        self.expect(Token::Assign)?;
+        let initial = self.parse_expr(0)?;
+        self.expect(Token::Invariant)?;
+        let invariant = self.parse_expr(0)?;
+        self.expect(Token::LBrace)?;
+        let body = self.parse_expr(0)?;
+        self.expect(Token::RBrace)?;
+        Ok(SpecExpr::For {
+            index,
+            start,
+            end,
+            accumulator,
+            initial: Box::new(initial),
+            invariant: Box::new(invariant),
+            body: Box::new(body),
+        })
+    }
+
     /// Pratt parser for expressions.
     fn parse_expr(&mut self, min_bp: u8) -> Result<SpecExpr, String> {
         let prefix = self.current.clone();
@@ -638,7 +716,19 @@ impl<'a> Parser<'a> {
         let mut lhs = match prefix {
             Token::Ident(id) => {
                 if self.current == Token::LParen {
-                    SpecExpr::Call(id, self.parse_call_args()?)
+                    let args = self.parse_call_args()?;
+                    if id == "array_update" {
+                        if args.len() != 3 {
+                            return Err(self.error("array_update expects array, index, and value"));
+                        }
+                        SpecExpr::ArrayUpdate(
+                            Box::new(args[0].clone()),
+                            Box::new(args[1].clone()),
+                            Box::new(args[2].clone()),
+                        )
+                    } else {
+                        SpecExpr::Call(id, args)
+                    }
                 } else if self.current == Token::LBrace && self.next_is_record_literal()? {
                     self.advance()?;
                     let mut fields = Vec::new();
@@ -704,6 +794,7 @@ impl<'a> Parser<'a> {
                 let body = self.parse_expr(0)?;
                 SpecExpr::Let(name, Box::new(value), Box::new(body))
             }
+            Token::For => self.parse_for_expr()?,
             Token::If => {
                 let condition = self.parse_expr(0)?;
                 self.expect(Token::LBrace)?;
@@ -733,6 +824,13 @@ impl<'a> Parser<'a> {
         };
 
         loop {
+            if self.current == Token::LBracket {
+                self.advance()?;
+                let index = self.parse_expr(0)?;
+                self.expect(Token::RBracket)?;
+                lhs = SpecExpr::Index(Box::new(lhs), Box::new(index));
+                continue;
+            }
             if self.current == Token::Dot {
                 self.advance()?;
                 let field = self.expect_ident()?;

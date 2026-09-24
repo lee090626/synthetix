@@ -13,6 +13,8 @@ pub enum Token {
     Ensures,
     If,
     Else,
+    For,
+    Invariant,
     Let,
     In,
     Page,
@@ -47,6 +49,7 @@ pub enum Token {
     RBracket,
     Colon,
     Dot,
+    Range,
     Arrow,   // ->
     Semi,    // ;
     Assign,  // =
@@ -162,7 +165,14 @@ impl<'a> Lexer<'a> {
             '[' => Ok(Token::LBracket),
             ']' => Ok(Token::RBracket),
             ':' => Ok(Token::Colon),
-            '.' => Ok(Token::Dot),
+            '.' => {
+                if self.chars.peek() == Some(&'.') {
+                    self.take_char();
+                    Ok(Token::Range)
+                } else {
+                    Ok(Token::Dot)
+                }
+            }
             ';' => Ok(Token::Semi),
             '-' => {
                 if self.chars.peek() == Some(&'>') {
@@ -304,6 +314,8 @@ impl<'a> Lexer<'a> {
                     "ensures" | "gives" => Ok(Token::Ensures),
                     "if" => Ok(Token::If),
                     "else" => Ok(Token::Else),
+                    "for" => Ok(Token::For),
+                    "invariant" => Ok(Token::Invariant),
                     "let" => Ok(Token::Let),
                     "in" => Ok(Token::In),
                     "page" => Ok(Token::Page),

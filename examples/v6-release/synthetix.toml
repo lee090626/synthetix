@@ -1,0 +1,4 @@
+[project]
+entry = "main.ax"
+target = "web"
+storage_schema_version = 1

@@ -1,0 +1,18 @@
+import { sum4 } from "./arrays.ax";
+import { plus_one } from "./logic.ax";
+import { sum_to } from "./recursive.ax";
+import { balance } from "./api.ax";
+
+contract increment(value: u32) -> u32 {
+    ensures result == plus_one(value);
+}
+
+page Summary {
+    state count: number = 0;
+    state remote: number = 0;
+    persist count;
+    persist remote;
+    show count;
+    show remote;
+    button "increment" updates count with increment(count);
+}

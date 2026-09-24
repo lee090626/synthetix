@@ -39,46 +39,90 @@ pub enum Expr {
         then_branch: Box<Expr>,
         else_branch: Box<Expr>,
     },
+    /// Reads one element from a flattened fixed-array value and traps if out of bounds.
+    ArrayGet {
+        elements: Vec<Expr>,
+        index: Box<Expr>,
+    },
+    /// Evaluates `value` only when `condition` is true; otherwise traps.
+    Guard {
+        condition: Box<Expr>,
+        value: Box<Expr>,
+    },
 }
 
 impl Expr {
     /// Evaluates the expression given input arguments.
     /// All arithmetic operations enforce strict wrapping semantics (modulo 2^32).
     pub fn eval(&self, args: &[u32]) -> u32 {
+        self.try_eval(args)
+            .expect("invalid AMI expression evaluation")
+    }
+
+    pub fn try_eval(&self, args: &[u32]) -> Result<u32, String> {
         match self {
-            Expr::Arg(idx) => args[*idx as usize],
-            Expr::Const(val) => *val,
-            Expr::Add(lhs, rhs) => lhs.eval(args).wrapping_add(rhs.eval(args)),
-            Expr::Sub(lhs, rhs) => lhs.eval(args).wrapping_sub(rhs.eval(args)),
-            Expr::Mul(lhs, rhs) => lhs.eval(args).wrapping_mul(rhs.eval(args)),
+            Expr::Arg(idx) => args
+                .get(*idx as usize)
+                .copied()
+                .ok_or_else(|| format!("missing argument {idx}")),
+            Expr::Const(val) => Ok(*val),
+            Expr::Add(lhs, rhs) => Ok(lhs.try_eval(args)?.wrapping_add(rhs.try_eval(args)?)),
+            Expr::Sub(lhs, rhs) => Ok(lhs.try_eval(args)?.wrapping_sub(rhs.try_eval(args)?)),
+            Expr::Mul(lhs, rhs) => Ok(lhs.try_eval(args)?.wrapping_mul(rhs.try_eval(args)?)),
             Expr::Shl(lhs, rhs) => {
-                let shift = rhs.eval(args) & 31;
-                lhs.eval(args).wrapping_shl(shift)
+                let shift = rhs.try_eval(args)? & 31;
+                Ok(lhs.try_eval(args)?.wrapping_shl(shift))
             }
-            Expr::BitAnd(lhs, rhs) => lhs.eval(args) & rhs.eval(args),
-            Expr::BitOr(lhs, rhs) => lhs.eval(args) | rhs.eval(args),
-            Expr::BitXor(lhs, rhs) => lhs.eval(args) ^ rhs.eval(args),
-            Expr::Eq(lhs, rhs) => u32::from(lhs.eval(args) == rhs.eval(args)),
-            Expr::Ne(lhs, rhs) => u32::from(lhs.eval(args) != rhs.eval(args)),
-            Expr::Lt(lhs, rhs) => u32::from(lhs.eval(args) < rhs.eval(args)),
-            Expr::Le(lhs, rhs) => u32::from(lhs.eval(args) <= rhs.eval(args)),
-            Expr::Gt(lhs, rhs) => u32::from(lhs.eval(args) > rhs.eval(args)),
-            Expr::Ge(lhs, rhs) => u32::from(lhs.eval(args) >= rhs.eval(args)),
-            Expr::SLt(lhs, rhs) => u32::from((lhs.eval(args) as i32) < (rhs.eval(args) as i32)),
-            Expr::SLe(lhs, rhs) => u32::from((lhs.eval(args) as i32) <= (rhs.eval(args) as i32)),
-            Expr::SGt(lhs, rhs) => u32::from((lhs.eval(args) as i32) > (rhs.eval(args) as i32)),
-            Expr::SGe(lhs, rhs) => u32::from((lhs.eval(args) as i32) >= (rhs.eval(args) as i32)),
-            Expr::And(lhs, rhs) => u32::from(lhs.eval(args) != 0 && rhs.eval(args) != 0),
-            Expr::Or(lhs, rhs) => u32::from(lhs.eval(args) != 0 || rhs.eval(args) != 0),
+            Expr::BitAnd(lhs, rhs) => Ok(lhs.try_eval(args)? & rhs.try_eval(args)?),
+            Expr::BitOr(lhs, rhs) => Ok(lhs.try_eval(args)? | rhs.try_eval(args)?),
+            Expr::BitXor(lhs, rhs) => Ok(lhs.try_eval(args)? ^ rhs.try_eval(args)?),
+            Expr::Eq(lhs, rhs) => Ok(u32::from(lhs.try_eval(args)? == rhs.try_eval(args)?)),
+            Expr::Ne(lhs, rhs) => Ok(u32::from(lhs.try_eval(args)? != rhs.try_eval(args)?)),
+            Expr::Lt(lhs, rhs) => Ok(u32::from(lhs.try_eval(args)? < rhs.try_eval(args)?)),
+            Expr::Le(lhs, rhs) => Ok(u32::from(lhs.try_eval(args)? <= rhs.try_eval(args)?)),
+            Expr::Gt(lhs, rhs) => Ok(u32::from(lhs.try_eval(args)? > rhs.try_eval(args)?)),
+            Expr::Ge(lhs, rhs) => Ok(u32::from(lhs.try_eval(args)? >= rhs.try_eval(args)?)),
+            Expr::SLt(lhs, rhs) => Ok(u32::from(
+                (lhs.try_eval(args)? as i32) < (rhs.try_eval(args)? as i32),
+            )),
+            Expr::SLe(lhs, rhs) => Ok(u32::from(
+                (lhs.try_eval(args)? as i32) <= (rhs.try_eval(args)? as i32),
+            )),
+            Expr::SGt(lhs, rhs) => Ok(u32::from(
+                (lhs.try_eval(args)? as i32) > (rhs.try_eval(args)? as i32),
+            )),
+            Expr::SGe(lhs, rhs) => Ok(u32::from(
+                (lhs.try_eval(args)? as i32) >= (rhs.try_eval(args)? as i32),
+            )),
+            Expr::And(lhs, rhs) => Ok(u32::from(
+                lhs.try_eval(args)? != 0 && rhs.try_eval(args)? != 0,
+            )),
+            Expr::Or(lhs, rhs) => Ok(u32::from(
+                lhs.try_eval(args)? != 0 || rhs.try_eval(args)? != 0,
+            )),
             Expr::Select {
                 condition,
                 then_branch,
                 else_branch,
             } => {
-                if condition.eval(args) != 0 {
-                    then_branch.eval(args)
+                if condition.try_eval(args)? != 0 {
+                    then_branch.try_eval(args)
                 } else {
-                    else_branch.eval(args)
+                    else_branch.try_eval(args)
+                }
+            }
+            Expr::ArrayGet { elements, index } => {
+                let index = index.try_eval(args)? as usize;
+                let element = elements
+                    .get(index)
+                    .ok_or_else(|| format!("fixed array index {index} is out of bounds"))?;
+                element.try_eval(args)
+            }
+            Expr::Guard { condition, value } => {
+                if condition.try_eval(args)? == 0 {
+                    Err("verified runtime guard failed".to_string())
+                } else {
+                    value.try_eval(args)
                 }
             }
         }

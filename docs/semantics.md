@@ -87,6 +87,80 @@ collections, recursion, host imports, or server/database/authentication
 internals. Those features require a new semantics decision and are not
 implicitly supported by the v4 artifact format.
 
+## v6.1 Bounded Fixed Arrays
+
+v6.1 adds a separate, bounded proof-input model without changing the frozen
+`v4.1-scalar-baseline` identifier. A verified parameter may use `[u32; N]` for
+`1 <= N <= 16`. The proof and WASM ABI flatten each element into one `u32`
+argument; `.length` is the compile-time length. Verified functions still return
+only scalar values, and `extern` declarations, application state, page
+expressions, and dynamic `List` values do not accept fixed arrays.
+
+`values[index]` reads an element. `array_update(values, index, value)` denotes
+an immutable update that returns a new array value; the original array is
+unchanged. Indices may be `u32` or `i32`, but bounds use the raw 32-bit unsigned
+index value, so negative `i32` values are out of bounds. An access is defined
+only when `index < values.length`.
+
+Every `requires` expression must be defined for every input. Candidate and
+`ensures` accesses must be defined for every input satisfying the conjunction
+of `requires`. Short-circuit `&&`, `||`, and conditional expressions only
+require the selected/right-hand path to be defined. A contract that cannot
+prove these bounds is rejected; AMI/reference evaluation returns an error and
+WASM traps for an out-of-bounds access.
+
+This is a fixed-vector proof model, not heap memory, a runtime collection, or
+an application `List`. v6.0 measured the unsupported verified collection
+parameter as an expressiveness boundary; it did not show application list
+performance to be a bottleneck. The benchmark's priority recommendation for
+compositional summary depth and synthesis scaling remains unchanged.
+
+## v6.2 Bounded Loops
+
+The supported form is a `for` accumulator expression in a `fn` implementation:
+
+```ax
+for i in 0..4 with acc = 0 invariant acc == acc {
+  acc +% values[i]
+}
+```
+
+The range is static and half-open. `end - start` must be between `0` and `16`
+inclusive. `i` is a `u32`; `acc` is initialized once, and each body evaluation
+must return the same type as `acc`. The invariant is a boolean expression over
+the current index and accumulator. Nested loops, runtime-dependent bounds, and
+loops in contracts, clauses, or page expressions are rejected.
+
+The verifier proves the invariant and expression definedness for the initial
+state, each reachable iteration, and the exit state under the function's
+`requires`; finite iterations are then unrolled into AMI and WASM. Thus no
+runtime timeout or stack behavior serves as a termination argument. A failed
+invariant makes the function contract invalid, and executing a failed guard
+traps. A zero-iteration loop still checks its invariant at entry/exit and does
+not evaluate the body.
+
+This is a deliberately static bounded model. It makes repeated verified
+implementations expressible, but unrolling does not claim to reduce Z3 or
+synthesis cost for equivalent manually expanded expressions.
+
+## v6.3 Bounded Structural Recursion
+
+The v4 scalar baseline remains frozen. v6.3 adds a separate function-body
+extension for one `u32 -> u32` self-recursive `fn`: exactly one self-call must
+appear in the nonzero `else` branch of `if n == 0`, and its argument must be
+`n -% 1`. A `u32` measure has lower bound zero; the base branch prevents the
+wrapping decrement from running at zero, so each permitted recursive edge
+strictly decreases the measure. Other functions, mutual recursion, multiple
+self-calls, shadowing the measure, and combining recursion with a bounded loop
+are rejected.
+
+The verifier statically unrolls up to 16 recursive edges (17 active frames when
+counting the initial invocation). A call beyond that bound carries an undefined
+guard. Verification must prove that guard unreachable under `requires`; if it
+cannot, the `fn` is invalid. At runtime a reached guard traps. Termination and
+resource safety therefore come from the syntactic decrease, proof obligation,
+and fixed unroll bound, not from WASM stack overflow behavior.
+
 ## 1. Modulo $2^{32}$ Arithmetic Equivalence
 
 A critical design requirement of Synthetix is that **the specification language, the intermediate representation, the SMT solver, and the target execution environment share identical bit-level semantics**.

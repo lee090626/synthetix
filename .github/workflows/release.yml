@@ -135,6 +135,18 @@ jobs:
             [[ ! -e "$wasm" ]]
             printf '%s\n' "- $fixture returns $expected (exit 1; no WASM): PASS" >> "$evidence/summary.md"
           done
+
+          v6_root="$evidence/v6-release-project"
+          cp -R examples/v6-release "$v6_root"
+          (
+            cd "$v6_root"
+            "$cli" check > "$evidence/v6-check.log" 2>&1
+            "$cli" build > "$evidence/v6-build.log" 2>&1
+          )
+          node scripts/v6-release-smoke.cjs "$v6_root/dist" \
+            > "$evidence/v6-release-smoke.log" 2>&1
+          cat "$evidence/v6-release-smoke.log"
+          printf '%s\n' "- v6 array/loop/modular WASM and static effect smoke: PASS" >> "$evidence/summary.md"
       - name: Publish native CLI summary
         if: always()
         shell: bash

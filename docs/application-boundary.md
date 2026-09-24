@@ -226,8 +226,28 @@ proof manifest and static files, then runs the generated runtime against its
 WASM. It verifies that a page action and explicit verified call use the contract
 export, while a typed extern request updates application state through the host
 adapter and deployment config. The updated persisted state is checked in its
-versioned envelope, then restored and rendered. The extern stays outside the
-proof and WASM.
+versioned envelope, then restored and rendered. The extern implementation stays
+outside the verified contract list and WASM; v6.8 records its trust boundary
+separately.
+
+## v6.8 FFI Trust Boundary
+
+The web proof artifact uses schema version 4. Proof status lives under
+`verification` with scope `WASM_CONTRACTS_ONLY`; its `contracts` entries describe
+only verified WASM candidates. `external_boundaries` separately records each
+`extern` declaration's source, input/output types, `HOST_EFFECT` marker,
+`UNVERIFIED` implementation status, and `EXTERNAL_IMPLEMENTATION` boundary.
+`verification_scope` states that host implementations are unverified and that
+runtime response validation checks the declared scalar type only.
+
+Each external entry records that a host adapter must be registered when called
+and that Axiom does not prove the external behavior matches application intent.
+`audit_metadata.status` is currently `NOT_PROVIDED`; the build has no input for
+caller-supplied audit data. The generated runtime passes the effect and trust-boundary
+markers to the adapter. Missing adapters, invalid arguments or responses, and
+adapter errors remain application runtime failures; they are never proof
+counterexamples. A type-valid external result is still unverified application
+data, not a proof of its factual correctness.
 
 ## v5.0 Scope
 
