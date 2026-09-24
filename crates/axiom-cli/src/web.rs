@@ -5,10 +5,12 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use axiom_ami::Expr;
-use axiom_parser::{BinaryOp, DeclarationKind, PageElement, Reducer, SpecExpr, Type};
+use axiom_parser::{
+    BinaryOp, DeclarationKind, PageElement, Reducer, SpecExpr, Type, VERIFIED_SEMANTICS_VERSION,
+};
 use axiom_project::{ContractId, LinkedPage, Project};
 
 #[derive(Debug, Clone)]
@@ -24,6 +26,43 @@ struct CompiledFunction {
 #[derive(Debug, Clone)]
 pub struct BuildResult {
     pub files: Vec<PathBuf>,
+    pub verification_cache: VerificationCacheStats,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VerificationCacheStats {
+    pub hits: usize,
+    pub misses: usize,
+    pub invalidations: usize,
+    pub elapsed_micros: u128,
+}
+
+#[derive(Debug, Default)]
+struct VerificationCache {
+    entries: HashMap<ContractId, CachedVerifiedCandidate>,
+    stats: VerificationCacheStats,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProofCacheKey {
+    id: ContractId,
+    source: Arc<[u8]>,
+    semantics_version: String,
+    synthesis_options: ProofCacheOptions,
+    dependencies: Vec<(ContractId, Arc<ProofCacheKey>)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProofCacheOptions {
+    timeout: Option<Duration>,
+    max_candidates: usize,
+    max_memory_bytes: usize,
+}
+
+#[derive(Debug, Clone)]
+struct CachedVerifiedCandidate {
+    key: Arc<ProofCacheKey>,
+    candidate: Expr,
 }
 
 #[derive(Debug, Default)]
@@ -33,8 +72,30 @@ struct DevState {
 }
 
 pub fn build(config_path: &Path, output_dir: &Path) -> Result<BuildResult, String> {
+    let mut cache = VerificationCache::default();
+    build_with_cache(config_path, output_dir, &mut cache)
+}
+
+fn build_with_cache(
+    config_path: &Path,
+    output_dir: &Path,
+    cache: &mut VerificationCache,
+) -> Result<BuildResult, String> {
     let project = axiom_project::load(config_path)?;
-    let compiled = compile_contracts(&project)?;
+    build_project(&project, output_dir, cache)
+}
+
+fn build_project(
+    project: &Project,
+    output_dir: &Path,
+    cache: &mut VerificationCache,
+) -> Result<BuildResult, String> {
+    let compiled = compile_contracts_with_cache(
+        project,
+        cache,
+        axiom_synth::SynthesisOptions::default(),
+        VERIFIED_SEMANTICS_VERSION,
+    )?;
     if compiled.is_empty() {
         return Err("web project must contain at least one contract".to_string());
     }
@@ -57,7 +118,7 @@ pub fn build(config_path: &Path, output_dir: &Path) -> Result<BuildResult, Strin
     write_file(&output_dir.join("app.wasm"), &wasm)?;
     write_file(
         &output_dir.join("index.html"),
-        page_html(&project).as_bytes(),
+        page_html(project).as_bytes(),
     )?;
     write_file(
         &output_dir.join("app.config.js"),
@@ -65,12 +126,12 @@ pub fn build(config_path: &Path, output_dir: &Path) -> Result<BuildResult, Strin
     )?;
     write_file(
         &output_dir.join("app.js"),
-        page_javascript(&project).as_bytes(),
+        page_javascript(project).as_bytes(),
     )?;
     write_file(&output_dir.join("app.css"), DEFAULT_CSS.as_bytes())?;
     write_file(
         &output_dir.join("app.proof.json"),
-        proof_json(&project, &compiled).as_bytes(),
+        proof_json(project, &compiled).as_bytes(),
     )?;
 
     println!("target: web");
@@ -80,7 +141,8 @@ pub fn build(config_path: &Path, output_dir: &Path) -> Result<BuildResult, Strin
     println!("verified: {} contract(s)", compiled.len());
     println!("wrote: {}", output_dir.display());
     Ok(BuildResult {
-        files: project.files,
+        files: project.files.clone(),
+        verification_cache: cache.stats,
     })
 }
 
@@ -104,7 +166,8 @@ pub fn dev(config_path: &Path, port: u16, open_browser: bool, once: bool) -> Res
         .parent()
         .ok_or_else(|| "cannot determine project root".to_string())?;
     let output_dir = root.join(".synthetix").join("dev");
-    let initial = build(config_path, &output_dir)?;
+    let mut cache = VerificationCache::default();
+    let initial = build_with_cache(config_path, &output_dir, &mut cache)?;
     if once {
         return Ok(());
     }
@@ -125,7 +188,13 @@ pub fn dev(config_path: &Path, port: u16, open_browser: bool, once: bool) -> Res
     let mut watched_files = initial.files;
     watched_files.push(config_path.to_path_buf());
     thread::spawn(move || {
-        watch_project(watcher_config, watcher_output, watcher_state, watched_files)
+        watch_project(
+            watcher_config,
+            watcher_output,
+            watcher_state,
+            watched_files,
+            cache,
+        )
     });
 
     if open_browser {
@@ -142,6 +211,34 @@ pub fn dev(config_path: &Path, port: u16, open_browser: bool, once: bool) -> Res
 }
 
 fn compile_contracts(project: &Project) -> Result<Vec<CompiledFunction>, String> {
+    let mut cache = VerificationCache::default();
+    compile_contracts_with_cache(
+        project,
+        &mut cache,
+        axiom_synth::SynthesisOptions::default(),
+        VERIFIED_SEMANTICS_VERSION,
+    )
+}
+
+fn compile_contracts_with_cache(
+    project: &Project,
+    cache: &mut VerificationCache,
+    options: axiom_synth::SynthesisOptions,
+    semantics_version: &str,
+) -> Result<Vec<CompiledFunction>, String> {
+    cache.stats = VerificationCacheStats::default();
+    let started = Instant::now();
+    let result = compile_contracts_inner(project, cache, options, semantics_version);
+    cache.stats.elapsed_micros = started.elapsed().as_micros();
+    result
+}
+
+fn compile_contracts_inner(
+    project: &Project,
+    cache: &mut VerificationCache,
+    options: axiom_synth::SynthesisOptions,
+    semantics_version: &str,
+) -> Result<Vec<CompiledFunction>, String> {
     let mut names = HashMap::new();
     let mut export_names = std::collections::HashSet::new();
     let mut extern_names = std::collections::HashSet::new();
@@ -170,6 +267,7 @@ fn compile_contracts(project: &Project) -> Result<Vec<CompiledFunction>, String>
     }
 
     let mut verified_summaries = HashMap::new();
+    let mut verified_cache_keys = HashMap::new();
     let mut compiled_by_id = HashMap::new();
     let linked_by_id = project
         .contracts
@@ -182,11 +280,94 @@ fn compile_contracts(project: &Project) -> Result<Vec<CompiledFunction>, String>
             .copied()
             .ok_or_else(|| format!("missing linked contract {}", id.name))?;
         if linked.contract.kind == DeclarationKind::Extern {
+            let key = proof_cache_key(
+                project,
+                linked,
+                options,
+                semantics_version,
+                &verified_cache_keys,
+            )?;
+            verified_cache_keys.insert(id.clone(), key);
             continue;
         }
         let name = linked.contract.name.clone();
-        let candidate = axiom_synth::synthesize(&linked.contract)
-            .map_err(|error| format!("{}:{}: {error}", linked.source.display(), name))?;
+        let key = proof_cache_key(
+            project,
+            linked,
+            options,
+            semantics_version,
+            &verified_cache_keys,
+        )?;
+        let contract_id = ContractId::from(linked);
+        let cached = cache
+            .entries
+            .get(&contract_id)
+            .filter(|entry| entry.key == key)
+            .cloned();
+        let (candidate, cache_hit) = if let Some(entry) = cached {
+            cache.stats.hits += 1;
+            (entry.candidate, true)
+        } else {
+            cache.stats.misses += 1;
+            if cache.entries.remove(&contract_id).is_some() {
+                cache.stats.invalidations += 1;
+            }
+            let candidate = axiom_synth::synthesize_with_options(&linked.contract, options)
+                .map_err(|error| format!("{}:{}: {error}", linked.source.display(), name))?;
+            let composition = project
+                .verify_compositional_with_verified_summaries(
+                    linked,
+                    &candidate,
+                    &verified_summaries,
+                )
+                .map_err(|error| format!("{}:{}: {error}", linked.source.display(), name))?;
+            match (composition.proof, composition.diagnostic) {
+                (
+                    Some(axiom_verify::ProofResult::Verified),
+                    None | Some(axiom_verify::Diagnostic::AmbiguousCandidates),
+                ) => {}
+                (
+                    None,
+                    Some(axiom_verify::Diagnostic::CallPreconditionViolation { callee, span }),
+                ) => {
+                    let (line, column) =
+                        span.map(|span| (span.line, span.column)).unwrap_or((1, 1));
+                    return Err(format!(
+                        "{}:{line}:{column}: call-site precondition for {callee} in {name} is not established",
+                        linked.source.display(),
+                    ));
+                }
+                (Some(axiom_verify::ProofResult::Counterexample(values)), _) => {
+                    return Err(format!(
+                        "{}:{}: COUNTEREXAMPLE: compositional postcondition fails for {values:?}",
+                        linked.source.display(),
+                        linked.contract.name
+                    ));
+                }
+                (Some(axiom_verify::ProofResult::SolverUnknown), _) => {
+                    return Err(format!(
+                        "{}:{}: SOLVER_UNKNOWN: compositional verification returned unknown",
+                        linked.source.display(),
+                        linked.contract.name
+                    ));
+                }
+                _ => {
+                    return Err(format!(
+                        "{}:{}: compositional verification did not produce a proof",
+                        linked.source.display(),
+                        linked.contract.name
+                    ));
+                }
+            }
+            cache.entries.insert(
+                contract_id.clone(),
+                CachedVerifiedCandidate {
+                    key: key.clone(),
+                    candidate: candidate.clone(),
+                },
+            );
+            (candidate, false)
+        };
         let requires = axiom_synth::lower_requires(&linked.contract)
             .map_err(|error| format!("{}:{}: {error}", linked.source.display(), name))?;
         let requires_export = requires.as_ref().map(|_| requires_export_name(&name));
@@ -199,51 +380,28 @@ fn compile_contracts(project: &Project) -> Result<Vec<CompiledFunction>, String>
                 name
             ));
         }
-        let composition = project
-            .verify_compositional_with_verified_summaries(linked, &candidate, &verified_summaries)
+        verified_cache_keys.insert(contract_id.clone(), key);
+        verified_summaries.insert(contract_id.clone(), linked.contract.clone());
+        let (_, abi_arity) = axiom_parser::verified_abi_layout(&linked.contract.params)
             .map_err(|error| format!("{}:{}: {error}", linked.source.display(), name))?;
-        match (composition.proof, composition.diagnostic) {
-            (
-                Some(axiom_verify::ProofResult::Verified),
-                None | Some(axiom_verify::Diagnostic::AmbiguousCandidates),
-            ) => {}
-            (None, Some(axiom_verify::Diagnostic::CallPreconditionViolation { callee, span })) => {
-                let (line, column) = span.map(|span| (span.line, span.column)).unwrap_or((1, 1));
-                return Err(format!(
-                    "{}:{line}:{column}: call-site precondition for {callee} in {name} is not established",
-                    linked.source.display(),
-                ));
-            }
-            (Some(axiom_verify::ProofResult::Counterexample(values)), _) => {
-                return Err(format!(
-                    "{}:{}: COUNTEREXAMPLE: compositional postcondition fails for {values:?}",
-                    linked.source.display(),
-                    linked.contract.name
-                ));
-            }
-            (Some(axiom_verify::ProofResult::SolverUnknown), _) => {
-                return Err(format!(
-                    "{}:{}: SOLVER_UNKNOWN: compositional verification returned unknown",
-                    linked.source.display(),
-                    linked.contract.name
-                ));
-            }
-            _ => {
-                return Err(format!(
-                    "{}:{}: compositional verification did not produce a proof",
-                    linked.source.display(),
-                    linked.contract.name
-                ));
-            }
+        let params = u32::try_from(abi_arity).map_err(|_| {
+            format!(
+                "{}:{}: WASM parameter count overflow",
+                linked.source.display(),
+                name
+            )
+        })?;
+        if cache_hit {
+            println!("verified: {name} (cache hit)");
+        } else {
+            println!("verified: {name}");
         }
-        verified_summaries.insert(ContractId::from(linked), linked.contract.clone());
-        println!("verified: {name}");
         compiled_by_id.insert(
-            ContractId::from(linked),
+            contract_id,
             CompiledFunction {
                 name,
                 source: linked.source.clone(),
-                params: linked.contract.params.len() as u32,
+                params,
                 candidate,
                 requires,
                 requires_export,
@@ -255,6 +413,51 @@ fn compile_contracts(project: &Project) -> Result<Vec<CompiledFunction>, String>
         .iter()
         .filter_map(|linked| compiled_by_id.remove(&ContractId::from(linked)))
         .collect())
+}
+
+fn proof_cache_key(
+    project: &Project,
+    linked: &axiom_project::LinkedContract,
+    options: axiom_synth::SynthesisOptions,
+    semantics_version: &str,
+    verified_keys: &HashMap<ContractId, Arc<ProofCacheKey>>,
+) -> Result<Arc<ProofCacheKey>, String> {
+    let id = ContractId::from(linked);
+    let source = project
+        .source_contents
+        .get(&linked.source)
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "missing source snapshot for proof cache: {}",
+                linked.source.display()
+            )
+        })?;
+    let mut dependencies = project
+        .verification_dependencies(linked)?
+        .into_iter()
+        .map(|(name, dependency)| {
+            let key = verified_keys.get(&dependency).ok_or_else(|| {
+                format!(
+                    "missing verified cache identity for callee `{name}` in `{}`",
+                    linked.contract.name
+                )
+            })?;
+            Ok((dependency, Arc::clone(key)))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    dependencies.sort_by(|lhs, rhs| lhs.0.cmp(&rhs.0));
+    Ok(Arc::new(ProofCacheKey {
+        id,
+        source,
+        semantics_version: semantics_version.to_string(),
+        synthesis_options: ProofCacheOptions {
+            timeout: options.timeout,
+            max_candidates: options.max_candidates,
+            max_memory_bytes: options.max_memory_bytes,
+        },
+        dependencies,
+    }))
 }
 
 fn page_html(project: &Project) -> String {
@@ -825,6 +1028,9 @@ async function boot() {
           name,
           source: declaration.source,
           inputs: args,
+          effect: declaration.effect,
+          verificationStatus: declaration.verification_status,
+          trustBoundary: declaration.trust_boundary,
           responseType: declaration.result,
         }, targetState);
         requestId = __lastEffect?.requestId ?? null;
@@ -1215,7 +1421,7 @@ fn externs_json(project: &Project) -> String {
                 .collect::<Vec<_>>()
                 .join(",");
             format!(
-                "{}:{{\"source\":{},\"params\":[{}],\"result\":{}}}",
+                "{}:{{\"source\":{},\"params\":[{}],\"result\":{},\"effect\":\"HOST_EFFECT\",\"verification_status\":\"UNVERIFIED\",\"implementation_verified\":false,\"trust_boundary\":\"EXTERNAL_IMPLEMENTATION\",\"response_validation\":\"DECLARED_TYPE_ONLY\",\"assumptions\":[\"a host adapter is registered when this effect is called\",\"the external behavior is suitable for the application; Axiom does not prove it\"],\"audit_metadata\":{{\"status\":\"NOT_PROVIDED\",\"scope\":\"external implementation\"}}}}",
                 json_string(&linked.contract.name),
                 json_string(&source_label(&project.config.root, &linked.source)),
                 params,
@@ -1236,6 +1442,7 @@ fn state_type_name(ty: &Type) -> &'static str {
         Type::U32 => "u32",
         Type::I32 => "i32",
         Type::Bool => "bool",
+        Type::FixedArray(_, _) => "verified_array",
         Type::Text => "text",
         Type::Record(_) => "record",
         Type::List(_) => "list",
@@ -1253,6 +1460,7 @@ fn source_label(root: &Path, source: &Path) -> String {
 fn initial_json(ty: &axiom_parser::Type) -> &'static str {
     match ty {
         axiom_parser::Type::Bool => "{\"kind\":\"bool\",\"value\":false}",
+        axiom_parser::Type::FixedArray(_, _) => "{\"kind\":\"null\"}",
         axiom_parser::Type::U32 => "{\"kind\":\"number\",\"value\":0}",
         axiom_parser::Type::I32 => "{\"kind\":\"i32\",\"value\":0}",
         axiom_parser::Type::Text => "{\"kind\":\"text\",\"value\":\"\"}",
@@ -1298,6 +1506,9 @@ fn expr_json(expr: &SpecExpr) -> Result<String, String> {
             expr_json(value)?,
             json_string(field)
         )),
+        SpecExpr::Index(_, _) | SpecExpr::ArrayUpdate(_, _, _) | SpecExpr::For { .. } => {
+            Err("verified fixed arrays are outside the application expression boundary".to_string())
+        }
         SpecExpr::Let(name, value, body) => Ok(format!(
             "{{\"kind\":\"let\",\"name\":{},\"value\":{},\"body\":{}}}",
             json_string(name),
@@ -1353,9 +1564,11 @@ fn proof_json(project: &Project, compiled: &[CompiledFunction]) -> String {
             )
         })
         .collect::<Vec<_>>();
+    let external_boundaries = externs_json(project);
     format!(
-        "{{\n  \"version\": 3,\n  \"target\": \"web\",\n  \"contract_check\": \"VALID\",\n  \"synthesis_result\": \"FOUND\",\n  \"proof_result\": \"VERIFIED\",\n  \"diagnostic\": null,\n  \"verified\": true,\n  \"contracts\": [{}]\n}}\n",
-        contracts.join(",")
+        "{{\n  \"version\": 4,\n  \"target\": \"web\",\n  \"verification\": {{\"contract_check\": \"VALID\", \"synthesis_result\": \"FOUND\", \"proof_result\": \"VERIFIED\", \"diagnostic\": null, \"verified\": true, \"scope\": \"WASM_CONTRACTS_ONLY\"}},\n  \"verification_scope\": {{\"contracts\": \"WASM_CONTRACTS_ONLY\", \"extern_implementations\": \"UNVERIFIED\", \"extern_response_validation\": \"DECLARED_TYPE_ONLY\"}},\n  \"contracts\": [{}],\n  \"external_boundaries\": {}\n}}\n",
+        contracts.join(","),
+        external_boundaries
     )
 }
 
@@ -1368,6 +1581,7 @@ fn watch_project(
     output_dir: PathBuf,
     state: Arc<Mutex<DevState>>,
     mut watched_files: Vec<PathBuf>,
+    mut cache: VerificationCache,
 ) {
     let mut snapshot = file_snapshot_for(&watched_files);
     loop {
@@ -1378,6 +1592,7 @@ fn watch_project(
             &state,
             &mut watched_files,
             &mut snapshot,
+            &mut cache,
         );
     }
 }
@@ -1387,23 +1602,38 @@ fn rebuild_if_changed(
     output_dir: &Path,
     state: &Arc<Mutex<DevState>>,
     watched_files: &mut Vec<PathBuf>,
-    snapshot: &mut HashMap<PathBuf, (u64, u64)>,
+    snapshot: &mut HashMap<PathBuf, Option<Vec<u8>>>,
+    cache: &mut VerificationCache,
 ) -> bool {
-    if let Ok(project) = axiom_project::load(config_path) {
-        *watched_files = project.files;
-        watched_files.push(config_path.to_path_buf());
-    }
     let current = file_snapshot_for(watched_files);
     if current == *snapshot {
         return false;
     }
     *snapshot = current;
+    let project = match axiom_project::load(config_path) {
+        Ok(project) => project,
+        Err(error) => {
+            let mut guard = state.lock().expect("dev state lock poisoned");
+            guard.error = Some(error.clone());
+            eprintln!("build error: {error}");
+            return true;
+        }
+    };
+    *watched_files = project.files.clone();
+    watched_files.push(config_path.to_path_buf());
     let mut guard = state.lock().expect("dev state lock poisoned");
-    match build(config_path, output_dir) {
-        Ok(_) => {
+    match build_project(&project, output_dir, cache) {
+        Ok(result) => {
             guard.version = guard.version.saturating_add(1);
             guard.error = None;
             println!("rebuilt successfully (version {})", guard.version);
+            println!(
+                "proof cache: {} hit(s), {} miss(es), {} invalidation(s), {}us",
+                result.verification_cache.hits,
+                result.verification_cache.misses,
+                result.verification_cache.invalidations,
+                result.verification_cache.elapsed_micros,
+            );
         }
         Err(error) => {
             guard.error = Some(error.clone());
@@ -1413,19 +1643,11 @@ fn rebuild_if_changed(
     true
 }
 
-fn file_snapshot_for(files: &[PathBuf]) -> HashMap<PathBuf, (u64, u64)> {
+fn file_snapshot_for(files: &[PathBuf]) -> HashMap<PathBuf, Option<Vec<u8>>> {
+    // ponytail: exact polling costs O(total source bytes); use native file events if that becomes measurable.
     files
         .iter()
-        .filter_map(|path| {
-            let metadata = fs::metadata(path).ok()?;
-            let modified = metadata
-                .modified()
-                .ok()?
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64;
-            Some((path.clone(), (modified, metadata.len())))
-        })
+        .map(|path| (path.clone(), fs::read(path).ok()))
         .collect()
 }
 
@@ -1573,6 +1795,237 @@ mod tests {
     use axiom_parser::{Page, State, Type};
     use axiom_project::{LinkedContract, ProjectConfig};
 
+    fn temp_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "synthetix-{label}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn write_import_graph(root: &Path) -> PathBuf {
+        fs::create_dir_all(root).unwrap();
+        fs::write(
+            root.join("c.ax"),
+            "export contract c(x: u32) -> u32 { ensures result == x +% 1; }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("b.ax"),
+            "import { c } from \"./c.ax\";\nexport contract b(x: u32) -> u32 { ensures result == c(x); }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("a.ax"),
+            "import { b } from \"./b.ax\";\nexport contract a(x: u32) -> u32 { ensures result == b(x); }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("independent.ax"),
+            "export contract independent(x: u32) -> u32 { ensures result == x; }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("entry.ax"),
+            "import { a } from \"./a.ax\";\nimport { independent } from \"./independent.ax\";\ncontract root(x: u32) -> u32 { ensures result == a(x); }\n",
+        )
+        .unwrap();
+        let config = root.join("synthetix.toml");
+        fs::write(
+            &config,
+            "[project]\nentry = \"entry.ax\"\ntarget = \"web\"\n",
+        )
+        .unwrap();
+        config
+    }
+
+    fn compile_cached(
+        config: &Path,
+        cache: &mut VerificationCache,
+        options: axiom_synth::SynthesisOptions,
+        semantics_version: &str,
+    ) -> Result<Vec<CompiledFunction>, String> {
+        let project = axiom_project::load(config)?;
+        compile_contracts_with_cache(&project, cache, options, semantics_version)
+    }
+
+    #[test]
+    fn proof_cache_reuses_warm_proofs_and_invalidates_only_dependents() {
+        let root = temp_dir("proof-cache");
+        let config = write_import_graph(&root);
+        let mut cache = VerificationCache::default();
+        let options = axiom_synth::SynthesisOptions::default();
+
+        let cold_start = Instant::now();
+        assert_eq!(
+            compile_cached(&config, &mut cache, options, VERIFIED_SEMANTICS_VERSION)
+                .unwrap()
+                .len(),
+            5
+        );
+        let cold_elapsed_us = cold_start.elapsed().as_micros();
+        assert_eq!(cache.stats.misses, 5);
+        assert_eq!(cache.stats.hits, 0);
+
+        let started = Instant::now();
+        compile_cached(&config, &mut cache, options, VERIFIED_SEMANTICS_VERSION).unwrap();
+        let warm_elapsed_us = started.elapsed().as_micros();
+        assert_eq!(cache.stats.hits, 5);
+        assert_eq!(cache.stats.misses, 0);
+
+        fs::write(
+            root.join("c.ax"),
+            "export contract c(x: u32) -> u32 { ensures result == x +% 2; }\n",
+        )
+        .unwrap();
+        let leaf_start = Instant::now();
+        compile_cached(&config, &mut cache, options, VERIFIED_SEMANTICS_VERSION).unwrap();
+        let leaf_elapsed_us = leaf_start.elapsed().as_micros();
+        assert_eq!(cache.stats.hits, 1);
+        assert_eq!(cache.stats.misses, 4);
+        assert_eq!(cache.stats.invalidations, 4);
+
+        fs::write(
+            root.join("entry.ax"),
+            "import { a } from \"./a.ax\";\nimport { independent } from \"./independent.ax\";\n// root-only edit\ncontract root(x: u32) -> u32 { ensures result == a(x); }\n",
+        )
+        .unwrap();
+        let root_start = Instant::now();
+        compile_cached(&config, &mut cache, options, VERIFIED_SEMANTICS_VERSION).unwrap();
+        let root_elapsed_us = root_start.elapsed().as_micros();
+        assert_eq!(cache.stats.hits, 4);
+        assert_eq!(cache.stats.misses, 1);
+        assert_eq!(cache.stats.invalidations, 1);
+
+        fs::write(
+            root.join("independent.ax"),
+            "export contract independent(x: u32) -> u32 { ensures result == x +% 3; }\n",
+        )
+        .unwrap();
+        compile_cached(&config, &mut cache, options, VERIFIED_SEMANTICS_VERSION).unwrap();
+        assert_eq!(cache.stats.hits, 4);
+        assert_eq!(cache.stats.misses, 1);
+        assert_eq!(cache.stats.invalidations, 1);
+
+        compile_cached(&config, &mut cache, options, "test-semantics-next").unwrap();
+        assert_eq!(cache.stats.hits, 0);
+        assert_eq!(cache.stats.misses, 5);
+        assert_eq!(cache.stats.invalidations, 5);
+
+        let limited_options = axiom_synth::SynthesisOptions {
+            max_candidates: options.max_candidates - 1,
+            ..options
+        };
+        compile_cached(&config, &mut cache, limited_options, "test-semantics-next").unwrap();
+        assert_eq!(cache.stats.hits, 0);
+        assert_eq!(cache.stats.misses, 5);
+        assert_eq!(cache.stats.invalidations, 5);
+
+        println!(
+            "v6.5 cache: 5 contracts; cold={cold_elapsed_us}us; warm={warm_elapsed_us}us (5 hits); leaf edit={leaf_elapsed_us}us (4 invalidations + 1 unrelated hit); root edit={root_elapsed_us}us (1 invalidation); unrelated edit (1 invalidation)"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn proof_cache_does_not_store_failed_or_partial_verification() {
+        let root = temp_dir("proof-cache-failure");
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("main.ax");
+        fs::write(
+            root.join("positive.ax"),
+            "export contract positive(x: u32) -> u32 { requires x > 0; ensures result == x; }\n",
+        )
+        .unwrap();
+        fs::write(
+            &source,
+            "import { positive } from \"./positive.ax\";\ncontract value(x: u32) -> u32 { requires x > 0; ensures result == positive(x); }\n",
+        )
+        .unwrap();
+        let config = root.join("synthetix.toml");
+        fs::write(
+            &config,
+            "[project]\nentry = \"main.ax\"\ntarget = \"web\"\n",
+        )
+        .unwrap();
+        let mut cache = VerificationCache::default();
+        let options = axiom_synth::SynthesisOptions::default();
+        compile_cached(&config, &mut cache, options, VERIFIED_SEMANTICS_VERSION).unwrap();
+        assert_eq!(cache.entries.len(), 2);
+
+        fs::write(
+            &source,
+            "import { positive } from \"./positive.ax\";\ncontract value(x: u32) -> u32 { ensures result == positive(x); }\n",
+        )
+        .unwrap();
+        assert!(compile_cached(&config, &mut cache, options, VERIFIED_SEMANTICS_VERSION).is_err());
+        let root_id = ContractId {
+            source: fs::canonicalize(&source).unwrap(),
+            name: "value".to_string(),
+        };
+        assert!(!cache.entries.contains_key(&root_id));
+        assert_eq!(cache.stats.hits, 1);
+        assert_eq!(cache.stats.misses, 1);
+        assert_eq!(cache.stats.invalidations, 1);
+
+        assert!(compile_cached(&config, &mut cache, options, VERIFIED_SEMANTICS_VERSION).is_err());
+        assert_eq!(cache.stats.hits, 1);
+        assert_eq!(cache.stats.misses, 1);
+        assert_eq!(cache.stats.invalidations, 0);
+        assert!(!cache.entries.contains_key(&root_id));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn proof_cache_handles_large_import_graph_cold_and_warm() {
+        const MODULES: usize = 32;
+        let root = temp_dir("proof-cache-large");
+        fs::create_dir_all(&root).unwrap();
+        for index in 0..MODULES {
+            let contract = if index == 0 {
+                "export contract c0(x: u32) -> u32 { ensures result == x; }\n".to_string()
+            } else {
+                format!(
+                    "import {{ c{} }} from \"./module{:02}.ax\";\nexport contract c{index}(x: u32) -> u32 {{ ensures result == c{}(x); }}\n",
+                    index - 1,
+                    index - 1,
+                    index - 1,
+                )
+            };
+            fs::write(root.join(format!("module{index:02}.ax")), contract).unwrap();
+        }
+        let config = root.join("synthetix.toml");
+        fs::write(
+            &config,
+            format!(
+                "[project]\nentry = \"module{:02}.ax\"\ntarget = \"web\"\n",
+                MODULES - 1
+            ),
+        )
+        .unwrap();
+
+        let mut cache = VerificationCache::default();
+        let options = axiom_synth::SynthesisOptions::default();
+        let cold_start = Instant::now();
+        compile_cached(&config, &mut cache, options, VERIFIED_SEMANTICS_VERSION).unwrap();
+        let cold_elapsed_us = cold_start.elapsed().as_micros();
+        assert_eq!(cache.stats.misses, MODULES);
+        assert_eq!(cache.stats.hits, 0);
+
+        let warm_start = Instant::now();
+        compile_cached(&config, &mut cache, options, VERIFIED_SEMANTICS_VERSION).unwrap();
+        let warm_elapsed_us = warm_start.elapsed().as_micros();
+        assert_eq!(cache.stats.hits, MODULES);
+        assert_eq!(cache.stats.misses, 0);
+        println!(
+            "v6.5 cache large graph: modules={MODULES}; cold={cold_elapsed_us}us; warm={warm_elapsed_us}us; warm_hits={}",
+            cache.stats.hits
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn generated_runtime_routes_verified_calls_to_wasm() {
         let contract = axiom_parser::parse(
@@ -1594,6 +2047,7 @@ mod tests {
             verification_callees: HashMap::new(),
             verification_callee_ids: HashMap::new(),
             verification_order: Vec::new(),
+            source_contents: HashMap::new(),
             pages: Vec::new(),
             files: Vec::new(),
         };
@@ -1722,15 +2176,25 @@ mod tests {
             "[project]\nentry = \"main.ax\"\ntarget = \"web\"\n",
         )
         .unwrap();
-        build(&config, &output_dir).unwrap();
+        let mut cache = VerificationCache::default();
+        build_with_cache(&config, &output_dir, &mut cache).unwrap();
         let project = axiom_project::load(&config).unwrap();
         let mut watched_files = project.files;
         watched_files.push(config.clone());
         let mut snapshot = file_snapshot_for(&watched_files);
+        assert_eq!(cache.stats.misses, 1);
         let state = Arc::new(Mutex::new(DevState {
             version: 1,
             error: None,
         }));
+        assert!(!rebuild_if_changed(
+            &config,
+            &output_dir,
+            &state,
+            &mut watched_files,
+            &mut snapshot,
+            &mut cache,
+        ));
 
         std::fs::write(
             &source,
@@ -1743,8 +2207,11 @@ mod tests {
             &state,
             &mut watched_files,
             &mut snapshot,
+            &mut cache,
         ));
         assert_eq!(state.lock().unwrap().version, 2);
+        assert_eq!(cache.stats.misses, 1);
+        assert_eq!(cache.stats.invalidations, 1);
 
         std::fs::write(&source, "contract value(x: u32) -> u32 {\n").unwrap();
         assert!(rebuild_if_changed(
@@ -1753,6 +2220,7 @@ mod tests {
             &state,
             &mut watched_files,
             &mut snapshot,
+            &mut cache,
         ));
         assert_eq!(state.lock().unwrap().version, 2);
         assert!(
@@ -1792,9 +2260,12 @@ mod tests {
             &state,
             &mut watched_files,
             &mut snapshot,
+            &mut cache,
         ));
         assert_eq!(state.lock().unwrap().version, 3);
         assert!(state.lock().unwrap().error.is_none());
+        assert_eq!(cache.stats.misses, 1);
+        assert_eq!(cache.stats.invalidations, 1);
         let recovered_version = get(address, "/__synthetix/version");
         assert_eq!(recovered_version.split("\r\n\r\n").nth(1), Some("3"));
         let recovered_error = get(address, "/__synthetix/error");
@@ -2069,6 +2540,7 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
             verification_callees: HashMap::new(),
             verification_callee_ids: HashMap::new(),
             verification_order: Vec::new(),
+            source_contents: HashMap::new(),
             pages: vec![LinkedPage {
                 source: PathBuf::from("/tmp/synthetix/main.ax"),
                 page,
@@ -2746,6 +3218,18 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
   for (let attempt = 0; attempt < 100 && !window.synthetix?.state; attempt++)
     await new Promise((resolve) => setTimeout(resolve, 0));
   if (!window.synthetix?.state) throw new Error('runtime did not instantiate verified WASM');
+  const missingAdapter = await window.synthetix.requestExtern('lookup', [7]).catch((failure) => failure);
+  const missingAdapterResult = [missingAdapter.category, missingAdapter.source,
+    window.synthetix.lastEffect.status, String(error.textContent.includes('COUNTEREXAMPLE'))].join('|');
+  let invalidInputAdapterCalled = false;
+  window.synthetix.registerEffectAdapter(async () => {
+    invalidInputAdapterCalled = true;
+    return 1;
+  });
+  const invalidInput = await window.synthetix.requestExtern('lookup', [true]).catch((failure) => failure);
+  const invalidInputResult = [invalidInput.category, invalidInput.source,
+    window.synthetix.lastEffect.status, String(error.textContent.includes('COUNTEREXAMPLE')),
+    String(invalidInputAdapterCalled)].join('|');
   let loadingSeen = false;
   let calls = 0;
   window.synthetix.registerEffectAdapter(async (request) => {
@@ -2847,7 +3331,7 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
   const partialResult = [partial[0].status, partial[1].status, window.synthetix.state.count,
     window.synthetix.state.ready, partialError.category, window.synthetix.lastEffect.status,
     String(error.textContent.includes('COUNTEREXAMPLE'))].join('|');
-  process.stdout.write([success, invalidResult, networkResult, unsupportedResult,
+  process.stdout.write([missingAdapterResult, invalidInputResult, success, invalidResult, networkResult, unsupportedResult,
     staleResult, cancelResult, retryResult, partialResult].join('\n'));
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 "#;
@@ -2865,6 +3349,14 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
         );
         let stdout = String::from_utf8(result.stdout).unwrap();
         let mut lines = stdout.lines();
+        assert_eq!(
+            lines.next(),
+            Some("APPLICATION_RUNTIME_ERROR|api.ax|ERROR|false")
+        );
+        assert_eq!(
+            lines.next(),
+            Some("APPLICATION_RUNTIME_ERROR|api.ax|ERROR|false|false")
+        );
         assert_eq!(
             lines.next(),
             Some("5|5|-1|true|true|5,true|10|-1|true|SUCCEEDED|true|true|3")

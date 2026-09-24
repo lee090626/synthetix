@@ -51,6 +51,7 @@ struct Measurement {
     parameter_count: Option<usize>,
     candidate_count: Option<usize>,
     generated_candidate_count: Option<usize>,
+    rejected_candidate_count: Option<usize>,
     synthesis_iterations: Option<usize>,
     search_batch_count: Option<usize>,
     counterexample_count: Option<usize>,
@@ -69,6 +70,7 @@ struct Measurement {
     runtime_boot_time_ms: Option<f64>,
     runtime_transition_time_ms: Option<f64>,
     runtime_transition_ms_per_action: Option<f64>,
+    effect_time_ms: Option<f64>,
     persistence_restore_time_ms: Option<f64>,
     serialization_time_ms: Option<f64>,
     scalar_extraction_time_ms: Option<f64>,
@@ -76,6 +78,10 @@ struct Measurement {
     peak_resource_estimate_bytes: Option<usize>,
     source_bytes: Option<usize>,
     artifact_bytes: Option<usize>,
+    wasm_bytes: Option<usize>,
+    cache_hit_count: Option<usize>,
+    cache_miss_count: Option<usize>,
+    cache_invalidation_count: Option<usize>,
     serialized_bytes: Option<usize>,
     storage_bytes: Option<usize>,
     list_size: Option<usize>,
@@ -116,7 +122,7 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    let (json_path, markdown_path) = output_paths()?;
+    let (json_path, markdown_path, title) = output_paths()?;
     let root = repository_root();
     let default_bounds = SearchBounds {
         timeout_ms: None,
@@ -232,14 +238,32 @@ fn run() -> Result<(), String> {
     for depth in [1, 2, 4, 8] {
         measurements.push(run_compositional_case(depth, &root)?);
     }
+    measurements.extend(run_incremental_cache_cases(&root)?);
     measurements.push(run_call_precondition_diagnostic_case()?);
     measurements.push(run_circular_call_case()?);
-    measurements.push(run_structural_recursion_case(&root)?);
-
     measurements.extend(run_application_value_cases());
     measurements.extend(run_static_runtime_cases(&root)?);
+    measurements.push(run_v6_release_path_case(&root)?);
     measurements.push(run_array_boundary_case(&root)?);
     measurements.extend(run_unrolled_loop_cases(&root, default_bounds)?);
+    measurements.push(run_verified_feature_case(
+        "fixed_array_sum4",
+        "benchmarks/v6/final/array_sum4.ax",
+        &root,
+        &[vec![1, 2, 3, 4]],
+    )?);
+    measurements.push(run_verified_feature_case(
+        "bounded_loop_sum4",
+        "benchmarks/v6/final/bounded_loop_sum4.ax",
+        &root,
+        &[vec![1, 2, 3, 4]],
+    )?);
+    measurements.push(run_verified_feature_case(
+        "bounded_recursion_sum_to",
+        "benchmarks/v6/final/recursive_sum_to.ax",
+        &root,
+        &[vec![0], vec![1], vec![16]],
+    )?);
 
     let mut outcome_counts = BTreeMap::new();
     for measurement in &measurements {
@@ -269,7 +293,7 @@ fn run() -> Result<(), String> {
             "release"
         },
         measured_repeats: REPEATS,
-        timing_note: "Wall-clock and solver durations are host-dependent. Synthesis, verifier timings, application JSON costs, and compositional release CLI builds are medians of three runs; generated static bundle/runtime rows are single runs, so their first row may include cold-start overhead. Generated timestamp is intentionally variable; bounds and counts are recorded per case.",
+        timing_note: "Wall-clock and solver durations are host-dependent. Synthesis, verifier timings, application JSON costs, compositional/release CLI builds, and proof-cache cases are medians of three runs; proof-cache timings come from the debug cargo test profile. Other generated static bundle/runtime rows are single runs and may include cold-start overhead. Generated timestamp is intentionally variable; bounds and counts are recorded per case.",
         resource_estimate_note: "Peak estimate sums the synthesizer's candidate AST estimate and CEGIS sample-vector estimate; it excludes allocator, Z3, process, and browser-engine overhead.",
     };
     let now = SystemTime::now()
@@ -285,16 +309,17 @@ fn run() -> Result<(), String> {
         outcomes_not_observed,
         measurements,
     };
-    write_outputs(&baseline, &json_path, &markdown_path)?;
+    write_outputs(&baseline, &json_path, &markdown_path, &title)?;
     println!("wrote {}", json_path.display());
     println!("wrote {}", markdown_path.display());
     println!("measurements: {}", baseline.measurements.len());
     Ok(())
 }
 
-fn output_paths() -> Result<(PathBuf, PathBuf), String> {
+fn output_paths() -> Result<(PathBuf, PathBuf, String), String> {
     let mut json = PathBuf::from("docs/v6-benchmark-baseline.json");
     let mut markdown = PathBuf::from("docs/v6-benchmark.md");
+    let mut title = "v6.0 Scale Benchmark Baseline".to_string();
     let args = env::args().skip(1).collect::<Vec<_>>();
     let mut index = 0;
     while index < args.len() {
@@ -304,11 +329,12 @@ fn output_paths() -> Result<(PathBuf, PathBuf), String> {
         match args[index].as_str() {
             "--json" => json = PathBuf::from(value),
             "--markdown" => markdown = PathBuf::from(value),
+            "--title" => title = value.clone(),
             flag => return Err(format!("unknown benchmark option: {flag}")),
         }
         index += 2;
     }
-    Ok((json, markdown))
+    Ok((json, markdown, title))
 }
 
 fn repository_root() -> PathBuf {
@@ -355,10 +381,12 @@ fn run_synthesis_case(
         .iter()
         .map(|run| match run {
             Ok((result, metrics)) => format!(
-                "{}|{}|{}|{}|{}|{}|{}",
+                "{}|{}|{}|{}|{}|{}|{}|{}|{}",
                 result.status_name(),
                 result.candidates_checked(),
+                metrics.candidate_count,
                 metrics.generated_candidate_count,
+                metrics.rejected_candidate_count,
                 metrics.synthesis_iterations,
                 metrics.counterexample_count,
                 metrics.solver_invocations,
@@ -388,6 +416,7 @@ fn run_synthesis_case(
             }
             record.candidate_count = Some(metrics.candidate_count);
             record.generated_candidate_count = Some(metrics.generated_candidate_count);
+            record.rejected_candidate_count = Some(metrics.rejected_candidate_count);
             record.synthesis_iterations = Some(metrics.synthesis_iterations);
             record.search_batch_count = Some(metrics.search_batches);
             record.counterexample_count = Some(metrics.counterexample_count);
@@ -532,6 +561,7 @@ fn blank_measurement(
         parameter_count: None,
         candidate_count: None,
         generated_candidate_count: None,
+        rejected_candidate_count: None,
         synthesis_iterations: None,
         search_batch_count: None,
         counterexample_count: None,
@@ -550,6 +580,7 @@ fn blank_measurement(
         runtime_boot_time_ms: None,
         runtime_transition_time_ms: None,
         runtime_transition_ms_per_action: None,
+        effect_time_ms: None,
         persistence_restore_time_ms: None,
         serialization_time_ms: None,
         scalar_extraction_time_ms: None,
@@ -557,6 +588,10 @@ fn blank_measurement(
         peak_resource_estimate_bytes: None,
         source_bytes: None,
         artifact_bytes: None,
+        wasm_bytes: None,
+        cache_hit_count: None,
+        cache_miss_count: None,
+        cache_invalidation_count: None,
         serialized_bytes: None,
         storage_bytes: None,
         list_size: None,
@@ -740,6 +775,24 @@ fn spec_expression_nodes(expr: &SpecExpr) -> usize {
         SpecExpr::Call(_, args) | SpecExpr::List(args) => {
             args.iter().map(spec_expression_nodes).sum()
         }
+        SpecExpr::Index(array, index) => {
+            spec_expression_nodes(array) + spec_expression_nodes(index)
+        }
+        SpecExpr::ArrayUpdate(array, index, value) => {
+            spec_expression_nodes(array)
+                + spec_expression_nodes(index)
+                + spec_expression_nodes(value)
+        }
+        SpecExpr::For {
+            initial,
+            invariant,
+            body,
+            ..
+        } => {
+            spec_expression_nodes(initial)
+                + spec_expression_nodes(invariant)
+                + spec_expression_nodes(body)
+        }
         SpecExpr::Record { fields, .. } => fields
             .iter()
             .map(|(_, value)| spec_expression_nodes(value))
@@ -784,6 +837,50 @@ struct ProjectRun {
     expression_nodes: usize,
     source_bytes: usize,
     failure: Option<String>,
+}
+
+fn run_verified_feature_case(
+    name: &str,
+    relative: &str,
+    root: &Path,
+    wasm_inputs: &[Vec<u32>],
+) -> Result<Measurement, String> {
+    let source = fs::read_to_string(root.join(relative)).map_err(|error| error.to_string())?;
+    let contract = parse(&source).map_err(|error| format!("{relative}: {error}"))?;
+    let candidate = axiom_verify::implementation_to_ami(&contract)?;
+    let mut record = run_verification_case(name, relative, &contract, &candidate, None);
+    if record.result != "VERIFIED" {
+        return Err(format!(
+            "{relative} feature proof did not verify: {record:?}"
+        ));
+    }
+    let (_, abi_arity) = axiom_parser::verified_abi_layout(&contract.params)?;
+    let wasm_arity = u32::try_from(abi_arity).map_err(|_| "WASM argument count overflow")?;
+    let wasm = axiom_wasm::emit(&candidate, wasm_arity)?;
+    for inputs in wasm_inputs {
+        if inputs.len() != abi_arity {
+            return Err(format!(
+                "{relative} benchmark inputs do not match flattened ABI"
+            ));
+        }
+        let reference = axiom_verify::reference::eval_ami(&candidate, inputs)?;
+        let actual = axiom_wasm::run_with_args(&wasm, inputs)?;
+        if reference != actual {
+            return Err(format!(
+                "{relative} reference/WASM mismatch: inputs={inputs:?}, reference={reference}, wasm={actual}"
+            ));
+        }
+    }
+    record.category = "verified_feature_proof".to_string();
+    record.source_bytes = Some(source.len());
+    record.artifact_bytes = Some(wasm.len());
+    record.wasm_bytes = Some(wasm.len());
+    record.details = Some(format!(
+        "{}; fixed implementation candidate; WASM ABI arity={abi_arity}; reference/WASM inputs={}",
+        record.details.as_deref().unwrap_or_default(),
+        wasm_inputs.len()
+    ));
+    Ok(record)
 }
 
 fn run_compositional_case(depth: usize, _root: &Path) -> Result<Measurement, String> {
@@ -1105,59 +1202,6 @@ fn run_circular_call_case() -> Result<Measurement, String> {
     Ok(record)
 }
 
-fn run_structural_recursion_case(root: &Path) -> Result<Measurement, String> {
-    let relative = "benchmarks/v6/expressiveness/recursive_sum.ax";
-    let temp = TempDirectory::new("structural-recursion")?;
-    let source = fs::read_to_string(root.join(relative)).map_err(|error| error.to_string())?;
-    let mut parser = axiom_parser::Parser::new(axiom_parser::Lexer::new(&source))?;
-    let contract = parser.parse_contract()?;
-    fs::write(temp.0.join("entry.ax"), &source).map_err(|error| error.to_string())?;
-    let config = temp.0.join("synthetix.toml");
-    fs::write(
-        &config,
-        "[project]\nentry = \"entry.ax\"\ntarget = \"web\"\n",
-    )
-    .map_err(|error| error.to_string())?;
-    let started = Instant::now();
-    let result = axiom_project::load(&config);
-    let mut record = blank_measurement(
-        "structural_recursion_boundary",
-        "language_expressiveness",
-        relative,
-        SearchBounds {
-            timeout_ms: None,
-            max_candidates: None,
-            max_memory_bytes: None,
-        },
-    );
-    record.contract_count = Some(1);
-    record.function_call_depth = Some(1);
-    record.expression_node_count = Some(contract_expression_nodes(&contract));
-    record.parameter_count = Some(contract.params.len());
-    record.source_bytes = Some(source.len());
-    record.total_time_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
-    match result {
-        Err(error) if error.contains("circular contract call") => {
-            record.result = "EXPECTED_RECURSION_REJECTION".to_string();
-            record.failure_classification = Some("recursion_not_supported".to_string());
-            record.details = Some(
-                "structurally decreasing sum_to(n -% 1) parses, but project linking rejects all recursive contract cycles before termination analysis".to_string(),
-            );
-        }
-        Err(error) => {
-            record.result = "UNEXPECTED_RECURSION_ERROR".to_string();
-            record.failure_classification = Some("unexpected_recursion_boundary_error".to_string());
-            record.details = Some(error);
-        }
-        Ok(_) => {
-            record.result = "RECURSION_ACCEPTED_WITHOUT_TERMINATION_PROOF".to_string();
-            record.failure_classification =
-                Some("recursive_call_accepted_without_termination_proof".to_string());
-        }
-    }
-    Ok(record)
-}
-
 fn run_application_value_cases() -> Vec<Measurement> {
     [0usize, 10, 100, 1_000, 10_000]
         .into_iter()
@@ -1369,6 +1413,165 @@ fn run_static_runtime_cases(root: &Path) -> Result<Vec<Measurement>, String> {
     Ok(records)
 }
 
+fn run_v6_release_path_case(root: &Path) -> Result<Measurement, String> {
+    let cli = release_cli_path()?;
+    if !cli.is_file() {
+        return Err(format!(
+            "release CLI missing at {}; run cargo build --release -p axiom-cli first",
+            cli.display()
+        ));
+    }
+    let smoke = root.join("scripts/v6-release-smoke.cjs");
+    let fixture = root.join("examples/v6-release");
+    let files = [
+        "synthetix.toml",
+        "main.ax",
+        "arrays.ax",
+        "logic.ax",
+        "recursive.ax",
+        "api.ax",
+    ];
+    let source_bytes = files
+        .iter()
+        .map(|file| fs::metadata(fixture.join(file)).map(|metadata| metadata.len() as usize))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .sum();
+    let mut build_times = Vec::new();
+    let mut boot_times = Vec::new();
+    let mut transition_times = Vec::new();
+    let mut effect_times = Vec::new();
+    let mut restore_times = Vec::new();
+    let mut total_times = Vec::new();
+    let mut artifact_sizes = Vec::new();
+    let mut wasm_sizes = Vec::new();
+    let mut contract_counts = Vec::new();
+
+    for _ in 0..REPEATS {
+        let temp = TempDirectory::new("v6-release-path")?;
+        for file in files {
+            fs::copy(fixture.join(file), temp.0.join(file)).map_err(|error| error.to_string())?;
+        }
+        let check = Command::new(&cli)
+            .arg("check")
+            .current_dir(&temp.0)
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !check.status.success() {
+            return Err(format!(
+                "v6 release project check failed: {}{}",
+                String::from_utf8_lossy(&check.stdout),
+                String::from_utf8_lossy(&check.stderr)
+            ));
+        }
+        let build_started = Instant::now();
+        let build = Command::new(&cli)
+            .arg("build")
+            .current_dir(&temp.0)
+            .output()
+            .map_err(|error| error.to_string())?;
+        let build_ms = build_started.elapsed().as_secs_f64() * 1000.0;
+        if !build.status.success() {
+            return Err(format!(
+                "v6 release project build failed: {}{}",
+                String::from_utf8_lossy(&build.stdout),
+                String::from_utf8_lossy(&build.stderr)
+            ));
+        }
+        let dist = temp.0.join("dist");
+        let run = Command::new("node")
+            .arg(&smoke)
+            .arg(&dist)
+            .output()
+            .map_err(|error| format!("cannot run v6 release smoke: {error}"))?;
+        if !run.status.success() {
+            return Err(format!(
+                "v6 release smoke failed: {}",
+                String::from_utf8_lossy(&run.stderr)
+            ));
+        }
+        let report: serde_json::Value = serde_json::from_slice(&run.stdout)
+            .map_err(|error| format!("v6 release smoke returned invalid JSON: {error}"))?;
+        if report["status"] != "PASS" {
+            return Err(format!("v6 release smoke did not pass: {report}"));
+        }
+        let get_ms = |key: &str| {
+            report[key]
+                .as_f64()
+                .ok_or_else(|| format!("v6 release smoke omitted {key}"))
+        };
+        let boot_ms = get_ms("runtime_boot_time_ms")?;
+        let transition_ms = get_ms("transition_time_ms")?;
+        let effect_ms = get_ms("effect_time_ms")?;
+        let restore_ms = get_ms("persistence_restore_time_ms")?;
+        build_times.push(build_ms);
+        boot_times.push(boot_ms);
+        transition_times.push(transition_ms);
+        effect_times.push(effect_ms);
+        restore_times.push(restore_ms);
+        total_times.push(build_ms + boot_ms + transition_ms + effect_ms + restore_ms);
+        wasm_sizes.push(
+            report["wasm_bytes"]
+                .as_u64()
+                .and_then(|bytes| usize::try_from(bytes).ok())
+                .ok_or_else(|| "v6 release smoke omitted wasm_bytes".to_string())?,
+        );
+        let artifact_bytes = fs::read_dir(&dist)
+            .map_err(|error| error.to_string())?
+            .map(|entry| {
+                entry
+                    .map_err(|error| error.to_string())?
+                    .metadata()
+                    .map(|metadata| metadata.len() as usize)
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .sum();
+        artifact_sizes.push(artifact_bytes);
+        let proof: serde_json::Value = serde_json::from_slice(
+            &fs::read(dist.join("app.proof.json")).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        contract_counts.push(
+            proof["contracts"]
+                .as_array()
+                .ok_or_else(|| "v6 proof artifact omitted contracts".to_string())?
+                .len(),
+        );
+    }
+
+    let bounds = SearchBounds {
+        timeout_ms: None,
+        max_candidates: Some(DEFAULT_MAX_CANDIDATES),
+        max_memory_bytes: Some(DEFAULT_MAX_MEMORY_BYTES),
+    };
+    let mut record = blank_measurement(
+        "v6_release_array_loop_recursion_application",
+        "static_release_runtime_and_effect",
+        "examples/v6-release built by release CLI; generated bundle served over local HTTP and executed in Node DOM shim",
+        bounds,
+    );
+    record.contract_count = Some(median_usize(&contract_counts));
+    record.function_call_depth = Some(16);
+    record.build_time_ms = Some(median_f64(build_times));
+    record.runtime_boot_time_ms = Some(median_f64(boot_times));
+    record.runtime_transition_time_ms = Some(median_f64(transition_times));
+    record.runtime_transition_ms_per_action = record.runtime_transition_time_ms;
+    record.effect_time_ms = Some(median_f64(effect_times));
+    record.persistence_restore_time_ms = Some(median_f64(restore_times));
+    record.total_time_ms = Some(median_f64(total_times));
+    record.source_bytes = Some(source_bytes);
+    record.artifact_bytes = Some(median_usize(&artifact_sizes));
+    record.wasm_bytes = Some(median_usize(&wasm_sizes));
+    record.result = "VERIFIED_RELEASE_PATH".to_string();
+    record.details = Some(format!(
+        "repeats={REPEATS}; bounds=timeout:none,max_candidates:{DEFAULT_MAX_CANDIDATES},estimated_memory:{DEFAULT_MAX_MEMORY_BYTES}; fixed array length=4; loop bound=4; recursion max=16; external result type-checked only; static HTTP assets and persisted state passed"
+    ));
+    Ok(record)
+}
+
 fn release_cli_path() -> Result<PathBuf, String> {
     let executable = env::current_exe().map_err(|error| error.to_string())?;
     let release_dir = executable.parent().and_then(Path::parent).ok_or_else(|| {
@@ -1435,6 +1638,114 @@ fn run_unrolled_loop_cases(root: &Path, bounds: SearchBounds) -> Result<Vec<Meas
     Ok(measurements)
 }
 
+fn run_incremental_cache_cases(root: &Path) -> Result<Vec<Measurement>, String> {
+    let names = [
+        "five_contract_cold",
+        "five_contract_warm",
+        "leaf_change",
+        "root_change",
+        "32_module_cold",
+        "32_module_warm",
+    ];
+    let mut timings = names
+        .into_iter()
+        .map(|name| (name, Vec::new()))
+        .collect::<BTreeMap<_, _>>();
+
+    for _ in 0..REPEATS {
+        let output = Command::new("cargo")
+            .args([
+                "test",
+                "-p",
+                "axiom-cli",
+                "proof_cache_",
+                "--",
+                "--nocapture",
+            ])
+            .current_dir(root)
+            .output()
+            .map_err(|error| format!("cannot run incremental proof-cache tests: {error}"))?;
+        let text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if !output.status.success() {
+            return Err(format!("incremental proof-cache tests failed: {text}"));
+        }
+        let five = text
+            .lines()
+            .find(|line| line.contains("v6.5 cache: 5 contracts;"))
+            .ok_or_else(|| "proof-cache tests omitted five-contract timing output".to_string())?;
+        let large = text
+            .lines()
+            .find(|line| line.contains("v6.5 cache large graph:"))
+            .ok_or_else(|| "proof-cache tests omitted large-graph timing output".to_string())?;
+        for (name, line, key) in [
+            ("five_contract_cold", five, "cold"),
+            ("five_contract_warm", five, "warm"),
+            ("leaf_change", five, "leaf edit"),
+            ("root_change", five, "root edit"),
+            ("32_module_cold", large, "cold"),
+            ("32_module_warm", large, "warm"),
+        ] {
+            timings
+                .get_mut(name)
+                .expect("all cache scenarios are initialized")
+                .push(cache_elapsed_ms(line, key)?);
+        }
+    }
+
+    let scenarios = [
+        ("five_contract_cold", 5, 0, 5, 0, "CACHE_COLD_VERIFIED"),
+        ("five_contract_warm", 5, 5, 0, 0, "CACHE_WARM_HIT"),
+        ("leaf_change", 5, 1, 4, 4, "DEPENDENTS_REVERIFIED"),
+        ("root_change", 5, 4, 1, 1, "ROOT_REVERIFIED"),
+        ("32_module_cold", 32, 0, 32, 0, "CACHE_COLD_VERIFIED"),
+        ("32_module_warm", 32, 32, 0, 0, "CACHE_WARM_HIT"),
+    ];
+    let bounds = SearchBounds {
+        timeout_ms: None,
+        max_candidates: Some(DEFAULT_MAX_CANDIDATES),
+        max_memory_bytes: Some(DEFAULT_MAX_MEMORY_BYTES),
+    };
+    Ok(scenarios
+        .into_iter()
+        .map(|(name, modules, hits, misses, invalidations, result)| {
+            let mut record = blank_measurement(
+                &format!("proof_cache_{name}"),
+                "incremental_proof_cache",
+                "cargo test -p axiom-cli proof_cache_ -- --nocapture",
+                bounds,
+            );
+            record.contract_count = Some(modules);
+            record.total_time_ms = Some(median_f64(
+                timings.get(name).expect("all scenarios have timings").clone(),
+            ));
+            record.cache_hit_count = Some(hits);
+            record.cache_miss_count = Some(misses);
+            record.cache_invalidation_count = Some(invalidations);
+            record.result = result.to_string();
+            record.details = Some(format!(
+                "debug cargo test profile; median of {REPEATS} test runs; elapsed includes project load and verification/cache lookup, excludes fixture creation and edits; hits={hits}, misses={misses}, invalidations={invalidations}"
+            ));
+            record
+        })
+        .collect())
+}
+
+fn cache_elapsed_ms(line: &str, key: &str) -> Result<f64, String> {
+    let marker = format!("{key}=");
+    let elapsed = line
+        .split_once(&marker)
+        .and_then(|(_, value)| value.split_once("us"))
+        .ok_or_else(|| format!("cache timing omitted {key}: {line}"))?
+        .0
+        .parse::<f64>()
+        .map_err(|error| format!("invalid cache timing for {key}: {error}"))?;
+    Ok(elapsed / 1000.0)
+}
+
 fn command_output(program: &str, args: &[&str], cwd: &Path) -> Option<String> {
     let output = Command::new(program)
         .args(args)
@@ -1451,6 +1762,7 @@ fn write_outputs(
     baseline: &Baseline,
     json_path: &Path,
     markdown_path: &Path,
+    title: &str,
 ) -> Result<(), String> {
     if let Some(parent) = json_path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -1460,17 +1772,17 @@ fn write_outputs(
     }
     let json = serde_json::to_vec_pretty(baseline).map_err(|error| error.to_string())?;
     fs::write(json_path, json).map_err(|error| error.to_string())?;
-    fs::write(markdown_path, render_markdown(baseline)).map_err(|error| error.to_string())
+    fs::write(markdown_path, render_markdown(baseline, title)).map_err(|error| error.to_string())
 }
 
-fn render_markdown(baseline: &Baseline) -> String {
+fn render_markdown(baseline: &Baseline, title: &str) -> String {
     use std::fmt::Write as _;
 
     let mut output = String::new();
     let env = &baseline.environment;
     let _ = writeln!(
         output,
-        "# v6.0 Scale Benchmark Baseline\n\nNon-guarantee measurements for the current scalar core and application boundary. Generated by `scripts/run-v6-benchmarks.sh`.\n\n## Environment\n\n- HEAD: `{}`\n- Working tree dirty: `{}` (benchmark harness/instrumentation are included in this run)\n- OS/architecture: `{} / {}`\n- Rust: `{}`\n- Node: `{}`\n- Build mode: `{}`\n- Repeats: {} (median timings)\n- Default search bounds: timeout={} ms, candidates={}, memory={} bytes\n- Timing note: {}\n- Resource estimate: {}\n",
+        "# {title}\n\nNon-guarantee performance measurements for this Synthetix v6 source and release path.\n\n## Environment\n\n- HEAD: `{}`\n- Working tree dirty: `{}`\n- OS/architecture: `{} / {}`\n- Rust: `{}`\n- Node: `{}`\n- Build mode: `{}`\n- Repeats: {} (median timings)\n- Default search bounds: timeout={} ms, candidates={}, memory={} bytes\n- Timing note: {}\n- Resource estimate: {}\n",
         env.commit_sha,
         env.working_tree_dirty,
         env.operating_system,
@@ -1494,9 +1806,7 @@ fn render_markdown(baseline: &Baseline) -> String {
         env.timing_note,
         env.resource_estimate_note,
     );
-    output.push_str(
-        "## Results\n\n| Case | Category | Size (nodes / params / depth / data) | Candidates | Synthesis non-Z3 ms | Z3 ms (checks) | Total ms | Result |\n| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |\n",
-    );
+    output.push_str("## Results\n\n| Case | Category | Nodes / params / depth / data | Search bounds | Tested / rejected / generated | Synthesis non-Z3 ms | Link / summary ms | Z3 ms (calls) | Build / boot ms | Transition / effect / restore ms | Total ms | Artifact / WASM bytes | Cache hits / misses / invalidations | Result |\n| --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n");
     for record in &baseline.measurements {
         let size = format!(
             "{} / {} / {} / {}",
@@ -1511,15 +1821,17 @@ fn render_markdown(baseline: &Baseline) -> String {
                     .map(|value| format!("text={value}B")))
                 .unwrap_or_else(|| "—".to_string()),
         );
-        let candidates = record
-            .candidate_count
-            .map(|value| value.to_string())
-            .or_else(|| {
-                record
-                    .generated_candidate_count
-                    .map(|value| format!("{value} gen"))
-            })
-            .unwrap_or_else(|| "—".to_string());
+        let candidates = match record.candidate_count {
+            Some(tested) => format!(
+                "{tested} / {} / {}",
+                number(record.rejected_candidate_count),
+                number(record.generated_candidate_count),
+            ),
+            None => record
+                .generated_candidate_count
+                .map(|value| format!("— / — / {value}"))
+                .unwrap_or_else(|| "—".to_string()),
+        };
         let z3 = match (
             record.z3_verification_time_ms,
             record.solver_invocation_count,
@@ -1528,16 +1840,65 @@ fn render_markdown(baseline: &Baseline) -> String {
             (Some(time), None) => format!("{time:.3}"),
             _ => "—".to_string(),
         };
+        let bounds = format!(
+            "timeout={}, candidates={}, memory={}",
+            record
+                .search_bounds
+                .timeout_ms
+                .map_or_else(|| "none".to_string(), |value| value.to_string()),
+            number(record.search_bounds.max_candidates),
+            number(record.search_bounds.max_memory_bytes),
+        );
+        let link_summary = format!(
+            "{} / {}",
+            millis(record.project_link_time_ms),
+            millis(record.summary_verification_time_ms),
+        );
+        let build_runtime = format!(
+            "{} / {}",
+            millis(record.build_time_ms),
+            millis(record.runtime_boot_time_ms),
+        );
+        let transitions = format!(
+            "{} / {} / {}",
+            millis(record.runtime_transition_time_ms),
+            millis(record.effect_time_ms),
+            millis(record.persistence_restore_time_ms),
+        );
+        let artifacts = format!(
+            "{} / {}",
+            number(record.artifact_bytes),
+            number(record.wasm_bytes),
+        );
+        let cache = if record.cache_hit_count.is_some()
+            || record.cache_miss_count.is_some()
+            || record.cache_invalidation_count.is_some()
+        {
+            format!(
+                "{} / {} / {}",
+                number(record.cache_hit_count),
+                number(record.cache_miss_count),
+                number(record.cache_invalidation_count),
+            )
+        } else {
+            "—".to_string()
+        };
         let _ = writeln!(
             output,
-            "| `{}` | {} | {} | {} | {} | {} | {} | {} |",
+            "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
             record.name,
             record.category,
             size,
+            bounds,
             candidates,
             millis(record.synthesis_non_solver_time_ms),
+            link_summary,
             z3,
+            build_runtime,
+            transitions,
             millis(record.total_time_ms),
+            artifacts,
+            cache,
             record.result,
         );
     }
@@ -1557,58 +1918,25 @@ fn render_markdown(baseline: &Baseline) -> String {
     );
 
     output.push_str(
-        "\n## Expressiveness evidence\n\n| Use case | Measured result | Boundary shown |\n| --- | --- | --- |\n",
-    );
-    let outcome = |name: &str| {
-        baseline
-            .measurements
-            .iter()
-            .find(|record| record.name == name)
-            .map(|record| record.result.as_str())
-            .unwrap_or("MISSING")
-    };
-    let _ = writeln!(
-        output,
-        "| N-value sum | `sum_3={}`; `sum_8={}` | Three scalar inputs synthesize; eight inputs exceed the sample Cartesian-product limit before allocation. |",
-        outcome("sum_3"),
-        outcome("sum_8")
-    );
-    let _ = writeln!(
-        output,
-        "| max/min | `property_max={}`, `minimum={}`, `maximum_3={}` | Two-input max/min synthesize; three-input max reaches the candidate-generation bound. |",
-        outcome("property_max"),
-        outcome("minimum"),
-        outcome("maximum_3")
-    );
-    let _ = writeln!(
-        output,
-        "| Repeated validation | `unrolled_validation_4={}` | Four checks are expressible as a 17-node scalar predicate and synthesize without a loop. |",
-        outcome("unrolled_validation_4")
-    );
-    let _ = writeln!(
-        output,
-        "| Bounded search | `unrolled_bounded_search_4={}` | Five scalar parameters exceed the default sample limit; a loop bound/invariant would avoid hand-unrolling but needs an explicit memory model. |",
-        outcome("unrolled_bounded_search_4")
-    );
-    let _ = writeln!(
-        output,
-        "| List transform / aggregation | `verified_array_parameter_boundary={}` | The representative `sum_list` signature is rejected at the list parameter before verified body synthesis. Application list display/add is measured separately and does not establish verified transform semantics. |",
-        outcome("verified_array_parameter_boundary")
-    );
-    let _ = writeln!(
-        output,
-        "| Structural recursion | `structural_recursion_boundary={}` | A decreasing `sum_to` call parses, then the project linker rejects the recursive cycle before termination proof. |",
-        outcome("structural_recursion_boundary")
+        "\nCandidate metrics: `candidate_count` is proof attempts; `generated_candidate_count` counts post-canonicalization candidates per batch; `rejected_candidate_count` counts type/sample rejects and counterexamples. An expression emitted in separate batches can be counted more than once.\n\n",
     );
     output.push_str(
-        "\nIndexed array reads/writes, fixed-array bounds checks, and element-wise collection validation are not separate executable cases: the current proof boundary rejects list parameters before those operations can be expressed. That is a type-boundary observation, not evidence that every such operation would be costly after arrays exist.\n",
+        "\n## v6 Feature and Release Evidence\n\n| Case | Result | Scope |\n| --- | --- | --- |\n",
     );
-
-    output.push_str("\n## Bottleneck and feature assessment\n\n");
-    output.push_str(
-        "- **Synthesis:** `candidate_count` is the number of candidates sent through verification, including the source-shaped seed; generated candidates and search-batch iterations are separate. `NO_CANDIDATE` and `RESOURCE_LIMIT` describe only the configured grammar/budget, never proof of implementation impossibility. A generation-bound row may stop before any candidate reaches Z3. `synthesis_non_solver_time_ms` subtracts instrumented solver time from synthesis wall time.\n- **Z3:** direct verifier rows report exact `Solver::check()` invocation count and summed time. Search rows include contract satisfiability, CEGIS precondition checks, and candidate proof calls.\n- **Compositional depth:** each generated chain is verified dependency-first with a fixed identity candidate through the verified-summary API at every contract, then built by the release CLI in a fresh temporary `dist` directory. Rows record contract count, summary count, solver time, and end-to-end CLI build time. Direct API timing isolates summary verification; the CLI build also performs production synthesis and artifact emission. Depths 1/2/4/8 are measured after the nested-summary fix. Circular-call rejection and a source-located failed call precondition are separate cases.\n- **Data boundary:** `application_data_serialization` measures tagged JSON plus explicit scalar extraction while scaling record fields, list items, and text together. `static_bundle_runtime_and_persistence` builds with the release CLI and executes generated JS/WASM in Node with a small DOM/storage shim; transition cost includes verified WASM calls, persistence serialization, and list rendering. It is not a real-browser timing claim.\n- **Loop cases:** sum3/sum8, min/max/clamp, validation4, and bounded-search4 measure current source/unrolled encodings. Sum8 and bounded-search4 exceed the 50,000-sample limit before allocating the Cartesian product. A verified list transform is inferred to hit the same tested list-parameter boundary; generated application lists are not verified collections.\n- **Array/collection:** `verified_array_parameter_boundary` records the actual typecheck rejection for a list aggregation parameter. A separate transform body is not benchmarked because its list parameter would be rejected before verified body synthesis. Static application list serialization/rendering costs are reported separately.\n- **Recursion:** the `sum_to(n -% 1)` source-shaped case parses but project loading rejects its recursive contract cycle before any termination analysis. The cross-module cycle case is also rejected. No tree-walk or divide-and-conquer workload was observed, so recursion is not the selected priority.\n\n");
-    output.push_str(
-        "## Priority recommendation\n\nThe former nested-summary blocker is exercised at depths 1/2/4/8 with both dependency-first verification and the release CLI build. The next measured pressure remains bounded search: three-parameter max and bitwise synthesis reach the 50,000 candidate-generation bound, while eight-parameter sum exceeds the 50,000 sample bound. Fixed arrays remain a separate language boundary: list parameters are rejected by verified contracts, while static runtime data handling is measured independently. These timings are local evidence, not guarantees.\n\n## Case details\n\n");
+    for record in &baseline.measurements {
+        if record.category == "verified_feature_proof"
+            || record.category == "static_release_runtime_and_effect"
+        {
+            let _ = writeln!(
+                output,
+                "| `{}` | {} | {} |",
+                record.name,
+                record.result,
+                record.details.as_deref().unwrap_or("—"),
+            );
+        }
+    }
+    output.push_str("\n## Interpretation\n\n`NO_CANDIDATE` and `RESOURCE_LIMIT` apply only to each recorded grammar and search bound; they do not establish that a program is impossible. Solver and wall-clock timings are local observations, not performance guarantees. The release-path row measures generated static assets served over local HTTP in the Node DOM shim; it is not a real-browser timing claim.\n\n## Case details\n\n");
     for record in &baseline.measurements {
         if record.details.is_some() || record.failure_classification.is_some() {
             let _ = writeln!(
@@ -1689,4 +2017,9 @@ fn median_usize(values: &[usize]) -> usize {
     let mut sorted = values.to_vec();
     sorted.sort_unstable();
     sorted.get(sorted.len() / 2).copied().unwrap_or_default()
+}
+
+fn median_f64(mut values: Vec<f64>) -> f64 {
+    values.sort_by(f64::total_cmp);
+    values.get(values.len() / 2).copied().unwrap_or_default()
 }

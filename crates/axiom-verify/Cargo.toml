@@ -7,3 +7,6 @@ edition = "2024"
 axiom-ami = { path = "../axiom-ami" }
 axiom-parser = { path = "../axiom-parser" }
 z3 = { version = "0.21", features = ["bundled"] }
+
+[dev-dependencies]
+axiom-wasm = { path = "../axiom-wasm" }

@@ -80,6 +80,7 @@ impl SynthesisResult {
 pub struct SynthesisMetrics {
     pub candidate_count: usize,
     pub generated_candidate_count: usize,
+    pub rejected_candidate_count: usize,
     pub synthesis_iterations: usize,
     pub search_batches: usize,
     pub counterexample_count: usize,
@@ -184,6 +185,10 @@ fn search_with_options(
     options: SynthesisOptions,
     metrics: &mut Option<&mut SynthesisMetrics>,
 ) -> Result<SynthesisResult, String> {
+    let (_, argument_count) = axiom_parser::verified_abi_layout(&contract.params)?;
+    if argument_count > usize::from(u8::MAX) + 1 {
+        return Err("verified ABI exceeds 256 flattened inputs".to_string());
+    }
     let preconditions = if let Some(metrics) = metrics.as_deref_mut() {
         let (result, solver_metrics) = axiom_verify::check_preconditions_with_metrics(contract)?;
         metrics.merge_verification(solver_metrics);
@@ -209,7 +214,12 @@ fn search_with_options(
         .saturating_add(
             contract
                 .params
-                .len()
+                .iter()
+                .map(|param| match &param.ty {
+                    Type::FixedArray(_, length) => *length,
+                    _ => 1,
+                })
+                .sum::<usize>()
                 .saturating_mul(std::mem::size_of::<u32>()),
         )
         .max(1);
@@ -225,6 +235,21 @@ fn search_with_options(
             });
         }
         Err(SampleError::ResourceLimit(limit)) => {
+            if !timed_out(started, options.timeout)
+                && let Some((candidate, candidates_checked)) = verify_resource_fallback_candidates(
+                    contract,
+                    options,
+                    0,
+                    resource_fallback_candidates(contract),
+                    &mut *metrics,
+                )?
+            {
+                return Ok(SynthesisResult::Found {
+                    candidate,
+                    diagnostic: None,
+                    candidates_checked,
+                });
+            }
             return Ok(SynthesisResult::ResourceLimit {
                 candidates_checked: 0,
                 limit,
@@ -245,83 +270,80 @@ fn search_with_options(
     if (contract.return_type == Type::Bool
         || contract.ensures.iter().any(contains_conditional_construct))
         && let Some(candidate) = candidate_from_contract(contract)?
-        && cegis.matches(contract, &candidate)
     {
         if let Some(metrics) = metrics.as_deref_mut() {
-            metrics.synthesis_iterations += 1;
+            metrics.generated_candidate_count += 1;
         }
-        match verify_for_search(contract, &candidate, metrics)? {
-            ProofResult::Verified => first_verified = Some(candidate),
-            ProofResult::Counterexample(values) => {
-                if let Some(metrics) = metrics.as_deref_mut() {
-                    metrics.counterexample_count += 1;
-                    metrics.peak_sample_count =
-                        metrics.peak_sample_count.max(cegis.samples.len() + 1);
+        if cegis.matches(contract, &candidate) {
+            if let Some(metrics) = metrics.as_deref_mut() {
+                metrics.synthesis_iterations += 1;
+            }
+            match verify_for_search(contract, &candidate, metrics)? {
+                ProofResult::Verified => first_verified = Some(candidate),
+                ProofResult::Counterexample(values) => {
+                    if let Some(metrics) = metrics.as_deref_mut() {
+                        metrics.counterexample_count += 1;
+                        metrics.rejected_candidate_count += 1;
+                        metrics.peak_sample_count =
+                            metrics.peak_sample_count.max(cegis.samples.len() + 1);
+                    }
+                    if !cegis.observe(values) {
+                        return Ok(SynthesisResult::ResourceLimit {
+                            candidates_checked: checked,
+                            limit: sample_limit,
+                        });
+                    }
                 }
-                if !cegis.observe(values) {
-                    return Ok(SynthesisResult::ResourceLimit {
-                        candidates_checked: checked,
-                        limit: sample_limit,
-                    });
+                ProofResult::SolverUnknown => {
+                    return Err("SOLVER_UNKNOWN: SMT solver returned unknown".to_string());
                 }
             }
-            ProofResult::SolverUnknown => {
-                return Err("SOLVER_UNKNOWN: SMT solver returned unknown".to_string());
-            }
+        } else if let Some(metrics) = metrics.as_deref_mut() {
+            metrics.rejected_candidate_count += 1;
         }
     }
 
     let mut generation_truncated = generation_limit == 0;
     for batch_index in 0..6 {
         let generation_started = metrics.as_ref().is_some().then(Instant::now);
-        let candidates = match batch_index {
-            0 => base_candidates(
-                contract.params.len(),
-                generation_limit,
-                started,
-                options.timeout,
-            ),
-            1 => depth_one_candidates(
-                contract.params.len(),
-                generation_limit,
-                started,
-                options.timeout,
-            ),
-            2 => conditional_candidates(
-                contract.params.len(),
-                generation_limit,
-                started,
-                options.timeout,
-            ),
+        let mut candidates = match batch_index {
+            0 => base_candidates(argument_count, generation_limit, started, options.timeout),
+            1 => depth_one_candidates(argument_count, generation_limit, started, options.timeout),
+            2 => conditional_candidates(argument_count, generation_limit, started, options.timeout),
             3 => constant_conditional_candidates(
-                contract.params.len(),
+                argument_count,
                 generation_limit,
                 started,
                 options.timeout,
             ),
             4 => {
                 let conditional = conditional_candidates(
-                    contract.params.len(),
+                    argument_count,
                     generation_limit,
                     started,
                     options.timeout,
                 );
                 nested_conditional_candidates(
-                    contract.params.len(),
+                    argument_count,
                     &conditional,
                     generation_limit,
                     started,
                     options.timeout,
                 )
             }
-            5 => depth_two_candidates(
-                contract.params.len(),
-                generation_limit,
-                started,
-                options.timeout,
-            ),
+            5 => depth_two_candidates(argument_count, generation_limit, started, options.timeout),
             _ => unreachable!("fixed synthesis batch index"),
         };
+        if contract
+            .params
+            .iter()
+            .any(|param| matches!(param.ty, Type::FixedArray(_, _)))
+        {
+            let mut reads =
+                array_read_candidates(contract, generation_limit, started, options.timeout)?;
+            reads.extend(candidates);
+            candidates = dedupe_and_cap(reads, generation_limit);
+        }
         if let (Some(metrics), Some(generation_started)) =
             (metrics.as_deref_mut(), generation_started)
         {
@@ -342,7 +364,11 @@ fn search_with_options(
                 candidates_checked: checked,
             });
         }
+        let generated_count = candidates.len();
         let mut candidates = typed_candidates(candidates, contract);
+        if let Some(metrics) = metrics.as_deref_mut() {
+            metrics.rejected_candidate_count += generated_count - candidates.len();
+        }
         let estimated_memory = candidates
             .iter()
             .map(estimated_candidate_bytes)
@@ -389,6 +415,9 @@ fn search_with_options(
                 });
             }
             if !cegis.matches(contract, &candidate) {
+                if let Some(metrics) = metrics.as_deref_mut() {
+                    metrics.rejected_candidate_count += 1;
+                }
                 continue;
             }
             checked += 1;
@@ -412,6 +441,7 @@ fn search_with_options(
                 ProofResult::Counterexample(values) => {
                     if let Some(metrics) = metrics.as_deref_mut() {
                         metrics.counterexample_count += 1;
+                        metrics.rejected_candidate_count += 1;
                         metrics.peak_sample_count =
                             metrics.peak_sample_count.max(cegis.samples.len() + 1);
                     }
@@ -438,6 +468,19 @@ fn search_with_options(
     }
 
     if generation_truncated {
+        if let Some((candidate, fallback_checked)) = verify_resource_fallback_candidates(
+            contract,
+            options,
+            checked,
+            resource_fallback_candidates(contract),
+            &mut *metrics,
+        )? {
+            return Ok(SynthesisResult::Found {
+                candidate,
+                diagnostic: None,
+                candidates_checked: checked + fallback_checked,
+            });
+        }
         return Ok(SynthesisResult::ResourceLimit {
             candidates_checked: checked,
             limit: generation_limit,
@@ -462,6 +505,114 @@ fn verify_for_search(
     } else {
         verify(contract, candidate)
     }
+}
+
+fn resource_fallback_candidates(contract: &Contract) -> Vec<Expr> {
+    let mut candidates = candidate_from_contract(contract)
+        .ok()
+        .flatten()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if let Some(candidate) = candidate_from_result_bounds(contract) {
+        candidates.push(candidate);
+    }
+    let mut seen = HashSet::new();
+    candidates
+        .into_iter()
+        .filter(|candidate| seen.insert(candidate.clone()))
+        .collect()
+}
+
+fn verify_resource_fallback_candidates(
+    contract: &Contract,
+    options: SynthesisOptions,
+    already_checked: usize,
+    candidates: Vec<Expr>,
+    metrics: &mut Option<&mut SynthesisMetrics>,
+) -> Result<Option<(Expr, usize)>, String> {
+    let mut checked = 0usize;
+    for candidate in candidates {
+        let candidate_bytes = estimated_candidate_bytes(&candidate);
+        if let Some(metrics) = metrics.as_deref_mut() {
+            metrics.generated_candidate_count += 1;
+            metrics.peak_resource_estimate_bytes =
+                metrics.peak_resource_estimate_bytes.max(candidate_bytes);
+        }
+        if already_checked.saturating_add(checked) >= options.max_candidates
+            || candidate_bytes > options.max_memory_bytes
+        {
+            continue;
+        }
+        if let Some(metrics) = metrics.as_deref_mut() {
+            metrics.synthesis_iterations += 1;
+        }
+        checked += 1;
+        match verify_for_search(contract, &candidate, metrics)? {
+            ProofResult::Verified => return Ok(Some((candidate, checked))),
+            ProofResult::Counterexample(_) => {
+                if let Some(metrics) = metrics.as_deref_mut() {
+                    metrics.counterexample_count += 1;
+                    metrics.rejected_candidate_count += 1;
+                }
+            }
+            ProofResult::SolverUnknown => {
+                return Err("SOLVER_UNKNOWN: SMT solver returned unknown".to_string());
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn candidate_from_result_bounds(contract: &Contract) -> Option<Expr> {
+    if contract.return_type != Type::U32
+        || contract.params.len() < 3
+        || contract.params.iter().any(|param| param.ty != Type::U32)
+    {
+        return None;
+    }
+
+    let has_bound = |operator, parameter: &str| {
+        contract.ensures.iter().any(|clause| {
+            let SpecExpr::Binary(actual, lhs, rhs) = clause else {
+                return false;
+            };
+            *actual == operator
+                && matches!(lhs.as_ref(), SpecExpr::Ident(name) if name == "result")
+                && matches!(rhs.as_ref(), SpecExpr::Ident(name) if name == parameter)
+        })
+    };
+    let is_maximum = contract
+        .params
+        .iter()
+        .all(|param| has_bound(BinaryOp::Ge, &param.name));
+    let is_minimum = contract
+        .params
+        .iter()
+        .all(|param| has_bound(BinaryOp::Le, &param.name));
+    if is_maximum == is_minimum {
+        return None;
+    }
+
+    let comparison = if is_maximum {
+        BinaryOp::Gt
+    } else {
+        BinaryOp::Lt
+    };
+    let mut candidate = Expr::Arg(0);
+    for index in 1..contract.params.len() {
+        let next = Expr::Arg(index as u8);
+        let condition = match comparison {
+            BinaryOp::Gt => Expr::Gt(Box::new(candidate.clone()), Box::new(next.clone())),
+            BinaryOp::Lt => Expr::Lt(Box::new(candidate.clone()), Box::new(next.clone())),
+            _ => unreachable!("only extremum comparisons are generated"),
+        };
+        candidate = Expr::Select {
+            condition: Box::new(condition),
+            then_branch: Box::new(candidate),
+            else_branch: Box::new(next),
+        };
+    }
+    Some(candidate)
 }
 
 fn format_synthesis_result(result: &SynthesisResult) -> String {
@@ -570,7 +721,8 @@ pub fn synthesize_wasm_with_metrics(
         } => (candidate, diagnostic, candidates_checked),
         result => return Err(format_synthesis_result(&result)),
     };
-    let module = axiom_wasm::emit(&candidate, contract.params.len() as u32)?;
+    let (_, arity) = axiom_parser::verified_abi_layout(&contract.params)?;
+    let module = axiom_wasm::emit(&candidate, arity as u32)?;
     Ok((candidate, module, diagnostic, candidates_checked))
 }
 
@@ -591,10 +743,10 @@ pub fn lower_requires(contract: &Contract) -> Result<Option<Expr>, String> {
 
 /// Checks a concrete input against every `requires` clause.
 pub fn check_requires(contract: &Contract, args: &[u32]) -> Result<(), String> {
-    if args.len() != contract.params.len() {
+    let (_, expected) = axiom_parser::verified_abi_layout(&contract.params)?;
+    if args.len() != expected {
         return Err(format!(
-            "expected {} inputs, got {}",
-            contract.params.len(),
+            "expected {expected} flattened inputs, got {}",
             args.len()
         ));
     }
@@ -603,7 +755,7 @@ pub fn check_requires(contract: &Contract, args: &[u32]) -> Result<(), String> {
         match eval_spec(expr, contract, args, 0, &HashMap::new())? {
             Value::Bool(true) => {}
             Value::Bool(false) => return Err("input violates a requires clause".to_string()),
-            Value::U32(_) | Value::I32(_) => {
+            Value::U32(_) | Value::I32(_) | Value::Array(_) => {
                 return Err("requires clause must be boolean".to_string());
             }
         }
@@ -643,6 +795,41 @@ fn base_candidates(
     base
 }
 
+fn array_read_candidates(
+    contract: &Contract,
+    limit: usize,
+    started: Instant,
+    timeout: Option<Duration>,
+) -> Result<Vec<Expr>, String> {
+    let (offsets, _) = axiom_parser::verified_abi_layout(&contract.params)?;
+    let mut candidates = Vec::new();
+    for (param_index, param) in contract.params.iter().enumerate() {
+        let Type::FixedArray(element, length) = &param.ty else {
+            continue;
+        };
+        if **element != Type::U32 {
+            continue;
+        }
+        let elements = (0..*length)
+            .map(|index| {
+                u8::try_from(offsets[param_index] + index)
+                    .map(Expr::Arg)
+                    .map_err(|_| "verified ABI exceeds 256 flattened inputs".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for index in 0..*length {
+            if candidates.len() == limit || timed_out(started, timeout) {
+                return Ok(candidates);
+            }
+            candidates.push(Expr::ArrayGet {
+                elements: elements.clone(),
+                index: Box::new(Expr::Const(index as u32)),
+            });
+        }
+    }
+    Ok(candidates)
+}
+
 fn typed_candidates(candidates: Vec<Expr>, contract: &Contract) -> Vec<Expr> {
     let mut seen = HashSet::new();
     candidates
@@ -657,11 +844,22 @@ fn typed_candidates(candidates: Vec<Expr>, contract: &Contract) -> Vec<Expr> {
 
 fn candidate_type(expr: &Expr, contract: &Contract) -> Option<Type> {
     match expr {
-        Expr::Arg(index) => contract
-            .params
-            .get(*index as usize)
-            .map(|param| param.ty.clone()),
+        Expr::Arg(index) => candidate_argument_type(*index as usize, contract),
         Expr::Const(_) => Some(Type::U32),
+        Expr::ArrayGet { elements, index }
+            if !elements.is_empty()
+                && elements
+                    .iter()
+                    .all(|element| candidate_type(element, contract) == Some(Type::U32))
+                && matches!(candidate_type(index, contract), Some(Type::U32 | Type::I32)) =>
+        {
+            Some(Type::U32)
+        }
+        Expr::Guard { condition, value }
+            if candidate_type(condition, contract) == Some(Type::Bool) =>
+        {
+            candidate_type(value, contract)
+        }
         Expr::Add(lhs, rhs)
         | Expr::Sub(lhs, rhs)
         | Expr::Mul(lhs, rhs)
@@ -709,8 +907,28 @@ fn candidate_type(expr: &Expr, contract: &Contract) -> Option<Type> {
             let else_type = candidate_type(else_branch, contract)?;
             (then_type == else_type).then_some(then_type)
         }
-        Expr::Select { .. } => None,
+        Expr::Select { .. } | Expr::ArrayGet { .. } | Expr::Guard { .. } => None,
     }
+}
+
+fn candidate_argument_type(index: usize, contract: &Contract) -> Option<Type> {
+    let (offsets, arity) = axiom_parser::verified_abi_layout(&contract.params).ok()?;
+    if index >= arity {
+        return None;
+    }
+    for (param_index, param) in contract.params.iter().enumerate() {
+        let width = match &param.ty {
+            Type::FixedArray(_, length) => *length,
+            _ => 1,
+        };
+        if (offsets[param_index]..offsets[param_index] + width).contains(&index) {
+            return Some(match &param.ty {
+                Type::FixedArray(_, _) => Type::U32,
+                ty => ty.clone(),
+            });
+        }
+    }
+    None
 }
 
 fn numeric_candidate_type(lhs: Option<Type>, rhs: Option<Type>) -> Option<Type> {
@@ -800,6 +1018,16 @@ fn estimated_candidate_bytes(expr: &Expr) -> usize {
             own + estimated_candidate_bytes(condition)
                 + estimated_candidate_bytes(then_branch)
                 + estimated_candidate_bytes(else_branch)
+        }
+        Expr::ArrayGet { elements, index } => {
+            own + estimated_candidate_bytes(index)
+                + elements
+                    .iter()
+                    .map(estimated_candidate_bytes)
+                    .sum::<usize>()
+        }
+        Expr::Guard { condition, value } => {
+            own + estimated_candidate_bytes(condition) + estimated_candidate_bytes(value)
         }
     }
 }
@@ -1039,6 +1267,15 @@ fn timed_out(started: Instant, timeout: Option<Duration>) -> bool {
     timeout.is_some_and(|timeout| started.elapsed() >= timeout)
 }
 
+fn and_expr(lhs: Expr, rhs: Expr) -> Expr {
+    match (lhs, rhs) {
+        (Expr::Const(0), _) | (_, Expr::Const(0)) => Expr::Const(0),
+        (Expr::Const(1), rhs) => rhs,
+        (lhs, Expr::Const(1)) => lhs,
+        (lhs, rhs) => Expr::And(Box::new(lhs), Box::new(rhs)),
+    }
+}
+
 fn sample_inputs(
     contract: &Contract,
     max_samples: usize,
@@ -1065,39 +1302,47 @@ fn sample_inputs(
     }
     let mut samples = vec![Vec::new()];
     for param in &contract.params {
-        if timed_out(started, timeout) {
-            return Err(SampleError::Timeout);
-        }
+        let width = match &param.ty {
+            Type::FixedArray(_, length) => *length,
+            _ => 1,
+        };
         let values: &[u32] = if param.ty == Type::Bool {
             &[0, 1]
         } else {
             &VALUES
         };
-        let Some(next_len) = samples.len().checked_mul(values.len()) else {
-            return Err(SampleError::ResourceLimit(max_samples));
-        };
-        if next_len > max_samples {
-            return Err(SampleError::ResourceLimit(max_samples));
-        }
-        let mut next = Vec::with_capacity(next_len);
-        for prefix in &samples {
-            for value in values {
-                if timed_out(started, timeout) {
-                    return Err(SampleError::Timeout);
-                }
-                let mut args = prefix.clone();
-                args.push(*value);
-                next.push(args);
+        for _ in 0..width {
+            if timed_out(started, timeout) {
+                return Err(SampleError::Timeout);
             }
+            let Some(next_len) = samples.len().checked_mul(values.len()) else {
+                return Err(SampleError::ResourceLimit(max_samples));
+            };
+            if next_len > max_samples {
+                return Err(SampleError::ResourceLimit(max_samples));
+            }
+            let mut next = Vec::with_capacity(next_len);
+            for prefix in &samples {
+                for value in values {
+                    if timed_out(started, timeout) {
+                        return Err(SampleError::Timeout);
+                    }
+                    let mut args = prefix.clone();
+                    args.push(*value);
+                    next.push(args);
+                }
+            }
+            samples = next;
         }
-        samples = next;
     }
     Ok(samples)
 }
 
 fn matches_samples(contract: &Contract, candidate: &Expr, samples: &[Vec<u32>]) -> bool {
     samples.iter().all(|args| {
-        let result = candidate.eval(args);
+        let Ok(result) = candidate.try_eval(args) else {
+            return false;
+        };
         let requires = contract.requires.iter().all(|expr| {
             matches!(
                 eval_spec(expr, contract, args, result, &HashMap::new()),
@@ -1119,6 +1364,20 @@ enum Value {
     U32(u32),
     I32(i32),
     Bool(bool),
+    Array(Vec<u32>),
+}
+
+fn checked_sample_index(index: Value, length: usize) -> Result<usize, String> {
+    let index = match index {
+        Value::U32(index) => index as usize,
+        Value::I32(index) if index >= 0 => index as usize,
+        Value::I32(_) => return Err("fixed array index is negative".to_string()),
+        _ => return Err("array index must be u32 or i32".to_string()),
+    };
+    if index >= length {
+        return Err(format!("fixed array index {index} is out of bounds"));
+    }
+    Ok(index)
 }
 
 fn eval_spec(
@@ -1145,19 +1404,52 @@ fn eval_spec(
                 .iter()
                 .position(|param| param.name == *name)
                 .ok_or_else(|| format!("unknown identifier: {name}"))?;
+            let (offsets, _) = axiom_parser::verified_abi_layout(&contract.params)?;
+            let offset = offsets[index];
             let value = args
-                .get(index)
+                .get(offset)
                 .copied()
                 .ok_or_else(|| format!("missing argument: {name}"))?;
             match contract.params[index].ty {
                 Type::Bool => Ok(Value::Bool(value != 0)),
                 Type::I32 => Ok(Value::I32(value as i32)),
+                Type::FixedArray(_, length) => {
+                    Ok(Value::Array(args[offset..offset + length].to_vec()))
+                }
                 _ => Ok(Value::U32(value)),
             }
         }
         SpecExpr::Number(value) => Ok(Value::U32(*value)),
         SpecExpr::Bool(value) => Ok(Value::Bool(*value)),
-        SpecExpr::Text(_) | SpecExpr::List(_) | SpecExpr::Record { .. } | SpecExpr::Field(_, _) => {
+        SpecExpr::Field(value, field) => match eval_spec(value, contract, args, result, locals)? {
+            Value::Array(elements) if field == "length" => Ok(Value::U32(elements.len() as u32)),
+            _ => Err("field access is only supported for fixed array length".to_string()),
+        },
+        SpecExpr::Index(array, index) => {
+            let Value::Array(elements) = eval_spec(array, contract, args, result, locals)? else {
+                return Err("indexed reads require a fixed verified array".to_string());
+            };
+            let index = eval_spec(index, contract, args, result, locals)?;
+            let index = checked_sample_index(index, elements.len())?;
+            Ok(Value::U32(elements[index]))
+        }
+        SpecExpr::ArrayUpdate(array, index, value) => {
+            let Value::Array(mut elements) = eval_spec(array, contract, args, result, locals)?
+            else {
+                return Err("array_update requires a fixed verified array".to_string());
+            };
+            let index = eval_spec(index, contract, args, result, locals)?;
+            let index = checked_sample_index(index, elements.len())?;
+            let Value::U32(value) = eval_spec(value, contract, args, result, locals)? else {
+                return Err("array update value must be u32".to_string());
+            };
+            elements[index] = value;
+            Ok(Value::Array(elements))
+        }
+        SpecExpr::For { .. } => {
+            Err("bounded loops are only allowed in fn implementation expressions".to_string())
+        }
+        SpecExpr::Text(_) | SpecExpr::List(_) | SpecExpr::Record { .. } => {
             Err("non-scalar expressions cannot be synthesized".to_string())
         }
         SpecExpr::Let(name, value, body) => {
@@ -1169,7 +1461,7 @@ fn eval_spec(
         SpecExpr::If(condition, then_branch, else_branch) => {
             let condition = match eval_spec(condition, contract, args, result, locals)? {
                 Value::Bool(value) => value,
-                Value::U32(_) | Value::I32(_) => {
+                Value::U32(_) | Value::I32(_) | Value::Array(_) => {
                     return Err("if condition must be boolean".to_string());
                 }
             };
@@ -1276,6 +1568,8 @@ fn eval_spec(
                 }
                 (BinaryOp::Eq, Value::Bool(lhs), Value::Bool(rhs)) => Ok(Value::Bool(lhs == rhs)),
                 (BinaryOp::Ne, Value::Bool(lhs), Value::Bool(rhs)) => Ok(Value::Bool(lhs != rhs)),
+                (BinaryOp::Eq, Value::Array(lhs), Value::Array(rhs)) => Ok(Value::Bool(lhs == rhs)),
+                (BinaryOp::Ne, Value::Array(lhs), Value::Array(rhs)) => Ok(Value::Bool(lhs != rhs)),
                 (BinaryOp::Lt, Value::U32(lhs), Value::U32(rhs)) => Ok(Value::Bool(lhs < rhs)),
                 (BinaryOp::Le, Value::U32(lhs), Value::U32(rhs)) => Ok(Value::Bool(lhs <= rhs)),
                 (BinaryOp::Gt, Value::U32(lhs), Value::U32(rhs)) => Ok(Value::Bool(lhs > rhs)),
@@ -1318,7 +1612,7 @@ fn eval_spec(
 
 fn contains_conditional_construct(expr: &SpecExpr) -> bool {
     match expr {
-        SpecExpr::Let(_, _, _) | SpecExpr::If(_, _, _) => true,
+        SpecExpr::Let(_, _, _) | SpecExpr::If(_, _, _) | SpecExpr::For { .. } => true,
         SpecExpr::Binary(_, lhs, rhs) => {
             contains_conditional_construct(lhs) || contains_conditional_construct(rhs)
         }
@@ -1328,6 +1622,14 @@ fn contains_conditional_construct(expr: &SpecExpr) -> bool {
             .iter()
             .any(|(_, value)| contains_conditional_construct(value)),
         SpecExpr::Field(value, _) => contains_conditional_construct(value),
+        SpecExpr::Index(array, index) => {
+            contains_conditional_construct(array) || contains_conditional_construct(index)
+        }
+        SpecExpr::ArrayUpdate(array, index, value) => {
+            contains_conditional_construct(array)
+                || contains_conditional_construct(index)
+                || contains_conditional_construct(value)
+        }
         SpecExpr::Call(_, args) => args.iter().any(contains_conditional_construct),
     }
 }
@@ -1355,15 +1657,53 @@ fn lower_spec_expr(
 ) -> Result<Expr, String> {
     match expr {
         SpecExpr::Ident(name) if locals.contains_key(name) => Ok(locals[name].clone()),
-        SpecExpr::Ident(name) => contract
-            .params
-            .iter()
-            .position(|param| param.name == *name)
-            .map(|index| Expr::Arg(index as u8))
-            .ok_or_else(|| format!("unknown identifier: {name}")),
+        SpecExpr::Ident(name) => {
+            let index = contract
+                .params
+                .iter()
+                .position(|param| param.name == *name)
+                .ok_or_else(|| format!("unknown identifier: {name}"))?;
+            if matches!(contract.params[index].ty, Type::FixedArray(_, _)) {
+                return Err(format!("fixed array {name} requires an index"));
+            }
+            let (offsets, _) = axiom_parser::verified_abi_layout(&contract.params)?;
+            Ok(Expr::Arg(u8::try_from(offsets[index]).map_err(|_| {
+                "verified ABI exceeds 256 flattened inputs".to_string()
+            })?))
+        }
         SpecExpr::Number(value) => Ok(Expr::Const(*value)),
         SpecExpr::Bool(value) => Ok(Expr::Const(u32::from(*value))),
-        SpecExpr::Text(_) | SpecExpr::List(_) | SpecExpr::Record { .. } | SpecExpr::Field(_, _) => {
+        SpecExpr::Field(array, field) if field == "length" => {
+            let (elements, defined) = lower_array_spec_expr(array, contract, locals)?;
+            Ok(Expr::Guard {
+                condition: Box::new(defined),
+                value: Box::new(Expr::Const(elements.len() as u32)),
+            })
+        }
+        SpecExpr::Index(array, index) => {
+            let (elements, array_defined) = lower_array_spec_expr(array, contract, locals)?;
+            let index = lower_spec_expr(index, contract, locals)?;
+            let defined = and_expr(
+                array_defined,
+                Expr::Lt(
+                    Box::new(index.clone()),
+                    Box::new(Expr::Const(elements.len() as u32)),
+                ),
+            );
+            Ok(Expr::Guard {
+                condition: Box::new(defined),
+                value: Box::new(Expr::ArrayGet {
+                    elements,
+                    index: Box::new(index),
+                }),
+            })
+        }
+        SpecExpr::Text(_)
+        | SpecExpr::List(_)
+        | SpecExpr::Record { .. }
+        | SpecExpr::Field(_, _)
+        | SpecExpr::ArrayUpdate(_, _, _)
+        | SpecExpr::For { .. } => {
             Err("non-scalar expressions cannot be lowered to WASM".to_string())
         }
         SpecExpr::Let(name, value, body) => {
@@ -1412,6 +1752,57 @@ fn lower_spec_expr(
     }
 }
 
+fn lower_array_spec_expr(
+    expr: &SpecExpr,
+    contract: &Contract,
+    locals: &HashMap<String, Expr>,
+) -> Result<(Vec<Expr>, Expr), String> {
+    match expr {
+        SpecExpr::Ident(name) => {
+            let index = contract
+                .params
+                .iter()
+                .position(|param| param.name == *name)
+                .ok_or_else(|| format!("unknown identifier: {name}"))?;
+            let Type::FixedArray(_, length) = &contract.params[index].ty else {
+                return Err(format!("{name} is not a fixed verified array"));
+            };
+            let (offsets, _) = axiom_parser::verified_abi_layout(&contract.params)?;
+            let elements = (offsets[index]..offsets[index] + *length)
+                .map(|offset| {
+                    u8::try_from(offset)
+                        .map(Expr::Arg)
+                        .map_err(|_| "verified ABI exceeds 256 flattened inputs".to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((elements, Expr::Const(1)))
+        }
+        SpecExpr::ArrayUpdate(array, index, value) => {
+            let (elements, array_defined) = lower_array_spec_expr(array, contract, locals)?;
+            let index = lower_spec_expr(index, contract, locals)?;
+            let value = lower_spec_expr(value, contract, locals)?;
+            let in_bounds = Expr::Lt(
+                Box::new(index.clone()),
+                Box::new(Expr::Const(elements.len() as u32)),
+            );
+            let updated = elements
+                .into_iter()
+                .enumerate()
+                .map(|(position, element)| Expr::Select {
+                    condition: Box::new(Expr::Eq(
+                        Box::new(index.clone()),
+                        Box::new(Expr::Const(position as u32)),
+                    )),
+                    then_branch: Box::new(value.clone()),
+                    else_branch: Box::new(element),
+                })
+                .collect();
+            Ok((updated, and_expr(array_defined, in_bounds)))
+        }
+        _ => Err("expected a fixed verified array expression".to_string()),
+    }
+}
+
 fn is_i32_expr(expr: &SpecExpr, contract: &Contract) -> bool {
     let names = contract
         .params
@@ -1457,6 +1848,82 @@ mod tests {
         let contract = parse("contract identity(x: u32) -> u32 { ensures result == x; }").unwrap();
 
         assert_eq!(synthesize(&contract).unwrap(), Expr::Arg(0));
+    }
+
+    #[test]
+    fn synthesizes_static_fixed_array_reads_deterministically() {
+        let contract =
+            parse("contract first(values: [u32; 3]) -> u32 { ensures result == values[0]; }")
+                .unwrap();
+        let options = SynthesisOptions {
+            max_candidates: 5_000,
+            max_memory_bytes: 8 * 1024 * 1024,
+            ..SynthesisOptions::default()
+        };
+        let first = synthesize_result_with_options(&contract, options).unwrap();
+        let second = synthesize_result_with_options(&contract, options).unwrap();
+        assert_eq!(first, second);
+        let SynthesisResult::Found { candidate, .. } = first else {
+            panic!("expected a fixed-array read candidate, got {first:?}");
+        };
+        assert_eq!(
+            candidate.try_eval(&[17, 29, 43]).unwrap(),
+            17,
+            "candidate must use the first flattened array element"
+        );
+    }
+
+    #[test]
+    fn resource_limited_search_fallbacks_are_proved_and_run_in_wasm() {
+        let cases = [
+            (
+                include_str!("../../../benchmarks/v6/synthesis/maximum_3.ax"),
+                vec![
+                    (vec![0, u32::MAX, 2], u32::MAX),
+                    (vec![4, 4, 1], 4),
+                    (vec![7, 0, 9], 9),
+                ],
+            ),
+            (
+                include_str!("../../../benchmarks/v6/synthesis/bitwise_combo.ax"),
+                [0, 1, 15, 16, u32::MAX]
+                    .into_iter()
+                    .map(|value| (vec![value], (value & 15) ^ value.wrapping_add(1)))
+                    .collect(),
+            ),
+            (
+                include_str!("../../../benchmarks/v6/synthesis/sum_8.ax"),
+                vec![
+                    (vec![u32::MAX, 1, 2, 3, 4, 5, 6, 7], 27),
+                    (vec![1, 2, 3, 4, 5, 6, 7, 8], 36),
+                ],
+            ),
+        ];
+
+        for (source, cases) in cases {
+            let contract = parse(source).unwrap();
+            let (result, metrics) =
+                synthesize_result_with_metrics(&contract, SynthesisOptions::default()).unwrap();
+            let SynthesisResult::Found { candidate, .. } = result else {
+                panic!("expected a verified resource fallback for {source}, got {result:?}");
+            };
+            assert_eq!(metrics.candidate_count, 1);
+            assert_eq!(metrics.synthesis_iterations, 1);
+            assert!(metrics.generated_candidate_count > 0);
+            assert!(metrics.solver_invocations > 0);
+            assert_eq!(
+                verify(&contract, &candidate).unwrap(),
+                ProofResult::Verified
+            );
+
+            let module = axiom_wasm::emit(&candidate, contract.params.len() as u32).unwrap();
+            for (inputs, expected) in cases {
+                assert_eq!(
+                    axiom_wasm::run_with_args(&module, &inputs).unwrap(),
+                    expected
+                );
+            }
+        }
     }
 
     #[test]
@@ -1586,27 +2053,48 @@ mod tests {
     }
 
     #[test]
-    fn bounds_cartesian_sample_generation_before_allocating_the_product() {
+    fn resource_fallback_uses_proofs_without_cartesian_sample_products() {
         let contract = parse(
             "contract many(a: u32, b: u32, c: u32, d: u32, e: u32, f: u32) -> u32 { ensures result == a; }",
         )
         .unwrap();
 
+        let (result, metrics) = synthesize_result_with_metrics(
+            &contract,
+            SynthesisOptions {
+                max_candidates: 100,
+                max_memory_bytes: 1024 * 1024,
+                ..SynthesisOptions::default()
+            },
+        )
+        .unwrap();
         assert!(matches!(
-            synthesize_result_with_options(
-                &contract,
-                SynthesisOptions {
-                    max_candidates: 100,
-                    max_memory_bytes: 1024 * 1024,
-                    ..SynthesisOptions::default()
-                }
-            )
-            .unwrap(),
-            SynthesisResult::ResourceLimit {
-                candidates_checked: 0,
-                limit: 100,
+            result,
+            SynthesisResult::Found {
+                candidate: Expr::Arg(0),
+                candidates_checked: 1,
+                ..
             }
         ));
+        assert_eq!(metrics.initial_sample_count, 0);
+        assert_eq!(metrics.peak_sample_count, 0);
+        assert_eq!(metrics.candidate_count, 1);
+        assert!(metrics.solver_invocations > 0);
+
+        let invalid = parse(
+            "contract invalid(a: u32, b: u32, c: u32, d: u32, e: u32, f: u32) -> u32 { ensures result == a; ensures result == a +% 1; }",
+        )
+        .unwrap();
+        let error = synthesize_result_with_metrics(
+            &invalid,
+            SynthesisOptions {
+                max_candidates: 100,
+                max_memory_bytes: 1024 * 1024,
+                ..SynthesisOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("UNSATISFIABLE_POSTCONDITION"));
     }
 
     #[test]

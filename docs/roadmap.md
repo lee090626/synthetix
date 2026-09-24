@@ -42,10 +42,35 @@ DB, 인증 내부까지 Synthetix가 증명하는 것은 목표가 아니다.
 | v2 | 여러 `.ax` 파일, import/export, `axiom dev`, 정적 web bundle 1차 구현 |
 | v3.1 | 상태·record·list·text·reducer·persist 기반 애플리케이션 1차 구현 |
 | v4.0 | property-first `max`·`min`·`clamp`·조건부 후보 합성 1차 구현 |
-| **현재 다음 단계** | **v5.0 Application Boundary Baseline** |
+| v4.9 | proof semantics freeze 완료 |
+| v5.9 | application boundary freeze 완료 |
+| v6.0 | 규모 확장 benchmark baseline 완료 |
+| v6.1 | 제한된 배열 완료 |
+| v6.2 | 제한된 반복문 완료 |
+| v6.3 | 구조적 재귀 완료 |
+| v6.4 | 검증된 Collection: 필요 근거 부족으로 보류 (DEFERRED) |
+| v6.5 | 대규모 Modular Proof cache/invalidation 완료 |
+| v6.6 | budget 실패 뒤 proof-checked fallback과 benchmark 계측 완료 |
+| v6.7 | WASI/Node/Edge 제품 수요 없음 (DEFERRED) |
+| v6.8 | extern effect와 unverified trust boundary 완료 |
+| **현재 다음 단계** | **v6.9 Freeze** |
 
-v4.0은 방향을 검증한 실험적 slice다. v4.9 안정 버전으로 보기 전에
-의미론과 backend 보존성을 먼저 고정해야 한다.
+v4.9와 v5.9는 각각 proof와 application 경계를 동결했다. v6.0 benchmark는
+검증된 배열 입력이 거부되는 expressiveness 경계를 재현했고, v6.1은 앱
+`List`가 아닌 최대 16개 원소의 고정 증명 입력으로만 이를 확장했다. v6.3은
+bounded loop와 별개로 제한된 단일 함수 self-recursion만 정적으로 펼친다.
+v6.4는 현재 bounded array/loop가 sum/fold와 search를 표현함을 확인했고,
+추가 dynamic collection semantics를 요구하는 실제 workload가 없어 보류했다.
+v6.5는 `axiom dev`의 process-local proof cache에서 정확히 파싱한 source bytes,
+semantics version, synthesis 설정, dependency key를 묶어 VERIFIED 후보만 재사용하고,
+변경된 contract와 그 caller만 다시 검증한다. 조건부 v6.6은 benchmark에서 병목을
+재확인해 `maximum_3`, `bitwise_combo`, `sum_8`의 budget 실패를 증명 가능한
+source-derived 후보로 구제했다. 추가 검색 기능이나 budget 증가는 하지 않았다.
+v6.7 검토에서는 delivered runtime이 browser/WASM이고 Node.js는
+integration/benchmark test host임을 확인했다. WASI/Node/Edge deployment에 대한
+실제 제품 요구가 없어 새 target은 보류한다. v6.8은 proof artifact에서 검증된
+WASM contract와 host가 제공하는 미검증 extern 구현을 분리하고, typed effect와
+명시적 가정 및 audit 미제공 상태를 기록한다.
 
 ## 공통 완료 기준
 
@@ -956,6 +981,29 @@ v6의 loop, recursion, array, map, set은 단순한 문법 추가가 아니다. 
 | 의존성 | v6.0에서 배열이 실제 병목으로 확인되어야 한다. |
 | 범위 밖 | 임의 크기 동적 메모리와 포인터 산술. |
 
+### v6.1 구현 기록
+
+상태: **완료**
+
+- v6.0의 `verified_array_parameter_boundary`는 배열 집계를 표현하는
+  계약 입력이 parser/type checker 단계에서 거부됨을 재현했다. 이는 앱
+  `List`의 속도 문제가 아니라 proof input expressiveness의 한계다. v6.0의
+  compositional depth 및 synthesis scaling 우선순위는 그대로 유지한다.
+- `[u32; N]` (`1 <= N <= 16`) 입력, 평탄화된 verified ABI, `.length`, 읽기,
+  immutable `array_update`, elementwise equality를 parser/type checker,
+  reference evaluator, AMI/Z3, WASM lowering에 연결했다.
+- `requires`는 전체 입력에서 정의되어야 하고 candidate/`ensures` 배열
+  접근은 `requires` 하에서 범위가 증명되어야 한다. `&&`, `||`, 조건식의
+  단락 경계도 reference, definedness proof, AMI, WASM에 맞췄다. 불가능한
+  bounds obligation은 `INVALID`이며 실행 시 out-of-bounds는 error/trap이다.
+- fixed array는 application `List`, page expression/state, extern ABI와
+  분리했다. 함수 반환은 기존대로 scalar로 제한한다.
+
+검증: `cargo test --workspace` 131개 통과,
+`cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo fmt --all -- --check`, `git diff --check`,
+`cargo build --release -p axiom-cli` 통과.
+
 ## v6.2 — 제한된 반복문
 
 | 항목 | 내용 |
@@ -964,6 +1012,30 @@ v6의 loop, recursion, array, map, set은 단순한 문법 추가가 아니다. 
 | 주요 작업·완료 | bounded loop, 종료 조건, loop invariant, 반복 횟수 제한을 지원한다. |
 | 의존성 | v6.0 benchmark와 v6.1의 제한된 memory 모델이 필요하다. |
 | 범위 밖 | 종료가 보장되지 않는 일반 loop. |
+
+### v6.2 구현 기록
+
+상태: **완료**
+
+- v6.0의 unrolled `sum_8`/bounded-search 사례는 수동 확장이 샘플 자원
+  한도에 닿는 경계를 기록했다. v6.1의 fixed-array memory 모델 위에
+  `for i in START..END with acc = INIT invariant P { NEXT_ACC }` 형식을
+  추가했다.
+- start/end는 정적 `u32`이며 half-open 범위의 최대 반복 횟수는 16이다.
+  인덱스는 `u32`, body는 accumulator와 같은 타입이어야 한다. invariant는
+  entry, 각 반복 진입, exit에서 검사하며, 실패는 `fn`의 `ContractCheck`
+  `INVALID`가 된다.
+- finite body를 AMI로 unroll해 기존 Z3 proof와 WASM lowering을 사용한다.
+  동적 bound와 nested loop는 거부한다. loop synthesis grammar와 증명 비용
+  개선은 구현하지 않았으므로 v6.6 scaling 근거로 간주하지 않는다.
+- sum, max/min, bounded validation, 반복 array update, zero/one/16회,
+  invariant failure/trap, 동적·초과 bound rejection을 parser, proof,
+  reference, AMI, WASM 테스트에서 확인한다.
+
+검증: `cargo test --workspace` 137개 통과,
+`cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo fmt --all -- --check`, `git diff --check`,
+`cargo build --release -p axiom-cli` 통과.
 
 ## v6.3 — 구조적 재귀
 
@@ -974,6 +1046,30 @@ v6의 loop, recursion, array, map, set은 단순한 문법 추가가 아니다. 
 | 의존성 | v6.2의 invariant·resource 모델 이후 진행한다. |
 | 범위 밖 | 일반 재귀와 임의의 self-modifying control flow. |
 
+### v6.3 구현 기록
+
+상태: **완료**
+
+- 단일 `u32 -> u32` `fn`의 self-call 하나만 허용한다. 호출은
+  `if n == 0 { base } else { ... f(n -% 1) ... }`의 nonzero branch 안에
+  있어야 한다. u32의 하한과 zero base가 wrapping decrement의 underflow를
+  막고, 그 분기에서 measure가 1 감소함을 구문 형태로 고정한다.
+- 최대 16개의 recursive edge(초기 호출 포함 최대 17개 frame)까지만 AMI로
+  정적 unroll한다. 한도를 넘는 경로는 undefined guard가 되고, verifier가
+  `requires` 아래에서 그 경로가 도달 불가능함을 증명하지 못하면 함수는
+  `INVALID`다. WASM stack overflow는 한도나 termination 증거로 쓰지 않는다.
+- bounded loop와 재귀의 조합, 비감소 호출, 여러 self-call, shadow된 measure,
+  mutual/다른 함수 호출은 지원하지 않는다. 기존 project contract cycle
+  rejection은 유지한다.
+- `sum_to`의 base/decreasing cases, 깊이 한도 경계와 초과 trap, 한도 증명이
+  없는 함수의 거부를 parser, proof, AMI reference evaluator, WASM 테스트로
+  확인한다.
+
+검증: `cargo test --workspace` 140개 통과,
+`cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo fmt --all -- --check`, `git diff --check`,
+`cargo build --release -p axiom-cli` 통과.
+
 ## v6.4 — 검증된 Collection
 
 | 항목 | 내용 |
@@ -982,6 +1078,28 @@ v6의 loop, recursion, array, map, set은 단순한 문법 추가가 아니다. 
 | 주요 작업·완료 | list 계산, search, fold, filter를 먼저 검토하고 map/set은 별도 benchmark 후 결정한다. |
 | 의존성 | v6.1 배열과 v6.2 loop 또는 v6.3 recursion 중 필요한 모델이 선행되어야 한다. |
 | 범위 밖 | 모든 자료구조를 한 번에 지원하는 범용 collection library. |
+
+### v6.4 구현 기록
+
+상태: **DEFERRED — 현재 근거로 별도 verified collection이 필요하지 않음**
+
+- v6.0 benchmark의 verified-list aggregation 사례는 입력 type boundary에서
+  거부됐다. v6.1의 고정 배열과 v6.2의 bounded loop 뒤에는 sum/fold가
+  `bounded_array_sum_proves_the_loop_and_matches_reference_and_wasm`에서
+  검증된다. search found/not-found도 기존 배열·loop 조합을 사용하는
+  `bounded_array_loop_search_covers_found_and_not_found`에서 reference,
+  AMI, Z3, WASM 결과가 일치한다.
+- 현재 증명 모델은 빈 배열이나 가변 길이 결과(filter)를 표현하지 않는다.
+  저장소의 `List` 사용은 application UI/runtime 경로에 있고, 기존 v6.0
+  benchmark는 이를 verified proof input의 수요로 분류하지 않는다.
+- 따라서 dynamic collection type, filter output representation, arbitrary
+  length support는 추가하지 않는다. 실제 contract가 빈/가변 길이 결과를
+  요구하거나 16-element bound가 workload를 막는 사례가 생기면 재평가한다.
+
+검증: `cargo test --workspace` 141개 통과,
+`cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo fmt --all -- --check`, `git diff --check`,
+`cargo build --release -p axiom-cli` 통과.
 
 ## v6.5 — 대규모 Modular Proof
 
@@ -992,6 +1110,23 @@ v6의 loop, recursion, array, map, set은 단순한 문법 추가가 아니다. 
 | 의존성 | v4.6 compositional verification과 v4.7 artifact가 필요하다. |
 | 범위 밖 | 검증되지 않은 module을 verified graph에 자동 포함하는 것. |
 
+완료: `axiom dev` watcher의 반복 build 경로가 process-local cache를 재사용한다.
+cache key는 parser가 실제 사용한 정확한 module bytes, `VERIFIED_SEMANTICS_VERSION`,
+synthesis timeout/candidate/memory 설정, 그리고 dependency key를 포함한다.
+cache에는 compositional proof가 `VERIFIED`된 candidate만 저장한다. 실패한
+precondition/proof는 저장하지 않으며 다음 build에서 다시 검증한다. 파일 변경은
+mtime/size 추정 대신 현재 source bytes로 탐지한다. one-shot `check`/`build`는
+실행 간 cache를 보존하지 않는다.
+
+검증 사례: A→B→C caller graph의 cold/warm, C 변경, root만 변경, unrelated module
+변경, semantics version 변경, synthesis setting 변경, failed proof 미저장과
+32-module cold/warm graph를 `axiom-cli` 테스트가 직접 확인한다. 상세 단일 실행
+측정은 `docs/v6-benchmark.md`의 v6.5 절에 기록한다. 시간은 로컬 debug test
+측정이며 성능 보장이 아니다. milestone gate: `cargo test --workspace` 144개,
+`cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo fmt --all -- --check`, `git diff --check`,
+`cargo build --release -p axiom-cli`가 모두 통과했다.
+
 ## v6.6 — Synthesis Scaling
 
 | 항목 | 내용 |
@@ -1000,6 +1135,24 @@ v6의 loop, recursion, array, map, set은 단순한 문법 추가가 아니다. 
 | 주요 작업·완료 | 병렬 CEGIS, solver-guided search, 더 큰 typed grammar, 필요 시 e-graph를 도입한다. |
 | 의존성 | v4.3 kernel과 v6.0 benchmark가 필수다. |
 | 범위 밖 | benchmark 없는 ML-guided synthesis. |
+
+상태: **완료**. v6.0 benchmark를 동일한 50,000-candidate/64-MiB 기본 bound로
+다시 실행해 `maximum_3`, `bitwise_combo`, `sum_8`가 각각 후보 생성 또는 초기
+sample Cartesian product에서 `RESOURCE_LIMIT`되는 것을 확인했다. 검색 bound와
+semantics는 그대로 두고, 해당 bound에 도달했을 때만 제한된 source-derived
+fallback을 시도한다: exact `result == expression`, 또는 모든 u32 입력에 대한
+result lower/upper bound에서 만든 max/min fold. fallback도 Z3에서 VERIFIED된
+후에만 `FOUND`가 된다. 실패하면 기존 `RESOURCE_LIMIT`을 유지한다.
+
+benchmark 계측은 proof attempt, 생성 후보, type/sample/solver 거절 후보를
+분리해 반복 실행 간 결정성도 비교한다. 같은 release benchmark의 before/after
+결과와 추가 WASM boundary test는 `docs/v6-benchmark.md`에 기록했다. 세 fixture는
+모두 같은 search bound에서 `FOUND`로 바뀌고 실제 생성 WASM 결과가 맞았다.
+총 wall time은 추가 Z3 proof 때문에 늘었으며 성능 향상으로 주장하지 않는다.
+milestone gate: `cargo test --workspace` 145개,
+`cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo fmt --all -- --check`, `git diff --check`,
+`cargo build --release -p axiom-cli`가 모두 통과했다.
 
 ## v6.7 — 추가 Runtime Target
 
@@ -1010,6 +1163,12 @@ v6의 loop, recursion, array, map, set은 단순한 문법 추가가 아니다. 
 | 의존성 | v4.8 backend conformance와 실제 배포 수요가 필요하다. |
 | 범위 밖 | WASM을 버리고 JS/TypeScript 생성으로 방향을 바꾸는 것. |
 
+상태: **DEFERRED**. Product-facing runtime은 browser의 generated WASM 경로다.
+현재 Node.js 사용은 integration/benchmark에서 browser bundle을 실행하는 test
+host이며, WASI나 별도 Node/Edge target의 배포 요구를 증명하지 않는다. 실제
+deployment consumer가 생길 때 필요한 target 하나를 선택하고 conformance를
+다시 조사한다.
+
 ## v6.8 — FFI와 Unsafe Boundary
 
 | 항목 | 내용 |
@@ -1018,6 +1177,23 @@ v6의 loop, recursion, array, map, set은 단순한 문법 추가가 아니다. 
 | 주요 작업·완료 | FFI 선언, effect 표시, 입력·출력 타입, 가정과 audit 경계를 제공한다. |
 | 의존성 | v4.5 `extern`과 v5.5 adapter 모델이 필요하다. |
 | 범위 밖 | 외부 함수 내부까지 자동으로 verified라고 표시하는 것. |
+
+완료: 기존 `extern fn` 선언을 host effect 경계로 유지한다. web proof artifact
+schema v4는 `external_boundaries`에 extern source, input/output type, effect,
+`UNVERIFIED` 구현 상태, declared-type-only 응답 검증, runtime adapter 가정,
+`NOT_PROVIDED` audit metadata를 기록한다. `verification` 상태는
+`WASM_CONTRACTS_ONLY`로 범위가 한정되고 `verification_scope`는 미검증 extern
+구현을 분리한다. generated runtime은 같은 effect 및
+trust-boundary marker를 host adapter request에 전달한다.
+
+실제 `axiom build` release-path test는 manifest 구조와 source/type/audit 값을
+확인하고, Node가 generated WASM/runtime을 실행해 valid input/output, 잘못된 input,
+잘못된 output, adapter 미등록, adapter 예외, 그리고 effect marker 전달을 확인한다.
+application runtime 오류는 proof counterexample가 아니다. 외부 구현의 동작과
+사실성은 여전히 검증하지 않는다. v6.8 gate: `cargo test --workspace` 145개,
+`cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo fmt --all -- --check`, `git diff --check`,
+`cargo build --release -p axiom-cli`가 모두 통과했다.
 
 ## v6.9 — Freeze
 
@@ -1062,8 +1238,12 @@ v6의 loop, recursion, array, map, set은 단순한 문법 추가가 아니다. 
 v4.1 Semantic Baseline부터 v4.9 Freeze까지와 v5.0 Application Boundary
 Baseline, v5.1 Thin Web Runtime, v5.2 State Transition, v5.3 Data Boundary,
 v5.4 Browser Effect와 Persistence, v5.5 External Adapter, v5.6 Async와 실패
-흐름, v5.7 Web Integration Test, v5.8 Packaging과 Deployment, v5.9 Freeze가
-완료되었다. v6은 미래 연구 트랙이며 이 freeze 작업에서는 시작하지 않는다.
+흐름, v5.7 Web Integration Test, v5.8 Packaging과 Deployment, v5.9 Freeze,
+v6.0 Scale Benchmark, v6.1 제한된 배열, v6.2 제한된 반복문, v6.3 구조적
+재귀, v6.5 대규모 Modular Proof, v6.8 FFI trust boundary가 완료되었고 v6.4 검증된 Collection은
+근거에 따라 보류되었다. v6.6은 같은 bounded search에서 세 measured resource
+limit 사례를 proof-checked fallback으로 구제했다. v6.7 추가 runtime target은
+현재 제품 수요가 없어 보류했다. 현재 다음 단계는 v6.9 Freeze다.
 
 ```text
 v4.1 완료
@@ -1085,9 +1265,20 @@ v4.1 완료
   → v5.7 완료
   → v5.8 완료
   → v5.9 완료
+  → v6.0 완료
+  → v6.1 완료
+  → v6.2 완료
+  → v6.3 완료
+  → v6.4 DEFERRED
+  → v6.5 완료
+  → v6.6 완료
+  → v6.7 DEFERRED
+  → v6.8 완료
+  → v6.9 진행 전
 ```
 
 v4.9에서 의미론, 결과 상태, supported grammar, negative fixture, release
 검증 기준을 동결했고 v5.0~v5.9에서 core와 application/effect 실행,
 state transition, data/persistence boundary, typed external adapter를
-분리했다. 일반 재귀, loop invariant, 무제한 호출은 시작하지 않는다.
+분리했다. v6.3은 제한된 self-recursion만 추가했으며 일반 재귀,
+종료 증명 없는 loop, 무제한 호출은 지원하지 않는다.

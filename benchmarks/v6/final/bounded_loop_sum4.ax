@@ -1,0 +1,6 @@
+fn sum4(values: [u32; 4]) -> u32 {
+    return for i in 0..4 with acc = 0 invariant acc == acc {
+        acc +% values[i]
+    };
+    ensures result == values[0] +% values[1] +% values[2] +% values[3];
+}

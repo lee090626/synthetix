@@ -36,6 +36,15 @@ pub fn validate(contract: &Contract) -> Result<(), String> {
             {
                 return Err("type error: extern declarations cannot contain an implementation or contract clauses".to_string());
             }
+            if contract
+                .params
+                .iter()
+                .any(|param| matches!(param.ty, Type::FixedArray(_, _)))
+            {
+                return Err(
+                    "type error: extern declarations cannot accept verified arrays".to_string(),
+                );
+            }
             return Ok(());
         }
         DeclarationKind::Contract if contract.implementation.is_some() => {
@@ -53,11 +62,23 @@ pub fn validate(contract: &Contract) -> Result<(), String> {
         return Err("type error: contract must have at least one ensures clause".to_string());
     }
 
+    if contract
+        .requires
+        .iter()
+        .chain(&contract.ensures)
+        .any(contains_for)
+    {
+        return Err(
+            "type error: bounded loops are only allowed in fn implementation expressions"
+                .to_string(),
+        );
+    }
+
     let mut names = std::collections::HashMap::new();
     for param in &contract.params {
-        if !is_scalar(&param.ty) {
+        if !is_scalar(&param.ty) && !is_supported_array(&param.ty) {
             return Err(format!(
-                "type error: contract parameter {} must be number or bool",
+                "type error: contract parameter {} must be number, bool, or a supported fixed array",
                 param.name
             ));
         }
@@ -67,7 +88,14 @@ pub fn validate(contract: &Contract) -> Result<(), String> {
     }
 
     if let Some(implementation) = &contract.implementation {
-        let implementation_type = type_of_expr(implementation, &names, None)?;
+        let has_self_call = count_self_calls(implementation, &contract.name) > 0;
+        let typed_implementation = if has_self_call {
+            validate_structural_recursion(contract, implementation)?;
+            replace_self_calls(implementation, &contract.name)
+        } else {
+            implementation.clone()
+        };
+        let implementation_type = type_of_expr(&typed_implementation, &names, None)?;
         if implementation_type != contract.return_type {
             return Err(format!(
                 "type error: fn return expression has type {:?}, expected {:?}",
@@ -111,6 +139,321 @@ fn is_scalar(ty: &Type) -> bool {
     matches!(ty, Type::U32 | Type::I32 | Type::Bool)
 }
 
+fn is_supported_array(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::FixedArray(element, length)
+            if **element == Type::U32 && (1..=MAX_VERIFIED_ARRAY_LEN).contains(length)
+    )
+}
+
+fn count_self_calls(expr: &SpecExpr, function: &str) -> usize {
+    match expr {
+        SpecExpr::Call(name, args) => {
+            usize::from(name == function)
+                + args
+                    .iter()
+                    .map(|argument| count_self_calls(argument, function))
+                    .sum::<usize>()
+        }
+        SpecExpr::Binary(_, lhs, rhs) => {
+            count_self_calls(lhs, function) + count_self_calls(rhs, function)
+        }
+        SpecExpr::Let(_, value, body) => {
+            count_self_calls(value, function) + count_self_calls(body, function)
+        }
+        SpecExpr::If(condition, then_branch, else_branch) => {
+            count_self_calls(condition, function)
+                + count_self_calls(then_branch, function)
+                + count_self_calls(else_branch, function)
+        }
+        SpecExpr::List(values) => values
+            .iter()
+            .map(|value| count_self_calls(value, function))
+            .sum(),
+        SpecExpr::Record { fields, .. } => fields
+            .iter()
+            .map(|(_, value)| count_self_calls(value, function))
+            .sum(),
+        SpecExpr::Field(value, _) => count_self_calls(value, function),
+        SpecExpr::Index(array, index) => {
+            count_self_calls(array, function) + count_self_calls(index, function)
+        }
+        SpecExpr::ArrayUpdate(array, index, value) => {
+            count_self_calls(array, function)
+                + count_self_calls(index, function)
+                + count_self_calls(value, function)
+        }
+        SpecExpr::For {
+            initial,
+            invariant,
+            body,
+            ..
+        } => {
+            count_self_calls(initial, function)
+                + count_self_calls(invariant, function)
+                + count_self_calls(body, function)
+        }
+        SpecExpr::Ident(_) | SpecExpr::Number(_) | SpecExpr::Bool(_) | SpecExpr::Text(_) => 0,
+    }
+}
+
+fn is_zero_test(expr: &SpecExpr, measure: &str) -> bool {
+    let SpecExpr::Binary(BinaryOp::Eq, lhs, rhs) = expr else {
+        return false;
+    };
+    matches!((lhs.as_ref(), rhs.as_ref()),
+        (SpecExpr::Ident(name), SpecExpr::Number(0)) if name == measure
+    ) || matches!((lhs.as_ref(), rhs.as_ref()),
+        (SpecExpr::Number(0), SpecExpr::Ident(name)) if name == measure
+    )
+}
+
+fn is_decrement(expr: &SpecExpr, measure: &str) -> bool {
+    matches!(expr,
+        SpecExpr::Binary(BinaryOp::SubWrap, lhs, rhs)
+            if matches!(lhs.as_ref(), SpecExpr::Ident(name) if name == measure)
+                && matches!(rhs.as_ref(), SpecExpr::Number(1))
+    )
+}
+
+fn validate_structural_recursion(
+    contract: &Contract,
+    implementation: &SpecExpr,
+) -> Result<(), String> {
+    if contract.kind != DeclarationKind::Function
+        || contract.return_type != Type::U32
+        || contract.params.len() != 1
+        || contract.params[0].ty != Type::U32
+    {
+        return Err(
+            "type error: structural recursion currently requires one u32 parameter and a u32 result"
+                .to_string(),
+        );
+    }
+    if contains_for(implementation) {
+        return Err("type error: recursion cannot be combined with bounded loops".to_string());
+    }
+    let measure = &contract.params[0].name;
+    if contains_measure_shadow(implementation, measure) {
+        return Err(format!(
+            "type error: recursive measure {measure} cannot be shadowed"
+        ));
+    }
+    if count_self_calls(implementation, &contract.name) != 1 {
+        return Err(
+            "type error: structural recursion requires exactly one recursive call".to_string(),
+        );
+    }
+    validate_recursive_branch(implementation, &contract.name, measure, false)
+}
+
+fn contains_measure_shadow(expr: &SpecExpr, measure: &str) -> bool {
+    match expr {
+        SpecExpr::Let(name, value, body) => {
+            name == measure
+                || contains_measure_shadow(value, measure)
+                || contains_measure_shadow(body, measure)
+        }
+        SpecExpr::Binary(_, lhs, rhs) => {
+            contains_measure_shadow(lhs, measure) || contains_measure_shadow(rhs, measure)
+        }
+        SpecExpr::If(condition, then_branch, else_branch) => {
+            contains_measure_shadow(condition, measure)
+                || contains_measure_shadow(then_branch, measure)
+                || contains_measure_shadow(else_branch, measure)
+        }
+        SpecExpr::Call(_, args) | SpecExpr::List(args) => args
+            .iter()
+            .any(|value| contains_measure_shadow(value, measure)),
+        SpecExpr::Record { fields, .. } => fields
+            .iter()
+            .any(|(_, value)| contains_measure_shadow(value, measure)),
+        SpecExpr::Field(value, _) => contains_measure_shadow(value, measure),
+        SpecExpr::Index(array, index) => {
+            contains_measure_shadow(array, measure) || contains_measure_shadow(index, measure)
+        }
+        SpecExpr::ArrayUpdate(array, index, value) => {
+            contains_measure_shadow(array, measure)
+                || contains_measure_shadow(index, measure)
+                || contains_measure_shadow(value, measure)
+        }
+        SpecExpr::For {
+            index,
+            accumulator,
+            initial,
+            invariant,
+            body,
+            ..
+        } => {
+            index == measure
+                || accumulator == measure
+                || contains_measure_shadow(initial, measure)
+                || contains_measure_shadow(invariant, measure)
+                || contains_measure_shadow(body, measure)
+        }
+        SpecExpr::Ident(_) | SpecExpr::Number(_) | SpecExpr::Bool(_) | SpecExpr::Text(_) => false,
+    }
+}
+
+fn validate_recursive_branch(
+    expr: &SpecExpr,
+    function: &str,
+    measure: &str,
+    under_decreasing_branch: bool,
+) -> Result<(), String> {
+    match expr {
+        SpecExpr::Call(name, args) if name == function => {
+            if !under_decreasing_branch || args.len() != 1 || !is_decrement(&args[0], measure) {
+                return Err(format!(
+                    "type error: {function} must recurse once as {measure} -% 1 only in the nonzero branch of {measure} == 0"
+                ));
+            }
+            Ok(())
+        }
+        SpecExpr::Call(_, args) | SpecExpr::List(args) => {
+            for value in args {
+                validate_recursive_branch(value, function, measure, under_decreasing_branch)?;
+            }
+            Ok(())
+        }
+        SpecExpr::Binary(_, lhs, rhs) => {
+            validate_recursive_branch(lhs, function, measure, under_decreasing_branch)?;
+            validate_recursive_branch(rhs, function, measure, under_decreasing_branch)
+        }
+        SpecExpr::Let(_, value, body) => {
+            validate_recursive_branch(value, function, measure, under_decreasing_branch)?;
+            validate_recursive_branch(body, function, measure, under_decreasing_branch)
+        }
+        SpecExpr::If(condition, then_branch, else_branch) if is_zero_test(condition, measure) => {
+            validate_recursive_branch(condition, function, measure, false)?;
+            validate_recursive_branch(then_branch, function, measure, false)?;
+            validate_recursive_branch(else_branch, function, measure, true)
+        }
+        SpecExpr::If(condition, then_branch, else_branch) => {
+            validate_recursive_branch(condition, function, measure, under_decreasing_branch)?;
+            validate_recursive_branch(then_branch, function, measure, under_decreasing_branch)?;
+            validate_recursive_branch(else_branch, function, measure, under_decreasing_branch)
+        }
+        SpecExpr::Record { fields, .. } => {
+            for (_, value) in fields {
+                validate_recursive_branch(value, function, measure, under_decreasing_branch)?;
+            }
+            Ok(())
+        }
+        SpecExpr::Field(value, _) => {
+            validate_recursive_branch(value, function, measure, under_decreasing_branch)
+        }
+        SpecExpr::Index(array, index) => {
+            validate_recursive_branch(array, function, measure, under_decreasing_branch)?;
+            validate_recursive_branch(index, function, measure, under_decreasing_branch)
+        }
+        SpecExpr::ArrayUpdate(array, index, value) => {
+            validate_recursive_branch(array, function, measure, under_decreasing_branch)?;
+            validate_recursive_branch(index, function, measure, under_decreasing_branch)?;
+            validate_recursive_branch(value, function, measure, under_decreasing_branch)
+        }
+        SpecExpr::For { .. } => {
+            Err("type error: recursion cannot be combined with bounded loops".to_string())
+        }
+        SpecExpr::Ident(_) | SpecExpr::Number(_) | SpecExpr::Bool(_) | SpecExpr::Text(_) => Ok(()),
+    }
+}
+
+fn replace_self_calls(expr: &SpecExpr, function: &str) -> SpecExpr {
+    match expr {
+        SpecExpr::Call(name, _) if name == function => SpecExpr::Number(0),
+        SpecExpr::Call(name, args) => SpecExpr::Call(
+            name.clone(),
+            args.iter()
+                .map(|argument| replace_self_calls(argument, function))
+                .collect(),
+        ),
+        SpecExpr::Binary(op, lhs, rhs) => SpecExpr::Binary(
+            op.clone(),
+            Box::new(replace_self_calls(lhs, function)),
+            Box::new(replace_self_calls(rhs, function)),
+        ),
+        SpecExpr::Let(name, value, body) => SpecExpr::Let(
+            name.clone(),
+            Box::new(replace_self_calls(value, function)),
+            Box::new(replace_self_calls(body, function)),
+        ),
+        SpecExpr::If(condition, then_branch, else_branch) => SpecExpr::If(
+            Box::new(replace_self_calls(condition, function)),
+            Box::new(replace_self_calls(then_branch, function)),
+            Box::new(replace_self_calls(else_branch, function)),
+        ),
+        SpecExpr::List(values) => SpecExpr::List(
+            values
+                .iter()
+                .map(|value| replace_self_calls(value, function))
+                .collect(),
+        ),
+        SpecExpr::Record { name, fields } => SpecExpr::Record {
+            name: name.clone(),
+            fields: fields
+                .iter()
+                .map(|(field, value)| (field.clone(), replace_self_calls(value, function)))
+                .collect(),
+        },
+        SpecExpr::Field(value, field) => {
+            SpecExpr::Field(Box::new(replace_self_calls(value, function)), field.clone())
+        }
+        SpecExpr::Index(array, index) => SpecExpr::Index(
+            Box::new(replace_self_calls(array, function)),
+            Box::new(replace_self_calls(index, function)),
+        ),
+        SpecExpr::ArrayUpdate(array, index, value) => SpecExpr::ArrayUpdate(
+            Box::new(replace_self_calls(array, function)),
+            Box::new(replace_self_calls(index, function)),
+            Box::new(replace_self_calls(value, function)),
+        ),
+        SpecExpr::For {
+            index,
+            start,
+            end,
+            accumulator,
+            initial,
+            invariant,
+            body,
+        } => SpecExpr::For {
+            index: index.clone(),
+            start: *start,
+            end: *end,
+            accumulator: accumulator.clone(),
+            initial: Box::new(replace_self_calls(initial, function)),
+            invariant: Box::new(replace_self_calls(invariant, function)),
+            body: Box::new(replace_self_calls(body, function)),
+        },
+        SpecExpr::Ident(_) | SpecExpr::Number(_) | SpecExpr::Bool(_) | SpecExpr::Text(_) => {
+            expr.clone()
+        }
+    }
+}
+
+/// Returns the flattened core/WASM argument offsets for a scalar or fixed-array signature.
+pub fn verified_abi_layout(params: &[Param]) -> Result<(Vec<usize>, usize), String> {
+    let mut offsets = Vec::with_capacity(params.len());
+    let mut arity = 0usize;
+    for param in params {
+        offsets.push(arity);
+        let width = match &param.ty {
+            Type::U32 | Type::I32 | Type::Bool => 1,
+            Type::FixedArray(element, length)
+                if **element == Type::U32 && (1..=MAX_VERIFIED_ARRAY_LEN).contains(length) =>
+            {
+                *length
+            }
+            _ => return Err(format!("unsupported verified input type: {}", param.name)),
+        };
+        arity = arity
+            .checked_add(width)
+            .ok_or_else(|| "verified ABI argument count overflow".to_string())?;
+    }
+    Ok((offsets, arity))
+}
+
 fn numeric_type(lhs: &SpecExpr, lhs_type: &Type, rhs: &SpecExpr, rhs_type: &Type) -> Option<Type> {
     match (lhs_type, rhs_type) {
         (Type::U32, Type::U32) => Some(Type::U32),
@@ -139,9 +482,38 @@ fn mentions_result(expr: &SpecExpr) -> bool {
                 || mentions_result(else_branch)
         }
         SpecExpr::Call(_, args) | SpecExpr::List(args) => args.iter().any(mentions_result),
+        SpecExpr::Index(array, index) => mentions_result(array) || mentions_result(index),
+        SpecExpr::ArrayUpdate(array, index, value) => {
+            mentions_result(array) || mentions_result(index) || mentions_result(value)
+        }
+        SpecExpr::For {
+            initial,
+            invariant,
+            body,
+            ..
+        } => mentions_result(initial) || mentions_result(invariant) || mentions_result(body),
         SpecExpr::Record { fields, .. } => fields.iter().any(|(_, value)| mentions_result(value)),
         SpecExpr::Field(value, _) => mentions_result(value),
         SpecExpr::Number(_) | SpecExpr::Bool(_) | SpecExpr::Text(_) => false,
+    }
+}
+
+fn contains_for(expr: &SpecExpr) -> bool {
+    match expr {
+        SpecExpr::For { .. } => true,
+        SpecExpr::Binary(_, lhs, rhs) => contains_for(lhs) || contains_for(rhs),
+        SpecExpr::Let(_, value, body) => contains_for(value) || contains_for(body),
+        SpecExpr::If(condition, then_branch, else_branch) => {
+            contains_for(condition) || contains_for(then_branch) || contains_for(else_branch)
+        }
+        SpecExpr::Call(_, args) | SpecExpr::List(args) => args.iter().any(contains_for),
+        SpecExpr::Index(array, index) => contains_for(array) || contains_for(index),
+        SpecExpr::ArrayUpdate(array, index, value) => {
+            contains_for(array) || contains_for(index) || contains_for(value)
+        }
+        SpecExpr::Record { fields, .. } => fields.iter().any(|(_, value)| contains_for(value)),
+        SpecExpr::Field(value, _) => contains_for(value),
+        SpecExpr::Ident(_) | SpecExpr::Number(_) | SpecExpr::Bool(_) | SpecExpr::Text(_) => false,
     }
 }
 
@@ -172,7 +544,72 @@ pub fn type_of_expr(
             Ok(Type::List(Box::new(item_type)))
         }
         SpecExpr::Record { name, .. } => Ok(Type::Record(name.clone())),
-        SpecExpr::Field(_, _) => Err("field access requires a page record context".to_string()),
+        SpecExpr::Field(value, field) => match type_of_expr(value, names, result_type)? {
+            Type::FixedArray(_, _) if field == "length" => Ok(Type::U32),
+            _ => Err("field access requires a page record context".to_string()),
+        },
+        SpecExpr::Index(array, index) => {
+            let array_type = type_of_expr(array, names, result_type)?;
+            let index_type = type_of_expr(index, names, result_type)?;
+            match array_type {
+                Type::FixedArray(element, _) if matches!(index_type, Type::U32 | Type::I32) => {
+                    Ok(*element)
+                }
+                Type::FixedArray(_, _) => Err("array index must be u32 or i32".to_string()),
+                _ => Err("indexed reads require a fixed verified array".to_string()),
+            }
+        }
+        SpecExpr::ArrayUpdate(array, index, value) => {
+            let array_type = type_of_expr(array, names, result_type)?;
+            let index_type = type_of_expr(index, names, result_type)?;
+            let value_type = type_of_expr(value, names, result_type)?;
+            match &array_type {
+                Type::FixedArray(element, _)
+                    if matches!(index_type, Type::U32 | Type::I32) && value_type == **element =>
+                {
+                    Ok(array_type)
+                }
+                Type::FixedArray(_, _) if !matches!(index_type, Type::U32 | Type::I32) => {
+                    Err("array index must be u32 or i32".to_string())
+                }
+                Type::FixedArray(_, _) => Err("array update value has the wrong type".to_string()),
+                _ => Err("array_update requires a fixed verified array".to_string()),
+            }
+        }
+        SpecExpr::For {
+            index,
+            start,
+            end,
+            accumulator,
+            initial,
+            invariant,
+            body,
+        } => {
+            if end < start || end - start > MAX_VERIFIED_LOOP_ITERATIONS {
+                return Err("bounded loop exceeds the verified iteration limit".to_string());
+            }
+            if index == accumulator {
+                return Err("loop index and accumulator must have different names".to_string());
+            }
+            if [initial.as_ref(), invariant.as_ref(), body.as_ref()]
+                .iter()
+                .any(|expr| contains_for(expr))
+            {
+                return Err("nested bounded loops are not supported".to_string());
+            }
+            let initial_type = type_of_expr(initial, names, result_type)?;
+            let mut nested = names.clone();
+            nested.insert(index.clone(), Type::U32);
+            nested.insert(accumulator.clone(), initial_type.clone());
+            if type_of_expr(invariant, &nested, result_type)? != Type::Bool {
+                return Err("loop invariant must be boolean".to_string());
+            }
+            let body_type = type_of_expr(body, &nested, result_type)?;
+            if body_type != initial_type {
+                return Err("loop body must return the accumulator type".to_string());
+            }
+            Ok(initial_type)
+        }
         SpecExpr::Let(name, value, body) => {
             let value_type = type_of_expr(value, names, result_type)?;
             let mut nested = names.clone();
@@ -509,5 +946,121 @@ mod tests {
             SpecExpr::Binary(BinaryOp::Eq, _, rhs)
                 if matches!(rhs.as_ref(), SpecExpr::Binary(BinaryOp::BitXor, _, _))
         ));
+    }
+
+    #[test]
+    fn parses_bounded_verified_arrays_and_flattened_abi() {
+        let contract = parse(
+            "fn read(values: [u32; 3], index: u32) -> u32 { \
+             requires index < values.length; \
+             return array_update(values, index, 9)[index]; \
+             ensures result == values[index]; }",
+        )
+        .unwrap();
+
+        assert_eq!(
+            contract.params[0].ty,
+            Type::FixedArray(Box::new(Type::U32), 3)
+        );
+        assert_ne!(contract.params[0].ty, Type::List(Box::new(Type::U32)));
+        assert_eq!(
+            verified_abi_layout(&contract.params).unwrap(),
+            (vec![0, 3], 4)
+        );
+        assert!(matches!(
+            contract.implementation,
+            Some(SpecExpr::Index(_, _))
+        ));
+    }
+
+    #[test]
+    fn rejects_unbounded_or_unsupported_verified_array_types() {
+        for source in [
+            "contract f(values: [u32; 0]) -> u32 { ensures result == 0; }",
+            "contract f(values: [u32; 17]) -> u32 { ensures result == 0; }",
+            "contract f(values: [i32; 2]) -> u32 { ensures result == 0; }",
+        ] {
+            assert!(
+                parse(source).is_err(),
+                "accepted unsupported array: {source}"
+            );
+        }
+        assert!(
+            parse("extern fn read(values: [u32; 2]) -> u32;").is_err(),
+            "extern ABI must remain outside the verified array boundary"
+        );
+    }
+
+    #[test]
+    fn parses_statically_bounded_for_accumulators() {
+        let function = parse(
+            "fn sum(values: [u32; 4]) -> u32 { \
+             return for i in 0..4 with acc = 0 invariant acc == acc { acc +% values[i] }; \
+             ensures result == values[0] +% values[1] +% values[2] +% values[3]; }",
+        )
+        .unwrap();
+
+        let Some(SpecExpr::For {
+            index,
+            start,
+            end,
+            accumulator,
+            ..
+        }) = function.implementation.as_ref()
+        else {
+            panic!("expected a bounded loop implementation");
+        };
+        assert_eq!(index, "i");
+        assert_eq!((*start, *end), (0, 4));
+        assert_eq!(accumulator, "acc");
+    }
+
+    #[test]
+    fn rejects_unbounded_nested_or_ill_typed_loops() {
+        for source in [
+            "fn f(values: [u32; 2]) -> u32 { return for i in 0..values.length with acc = 0 invariant true { acc }; ensures result == 0; }",
+            "fn f(values: [u32; 2]) -> u32 { return for i in 0..17 with acc = 0 invariant true { acc }; ensures result == 0; }",
+            "fn f(values: [u32; 2]) -> u32 { return for i in 3..2 with acc = 0 invariant true { acc }; ensures result == 0; }",
+            "fn f(values: [u32; 2]) -> u32 { return for i in 0..1 with acc = 0 invariant 0 { acc }; ensures result == 0; }",
+            "fn f(values: [u32; 2]) -> u32 { return for i in 0..1 with acc = 0 invariant true { true }; ensures result == 0; }",
+            "fn f(values: [u32; 2]) -> u32 { return for i in 0..1 with acc = 0 invariant true { for j in 0..1 with inner = 0 invariant true { inner } }; ensures result == 0; }",
+            "contract f(values: [u32; 2]) -> u32 { requires for i in 0..1 with acc = 0 invariant true { acc == 0 }; ensures result == 0; }",
+        ] {
+            assert!(
+                parse(source).is_err(),
+                "accepted unsupported loop: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_single_measure_decreasing_structural_recursion() {
+        let function = parse(
+            "fn sum_to(n: u32) -> u32 { \
+             requires n <= 16; \
+             return if n == 0 { 0 } else { 1 +% sum_to(n -% 1) }; \
+             ensures result == n; }",
+        )
+        .unwrap();
+        assert_eq!(function.name, "sum_to");
+    }
+
+    #[test]
+    fn rejects_non_decreasing_unbounded_or_unsupported_recursion() {
+        for source in [
+            "fn f(n: u32) -> u32 { requires n <= 16; return if n == 0 { 0 } else { f(n) }; ensures result == n; }",
+            "fn f(n: u32) -> u32 { requires n <= 16; return f(n -% 1); ensures result == n; }",
+            "fn f(n: u32) -> u32 { requires n <= 16; return if n > 0 { f(n -% 1) } else { 0 }; ensures result == n; }",
+            "fn f(n: u32) -> u32 { requires n <= 16; return if n == 0 { 0 } else { f(n -% 1) +% f(n -% 1) }; ensures result == n; }",
+            "fn f(n: u32) -> u32 { requires n <= 16; return let n = 0 in if n == 0 { 0 } else { f(n -% 1) }; ensures result == 0; }",
+            "fn f(n: i32) -> u32 { requires n <= 16; return if n == 0 { 0 } else { f(n -% 1) }; ensures result == 0; }",
+            "fn even(n: u32) -> u32 { return odd(n); ensures result == 0; }",
+            "contract f(n: u32) -> u32 { ensures result == f(n -% 1); }",
+        ] {
+            assert!(
+                parse(source).is_err(),
+                "accepted unsupported recursion: {source}"
+            );
+        }
     }
 }

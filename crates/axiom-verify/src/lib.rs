@@ -118,6 +118,18 @@ fn check_preconditions_inner(
 ) -> Result<PreconditionResult, String> {
     let args = symbolic_args(contract)?;
     let result = BV::new_const("__axiom_result", 32);
+    for clause in &contract.requires {
+        let defined = spec_definedness(clause, contract, &args, &result, &HashMap::new())?;
+        require_defined_when(
+            contract,
+            &args,
+            &Bool::from_bool(true),
+            &defined,
+            &[],
+            metrics,
+            "requires clause",
+        )?;
+    }
     let requires = preconditions_to_bool(contract, &args, &result)?;
     let solver = Solver::new();
     constrain_bool_parameters(&solver, contract, &args);
@@ -155,12 +167,13 @@ fn check_contract_inner(
         return Ok(ContractCheck::Valid);
     }
 
-    match check_preconditions_inner(contract, metrics)? {
-        PreconditionResult::Satisfiable => {}
-        PreconditionResult::UnsatisfiablePrecondition => {
+    match check_preconditions_inner(contract, metrics) {
+        Err(error) => return Ok(ContractCheck::Invalid(error)),
+        Ok(PreconditionResult::Satisfiable) => {}
+        Ok(PreconditionResult::UnsatisfiablePrecondition) => {
             return Ok(ContractCheck::UnsatisfiablePrecondition);
         }
-        PreconditionResult::SolverUnknown => {
+        Ok(PreconditionResult::SolverUnknown) => {
             return Err("contract precondition satisfiability is unknown".to_string());
         }
     }
@@ -168,6 +181,23 @@ fn check_contract_inner(
     let args = symbolic_args(contract)?;
     let result = BV::new_const("__axiom_result", 32);
     let requires = preconditions_to_bool(contract, &args, &result)?;
+    let ensures_defined = contract
+        .ensures
+        .iter()
+        .map(|clause| spec_definedness(clause, contract, &args, &result, &HashMap::new()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let ensures_defined = Bool::and(&ensures_defined.iter().collect::<Vec<_>>());
+    if let Err(error) = require_defined_when(
+        contract,
+        &args,
+        &requires,
+        &ensures_defined,
+        &[],
+        metrics,
+        "ensures clause",
+    ) {
+        return Ok(ContractCheck::Invalid(error));
+    }
     let ensures = ensures_to_bool(contract, &args, &result)?;
     let solver = Solver::new();
     constrain_bool_parameters(&solver, contract, &args);
@@ -179,7 +209,11 @@ fn check_contract_inner(
                 Ok(candidate) => candidate,
                 Err(error) => return Ok(ContractCheck::Invalid(error)),
             };
-            match verify_inner(contract, &candidate, metrics)? {
+            let proof = match verify_inner(contract, &candidate, metrics) {
+                Ok(proof) => proof,
+                Err(error) => return Ok(ContractCheck::Invalid(error)),
+            };
+            match proof {
                 ProofResult::Verified => Ok(ContractCheck::Valid),
                 ProofResult::Counterexample(values) => Ok(ContractCheck::Invalid(format!(
                     "fn implementation violates its contract at {values:?}"
@@ -193,12 +227,13 @@ fn check_contract_inner(
     }
 }
 
-/// Lowers a `fn` return expression into the same AMI used by the verifier and
-/// WASM backend. Calls remain outside this local lowering boundary until v4.6.
+/// Lowers a `fn` return expression into the AMI shared by verification and WASM.
+/// Structurally recursive self-calls are statically unrolled to the depth bound.
 pub fn implementation_to_ami(contract: &Contract) -> Result<Expr, String> {
     if contract.kind != axiom_parser::DeclarationKind::Function {
         return Err("only fn declarations have a local implementation".to_string());
     }
+    axiom_parser::validate(contract)?;
     let implementation = contract
         .implementation
         .as_ref()
@@ -208,15 +243,34 @@ pub fn implementation_to_ami(contract: &Contract) -> Result<Expr, String> {
         .iter()
         .map(|param| (param.name.clone(), param.ty.clone()))
         .collect::<HashMap<_, _>>();
-    lower_implementation(implementation, contract, &types, &HashMap::new())
+    match lower_implementation_value(implementation, contract, &types, &HashMap::new(), 0)? {
+        LoweredImplementation::Scalar {
+            expr,
+            defined: Expr::Const(1),
+        } => Ok(expr),
+        LoweredImplementation::Scalar { expr, defined } => Ok(Expr::Guard {
+            condition: Box::new(defined),
+            value: Box::new(expr),
+        }),
+        LoweredImplementation::Array { .. } => {
+            Err("fn return expression must be scalar".to_string())
+        }
+    }
 }
 
-fn lower_implementation(
+#[derive(Clone)]
+enum LoweredImplementation {
+    Scalar { expr: Expr, defined: Expr },
+    Array { elements: Vec<Expr>, defined: Expr },
+}
+
+fn lower_implementation_value(
     expr: &SpecExpr,
     contract: &Contract,
     types: &HashMap<String, Type>,
-    values: &HashMap<String, Expr>,
-) -> Result<Expr, String> {
+    values: &HashMap<String, LoweredImplementation>,
+    recursion_depth: u32,
+) -> Result<LoweredImplementation, String> {
     match expr {
         SpecExpr::Ident(name) => {
             if name == "result" {
@@ -230,50 +284,443 @@ fn lower_implementation(
                 .iter()
                 .position(|param| param.name == *name)
                 .ok_or_else(|| format!("unknown identifier: {name}"))?;
-            Ok(Expr::Arg(index as u8))
+            let (offsets, _) = axiom_parser::verified_abi_layout(&contract.params)?;
+            let offset = offsets[index];
+            match &contract.params[index].ty {
+                Type::FixedArray(_, length) => Ok(LoweredImplementation::Array {
+                    elements: (0..*length)
+                        .map(|element| {
+                            let argument = offset + element;
+                            u8::try_from(argument).map(Expr::Arg).map_err(|_| {
+                                "verified ABI exceeds 256 flattened inputs".to_string()
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    defined: Expr::Const(1),
+                }),
+                _ => Ok(LoweredImplementation::Scalar {
+                    expr: Expr::Arg(
+                        u8::try_from(offset)
+                            .map_err(|_| "verified ABI exceeds 256 flattened inputs".to_string())?,
+                    ),
+                    defined: Expr::Const(1),
+                }),
+            }
         }
-        SpecExpr::Number(value) => Ok(Expr::Const(*value)),
-        SpecExpr::Bool(value) => Ok(Expr::Const(u32::from(*value))),
+        SpecExpr::Number(value) => Ok(LoweredImplementation::Scalar {
+            expr: Expr::Const(*value),
+            defined: Expr::Const(1),
+        }),
+        SpecExpr::Bool(value) => Ok(LoweredImplementation::Scalar {
+            expr: Expr::Const(u32::from(*value)),
+            defined: Expr::Const(1),
+        }),
         SpecExpr::Let(name, value, body) => {
-            let lowered = lower_implementation(value, contract, types, values)?;
+            let lowered =
+                lower_implementation_value(value, contract, types, values, recursion_depth)?;
             let value_type = axiom_parser::type_of_expr(value, types, None)?;
             let mut nested_types = types.clone();
             nested_types.insert(name.clone(), value_type);
             let mut nested_values = values.clone();
-            nested_values.insert(name.clone(), lowered);
-            lower_implementation(body, contract, &nested_types, &nested_values)
+            nested_values.insert(name.clone(), lowered.clone());
+            let body = lower_implementation_value(
+                body,
+                contract,
+                &nested_types,
+                &nested_values,
+                recursion_depth,
+            )?;
+            Ok(with_defined(body, lowered_defined(&lowered)))
         }
-        SpecExpr::If(condition, then_branch, else_branch) => Ok(Expr::Select {
-            condition: Box::new(lower_implementation(condition, contract, types, values)?),
-            then_branch: Box::new(lower_implementation(then_branch, contract, types, values)?),
-            else_branch: Box::new(lower_implementation(else_branch, contract, types, values)?),
-        }),
+        SpecExpr::For {
+            index,
+            start,
+            end,
+            accumulator,
+            initial,
+            invariant,
+            body,
+        } => {
+            let mut current =
+                lower_implementation_value(initial, contract, types, values, recursion_depth)?;
+            let accumulator_type = axiom_parser::type_of_expr(initial, types, None)?;
+            let mut loop_types = types.clone();
+            loop_types.insert(index.clone(), Type::U32);
+            loop_types.insert(accumulator.clone(), accumulator_type);
+            let mut loop_defined = lowered_defined(&current);
+
+            for iteration in *start..*end {
+                let mut loop_values = values.clone();
+                loop_values.insert(
+                    index.clone(),
+                    LoweredImplementation::Scalar {
+                        expr: Expr::Const(iteration),
+                        defined: Expr::Const(1),
+                    },
+                );
+                loop_values.insert(accumulator.clone(), current.clone());
+
+                let invariant_value = lower_implementation_value(
+                    invariant,
+                    contract,
+                    &loop_types,
+                    &loop_values,
+                    recursion_depth,
+                )?;
+                let LoweredImplementation::Scalar {
+                    expr: invariant_expr,
+                    defined: invariant_defined,
+                } = invariant_value
+                else {
+                    return Err("loop invariant must be boolean".to_string());
+                };
+                loop_defined = and_expr(loop_defined, and_expr(invariant_defined, invariant_expr));
+
+                current = lower_implementation_value(
+                    body,
+                    contract,
+                    &loop_types,
+                    &loop_values,
+                    recursion_depth,
+                )?;
+                loop_defined = and_expr(loop_defined, lowered_defined(&current));
+            }
+
+            let mut final_values = values.clone();
+            final_values.insert(
+                index.clone(),
+                LoweredImplementation::Scalar {
+                    expr: Expr::Const(*end),
+                    defined: Expr::Const(1),
+                },
+            );
+            final_values.insert(accumulator.clone(), current.clone());
+            let final_invariant = lower_implementation_value(
+                invariant,
+                contract,
+                &loop_types,
+                &final_values,
+                recursion_depth,
+            )?;
+            let LoweredImplementation::Scalar {
+                expr: final_invariant_expr,
+                defined: final_invariant_defined,
+            } = final_invariant
+            else {
+                return Err("loop invariant must be boolean".to_string());
+            };
+            loop_defined = and_expr(
+                loop_defined,
+                and_expr(final_invariant_defined, final_invariant_expr),
+            );
+            Ok(with_defined(current, loop_defined))
+        }
+        SpecExpr::If(condition, then_branch, else_branch) => {
+            let condition =
+                lower_implementation_value(condition, contract, types, values, recursion_depth)?;
+            let LoweredImplementation::Scalar {
+                expr: condition_expr,
+                defined: condition_defined,
+            } = condition
+            else {
+                return Err("if condition must be scalar boolean".to_string());
+            };
+            let then_branch =
+                lower_implementation_value(then_branch, contract, types, values, recursion_depth)?;
+            let else_branch =
+                lower_implementation_value(else_branch, contract, types, values, recursion_depth)?;
+            let defined = Expr::And(
+                Box::new(condition_defined),
+                Box::new(Expr::Select {
+                    condition: Box::new(condition_expr.clone()),
+                    then_branch: Box::new(lowered_defined(&then_branch)),
+                    else_branch: Box::new(lowered_defined(&else_branch)),
+                }),
+            );
+            match (then_branch, else_branch) {
+                (
+                    LoweredImplementation::Scalar {
+                        expr: then_expr, ..
+                    },
+                    LoweredImplementation::Scalar {
+                        expr: else_expr, ..
+                    },
+                ) => Ok(LoweredImplementation::Scalar {
+                    expr: Expr::Select {
+                        condition: Box::new(condition_expr),
+                        then_branch: Box::new(then_expr),
+                        else_branch: Box::new(else_expr),
+                    },
+                    defined,
+                }),
+                (
+                    LoweredImplementation::Array {
+                        elements: then_elements,
+                        ..
+                    },
+                    LoweredImplementation::Array {
+                        elements: else_elements,
+                        ..
+                    },
+                ) if then_elements.len() == else_elements.len() => {
+                    Ok(LoweredImplementation::Array {
+                        elements: then_elements
+                            .into_iter()
+                            .zip(else_elements)
+                            .map(|(then_expr, else_expr)| Expr::Select {
+                                condition: Box::new(condition_expr.clone()),
+                                then_branch: Box::new(then_expr),
+                                else_branch: Box::new(else_expr),
+                            })
+                            .collect(),
+                        defined,
+                    })
+                }
+                _ => Err("if branches must have the same type".to_string()),
+            }
+        }
+        SpecExpr::Field(array, field) if field == "length" => {
+            let array =
+                lower_implementation_value(array, contract, types, values, recursion_depth)?;
+            match array {
+                LoweredImplementation::Array { elements, defined } => {
+                    Ok(LoweredImplementation::Scalar {
+                        expr: Expr::Const(elements.len() as u32),
+                        defined,
+                    })
+                }
+                _ => Err("field access is only supported for fixed array length".to_string()),
+            }
+        }
+        SpecExpr::Index(array, index) => {
+            let array =
+                lower_implementation_value(array, contract, types, values, recursion_depth)?;
+            let index =
+                lower_implementation_value(index, contract, types, values, recursion_depth)?;
+            let (
+                LoweredImplementation::Array {
+                    elements,
+                    defined: array_defined,
+                },
+                LoweredImplementation::Scalar {
+                    expr: index_expr,
+                    defined: index_defined,
+                },
+            ) = (array, index)
+            else {
+                return Err(
+                    "indexed reads require a fixed verified array and scalar index".to_string(),
+                );
+            };
+            let in_bounds = Expr::Lt(
+                Box::new(index_expr.clone()),
+                Box::new(Expr::Const(elements.len() as u32)),
+            );
+            Ok(LoweredImplementation::Scalar {
+                expr: Expr::ArrayGet {
+                    elements,
+                    index: Box::new(index_expr),
+                },
+                defined: and_expr(and_expr(array_defined, index_defined), in_bounds),
+            })
+        }
+        SpecExpr::ArrayUpdate(array, index, value) => {
+            let array =
+                lower_implementation_value(array, contract, types, values, recursion_depth)?;
+            let index =
+                lower_implementation_value(index, contract, types, values, recursion_depth)?;
+            let value =
+                lower_implementation_value(value, contract, types, values, recursion_depth)?;
+            let (
+                LoweredImplementation::Array {
+                    elements,
+                    defined: array_defined,
+                },
+                LoweredImplementation::Scalar {
+                    expr: index_expr,
+                    defined: index_defined,
+                },
+                LoweredImplementation::Scalar {
+                    expr: value_expr,
+                    defined: value_defined,
+                },
+            ) = (array, index, value)
+            else {
+                return Err(
+                    "array_update requires a fixed array, scalar index, and scalar value"
+                        .to_string(),
+                );
+            };
+            let in_bounds = Expr::Lt(
+                Box::new(index_expr.clone()),
+                Box::new(Expr::Const(elements.len() as u32)),
+            );
+            Ok(LoweredImplementation::Array {
+                elements: elements
+                    .into_iter()
+                    .enumerate()
+                    .map(|(position, element)| Expr::Select {
+                        condition: Box::new(Expr::Eq(
+                            Box::new(index_expr.clone()),
+                            Box::new(Expr::Const(position as u32)),
+                        )),
+                        then_branch: Box::new(value_expr.clone()),
+                        else_branch: Box::new(element),
+                    })
+                    .collect(),
+                defined: and_expr(
+                    and_expr(array_defined, index_defined),
+                    and_expr(value_defined, in_bounds),
+                ),
+            })
+        }
         SpecExpr::Binary(op, lhs, rhs) => {
             let lhs_type = axiom_parser::type_of_expr(lhs, types, None)?;
-            let lhs = lower_implementation(lhs, contract, types, values)?;
-            let rhs = lower_implementation(rhs, contract, types, values)?;
-            let binary = match op {
-                BinaryOp::AddWrap => Expr::Add(Box::new(lhs), Box::new(rhs)),
-                BinaryOp::SubWrap => Expr::Sub(Box::new(lhs), Box::new(rhs)),
-                BinaryOp::MulWrap => Expr::Mul(Box::new(lhs), Box::new(rhs)),
-                BinaryOp::Shl => Expr::Shl(Box::new(lhs), Box::new(rhs)),
-                BinaryOp::BitAnd => Expr::BitAnd(Box::new(lhs), Box::new(rhs)),
-                BinaryOp::BitOr => Expr::BitOr(Box::new(lhs), Box::new(rhs)),
-                BinaryOp::BitXor => Expr::BitXor(Box::new(lhs), Box::new(rhs)),
-                BinaryOp::Eq => Expr::Eq(Box::new(lhs), Box::new(rhs)),
-                BinaryOp::Ne => Expr::Ne(Box::new(lhs), Box::new(rhs)),
-                BinaryOp::Lt if lhs_type == Type::I32 => Expr::SLt(Box::new(lhs), Box::new(rhs)),
-                BinaryOp::Le if lhs_type == Type::I32 => Expr::SLe(Box::new(lhs), Box::new(rhs)),
-                BinaryOp::Gt if lhs_type == Type::I32 => Expr::SGt(Box::new(lhs), Box::new(rhs)),
-                BinaryOp::Ge if lhs_type == Type::I32 => Expr::SGe(Box::new(lhs), Box::new(rhs)),
-                BinaryOp::Lt => Expr::Lt(Box::new(lhs), Box::new(rhs)),
-                BinaryOp::Le => Expr::Le(Box::new(lhs), Box::new(rhs)),
-                BinaryOp::Gt => Expr::Gt(Box::new(lhs), Box::new(rhs)),
-                BinaryOp::Ge => Expr::Ge(Box::new(lhs), Box::new(rhs)),
-                BinaryOp::And => Expr::And(Box::new(lhs), Box::new(rhs)),
-                BinaryOp::Or => Expr::Or(Box::new(lhs), Box::new(rhs)),
+            let lhs = lower_implementation_value(lhs, contract, types, values, recursion_depth)?;
+            let rhs = lower_implementation_value(rhs, contract, types, values, recursion_depth)?;
+            match (lhs, rhs) {
+                (
+                    LoweredImplementation::Array {
+                        elements: lhs,
+                        defined: lhs_defined,
+                    },
+                    LoweredImplementation::Array {
+                        elements: rhs,
+                        defined: rhs_defined,
+                    },
+                ) if matches!(op, BinaryOp::Eq | BinaryOp::Ne) && lhs.len() == rhs.len() => {
+                    let comparisons = lhs.into_iter().zip(rhs).map(|(lhs, rhs)| match op {
+                        BinaryOp::Eq => Expr::Eq(Box::new(lhs), Box::new(rhs)),
+                        BinaryOp::Ne => Expr::Ne(Box::new(lhs), Box::new(rhs)),
+                        _ => unreachable!("array equality was checked above"),
+                    });
+                    let mut comparisons = comparisons;
+                    let first = comparisons
+                        .next()
+                        .ok_or_else(|| "fixed arrays cannot be empty".to_string())?;
+                    let comparison = comparisons.fold(first, |combined, next| {
+                        if *op == BinaryOp::Eq {
+                            and_expr(combined, next)
+                        } else {
+                            or_expr(combined, next)
+                        }
+                    });
+                    Ok(LoweredImplementation::Scalar {
+                        expr: comparison,
+                        defined: and_expr(lhs_defined, rhs_defined),
+                    })
+                }
+                (
+                    LoweredImplementation::Scalar {
+                        expr: lhs,
+                        defined: lhs_defined,
+                    },
+                    LoweredImplementation::Scalar {
+                        expr: rhs,
+                        defined: rhs_defined,
+                    },
+                ) => {
+                    let defined = match op {
+                        BinaryOp::And => and_expr(
+                            lhs_defined,
+                            Expr::Select {
+                                condition: Box::new(lhs.clone()),
+                                then_branch: Box::new(rhs_defined),
+                                else_branch: Box::new(Expr::Const(1)),
+                            },
+                        ),
+                        BinaryOp::Or => and_expr(
+                            lhs_defined,
+                            Expr::Select {
+                                condition: Box::new(lhs.clone()),
+                                then_branch: Box::new(Expr::Const(1)),
+                                else_branch: Box::new(rhs_defined),
+                            },
+                        ),
+                        _ => and_expr(lhs_defined, rhs_defined),
+                    };
+                    let binary = match op {
+                        BinaryOp::AddWrap => Expr::Add(Box::new(lhs), Box::new(rhs)),
+                        BinaryOp::SubWrap => Expr::Sub(Box::new(lhs), Box::new(rhs)),
+                        BinaryOp::MulWrap => Expr::Mul(Box::new(lhs), Box::new(rhs)),
+                        BinaryOp::Shl => Expr::Shl(Box::new(lhs), Box::new(rhs)),
+                        BinaryOp::BitAnd => Expr::BitAnd(Box::new(lhs), Box::new(rhs)),
+                        BinaryOp::BitOr => Expr::BitOr(Box::new(lhs), Box::new(rhs)),
+                        BinaryOp::BitXor => Expr::BitXor(Box::new(lhs), Box::new(rhs)),
+                        BinaryOp::Eq => Expr::Eq(Box::new(lhs), Box::new(rhs)),
+                        BinaryOp::Ne => Expr::Ne(Box::new(lhs), Box::new(rhs)),
+                        BinaryOp::Lt if lhs_type == Type::I32 => {
+                            Expr::SLt(Box::new(lhs), Box::new(rhs))
+                        }
+                        BinaryOp::Le if lhs_type == Type::I32 => {
+                            Expr::SLe(Box::new(lhs), Box::new(rhs))
+                        }
+                        BinaryOp::Gt if lhs_type == Type::I32 => {
+                            Expr::SGt(Box::new(lhs), Box::new(rhs))
+                        }
+                        BinaryOp::Ge if lhs_type == Type::I32 => {
+                            Expr::SGe(Box::new(lhs), Box::new(rhs))
+                        }
+                        BinaryOp::Lt => Expr::Lt(Box::new(lhs), Box::new(rhs)),
+                        BinaryOp::Le => Expr::Le(Box::new(lhs), Box::new(rhs)),
+                        BinaryOp::Gt => Expr::Gt(Box::new(lhs), Box::new(rhs)),
+                        BinaryOp::Ge => Expr::Ge(Box::new(lhs), Box::new(rhs)),
+                        BinaryOp::And => Expr::And(Box::new(lhs.clone()), Box::new(rhs)),
+                        BinaryOp::Or => Expr::Or(Box::new(lhs.clone()), Box::new(rhs)),
+                    };
+                    Ok(LoweredImplementation::Scalar {
+                        expr: binary,
+                        defined,
+                    })
+                }
+                _ => Err("binary operators require compatible scalar operands".to_string()),
+            }
+        }
+        SpecExpr::Call(name, arguments) if name == &contract.name => {
+            if recursion_depth >= axiom_parser::MAX_VERIFIED_RECURSION_DEPTH {
+                return Ok(LoweredImplementation::Scalar {
+                    expr: Expr::Const(0),
+                    defined: Expr::Const(0),
+                });
+            }
+            let [argument] = arguments.as_slice() else {
+                return Err("structural recursion requires one argument".to_string());
             };
-            Ok(binary)
+            let LoweredImplementation::Scalar {
+                expr: argument,
+                defined: argument_defined,
+            } = lower_implementation_value(argument, contract, types, values, recursion_depth)?
+            else {
+                return Err("structural recursion requires a scalar measure".to_string());
+            };
+            let param = contract
+                .params
+                .first()
+                .ok_or_else(|| "structural recursion is missing its measure".to_string())?;
+            let function_types = contract
+                .params
+                .iter()
+                .map(|param| (param.name.clone(), param.ty.clone()))
+                .collect::<HashMap<_, _>>();
+            let recursive_values = HashMap::from([(
+                param.name.clone(),
+                LoweredImplementation::Scalar {
+                    expr: argument,
+                    defined: Expr::Const(1),
+                },
+            )]);
+            let implementation = contract
+                .implementation
+                .as_ref()
+                .ok_or_else(|| "recursive fn declaration has no implementation".to_string())?;
+            let recursive = lower_implementation_value(
+                implementation,
+                contract,
+                &function_types,
+                &recursive_values,
+                recursion_depth + 1,
+            )?;
+            Ok(with_defined(recursive, argument_defined))
         }
         SpecExpr::Text(_)
         | SpecExpr::List(_)
@@ -285,11 +732,50 @@ fn lower_implementation(
     }
 }
 
+fn lowered_defined(value: &LoweredImplementation) -> Expr {
+    match value {
+        LoweredImplementation::Scalar { defined, .. }
+        | LoweredImplementation::Array { defined, .. } => defined.clone(),
+    }
+}
+
+fn with_defined(value: LoweredImplementation, additional: Expr) -> LoweredImplementation {
+    match value {
+        LoweredImplementation::Scalar { expr, defined } => LoweredImplementation::Scalar {
+            expr,
+            defined: and_expr(additional, defined),
+        },
+        LoweredImplementation::Array { elements, defined } => LoweredImplementation::Array {
+            elements,
+            defined: and_expr(additional, defined),
+        },
+    }
+}
+
+fn and_expr(lhs: Expr, rhs: Expr) -> Expr {
+    match (lhs, rhs) {
+        (Expr::Const(0), _) | (_, Expr::Const(0)) => Expr::Const(0),
+        (Expr::Const(1), rhs) => rhs,
+        (lhs, Expr::Const(1)) => lhs,
+        (lhs, rhs) => Expr::And(Box::new(lhs), Box::new(rhs)),
+    }
+}
+
+fn or_expr(lhs: Expr, rhs: Expr) -> Expr {
+    match (lhs, rhs) {
+        (Expr::Const(1), _) | (_, Expr::Const(1)) => Expr::Const(1),
+        (Expr::Const(0), rhs) => rhs,
+        (lhs, Expr::Const(0)) => lhs,
+        (lhs, rhs) => Expr::Or(Box::new(lhs), Box::new(rhs)),
+    }
+}
+
 #[derive(Clone)]
 enum Value {
     U32(BV),
     I32(BV),
     Bool(Bool),
+    Array(Vec<BV>),
 }
 
 /// Proves that `candidate` satisfies every `ensures` clause under `requires`.
@@ -332,10 +818,36 @@ fn verify_inner(
     let candidate_ast = expr_to_bv(candidate, &args)?;
     let empty_locals = HashMap::new();
     let requires = preconditions_to_bool(contract, &args, &candidate_ast)?;
+    let candidate_defined = ami_definedness(candidate, &args)?;
+    require_defined_when(
+        contract,
+        &args,
+        &requires,
+        &candidate_defined,
+        &[],
+        metrics,
+        "candidate",
+    )?;
 
     if contract.ensures.is_empty() {
         return Err("contract must have at least one ensures clause".to_string());
     }
+
+    let ensures_defined = contract
+        .ensures
+        .iter()
+        .map(|clause| spec_definedness(clause, contract, &args, &candidate_ast, &empty_locals))
+        .collect::<Result<Vec<_>, _>>()?;
+    let ensures_defined = Bool::and(&ensures_defined.iter().collect::<Vec<_>>());
+    require_defined_when(
+        contract,
+        &args,
+        &requires,
+        &ensures_defined,
+        &[],
+        metrics,
+        "ensures clause",
+    )?;
 
     let ensures = contract
         .ensures
@@ -343,7 +855,9 @@ fn verify_inner(
         .map(
             |expr| match spec_to_value(expr, contract, &args, &candidate_ast, &empty_locals)? {
                 Value::Bool(value) => Ok(value),
-                Value::U32(_) | Value::I32(_) => Err("ensures clause must be boolean".to_string()),
+                Value::U32(_) | Value::I32(_) | Value::Array(_) => {
+                    Err("ensures clause must be boolean".to_string())
+                }
             },
         )
         .collect::<Result<Vec<_>, String>>()?;
@@ -431,6 +945,18 @@ fn verify_compositional_inner(
     let result = expr_to_bv(candidate, &args)?;
     let empty_locals = HashMap::new();
     let true_path = Bool::from_bool(true);
+    for clause in &contract.requires {
+        let defined = spec_definedness(clause, contract, &args, &result, &empty_locals)?;
+        require_defined_when(
+            contract,
+            &args,
+            &true_path,
+            &defined,
+            &[],
+            metrics,
+            "requires clause",
+        )?;
+    }
     let mut calls = CallContext {
         values: HashMap::new(),
         constraints: Vec::new(),
@@ -455,13 +981,23 @@ fn verify_compositional_inner(
         let locals = merged_call_values(&empty_locals, &calls.values);
         match spec_to_value(&prepared, contract, &args, &result, &locals)? {
             Value::Bool(value) => requires_values.push(value),
-            Value::U32(_) | Value::I32(_) => {
+            Value::U32(_) | Value::I32(_) | Value::Array(_) => {
                 return Err("requires clause must be boolean".to_string());
             }
         }
     }
     let requires_refs: Vec<&Bool> = requires_values.iter().collect();
     let requires = Bool::and(&requires_refs);
+    let candidate_defined = ami_definedness(candidate, &args)?;
+    require_defined_when(
+        contract,
+        &args,
+        &requires,
+        &candidate_defined,
+        &calls.constraints,
+        metrics,
+        "candidate",
+    )?;
     let caller_solver = solver_with_calls(contract, &args, &calls.constraints);
     caller_solver.assert(&requires);
     match solver_check(&caller_solver, metrics) {
@@ -493,9 +1029,19 @@ fn verify_compositional_inner(
             &mut calls,
         )?;
         let locals = merged_call_values(&empty_locals, &calls.values);
+        let defined = spec_definedness(&prepared, contract, &args, &result, &locals)?;
+        require_defined_when(
+            contract,
+            &args,
+            &requires,
+            &defined,
+            &calls.constraints,
+            metrics,
+            "ensures clause",
+        )?;
         match spec_to_value(&prepared, contract, &args, &result, &locals)? {
             Value::Bool(value) => ensures_values.push(value),
-            Value::U32(_) | Value::I32(_) => {
+            Value::U32(_) | Value::I32(_) | Value::Array(_) => {
                 return Err("ensures clause must be boolean".to_string());
             }
         }
@@ -615,7 +1161,10 @@ fn prepare_calls(
                 .iter()
                 .map(|arg| spec_to_value(arg, contract, args, result, &merged))
                 .collect::<Result<Vec<_>, _>>()?;
-            let callee_args = arg_values.iter().map(value_as_bv).collect::<Vec<_>>();
+            let callee_args = arg_values
+                .iter()
+                .map(value_as_bv)
+                .collect::<Result<Vec<_>, _>>()?;
             let call_result = BV::new_const(format!("__axiom_call_{}", calls.next_id), 32);
             calls.next_id += 1;
             let callee_requires = preconditions_to_bool(callee, &callee_args, &call_result)?;
@@ -657,7 +1206,7 @@ fn prepare_calls(
                 spec_to_value(&prepared_condition, contract, args, result, &merged)?;
             let condition = match condition_value {
                 Value::Bool(value) => value,
-                Value::U32(_) | Value::I32(_) => {
+                Value::U32(_) | Value::I32(_) | Value::Array(_) => {
                     return Err("if condition must be boolean".to_string());
                 }
             };
@@ -722,39 +1271,72 @@ fn prepare_calls(
             )?),
             field.clone(),
         )),
+        SpecExpr::Index(array, index) => Ok(SpecExpr::Index(
+            Box::new(prepare_calls(
+                array, contract, args, result, locals, path, callees, calls,
+            )?),
+            Box::new(prepare_calls(
+                index, contract, args, result, locals, path, callees, calls,
+            )?),
+        )),
+        SpecExpr::ArrayUpdate(array, index, value) => Ok(SpecExpr::ArrayUpdate(
+            Box::new(prepare_calls(
+                array, contract, args, result, locals, path, callees, calls,
+            )?),
+            Box::new(prepare_calls(
+                index, contract, args, result, locals, path, callees, calls,
+            )?),
+            Box::new(prepare_calls(
+                value, contract, args, result, locals, path, callees, calls,
+            )?),
+        )),
+        SpecExpr::For { .. } => {
+            Err("bounded loops are only allowed in fn implementation expressions".to_string())
+        }
         SpecExpr::Ident(_) | SpecExpr::Number(_) | SpecExpr::Bool(_) | SpecExpr::Text(_) => {
             Ok(expr.clone())
         }
     }
 }
 
-fn value_as_bv(value: &Value) -> BV {
+fn value_as_bv(value: &Value) -> Result<BV, String> {
     match value {
-        Value::U32(value) | Value::I32(value) => value.clone(),
-        Value::Bool(value) => value.ite(&BV::from_u64(1, 32), &BV::from_u64(0, 32)),
+        Value::U32(value) | Value::I32(value) => Ok(value.clone()),
+        Value::Bool(value) => Ok(value.ite(&BV::from_u64(1, 32), &BV::from_u64(0, 32))),
+        Value::Array(_) => Err("compositional calls cannot pass fixed arrays yet".to_string()),
     }
 }
 
 fn symbolic_args(contract: &Contract) -> Result<Vec<BV>, String> {
-    contract
-        .params
-        .iter()
-        .map(|param| {
-            if !matches!(param.ty, Type::U32 | Type::I32 | Type::Bool) {
-                return Err(format!("unsupported parameter type: {}", param.name));
+    let mut args = Vec::new();
+    for param in &contract.params {
+        match &param.ty {
+            Type::U32 | Type::I32 | Type::Bool => {
+                args.push(BV::new_const(param.name.as_str(), 32));
             }
-            Ok(BV::new_const(param.name.as_str(), 32))
-        })
-        .collect()
+            Type::FixedArray(element, length) if **element == Type::U32 => {
+                for index in 0..*length {
+                    args.push(BV::new_const(format!("{}_{}", param.name, index), 32));
+                }
+            }
+            _ => return Err(format!("unsupported parameter type: {}", param.name)),
+        }
+    }
+    Ok(args)
 }
 
 fn constrain_bool_parameters(solver: &Solver, contract: &Contract, args: &[BV]) {
-    for (index, param) in contract.params.iter().enumerate() {
+    let mut offset = 0;
+    for param in &contract.params {
         if param.ty == Type::Bool {
-            let zero = args[index].eq(BV::from_u64(0, 32));
-            let one = args[index].eq(BV::from_u64(1, 32));
+            let zero = args[offset].eq(BV::from_u64(0, 32));
+            let one = args[offset].eq(BV::from_u64(1, 32));
             solver.assert(Bool::or(&[&zero, &one]));
         }
+        offset += match param.ty {
+            Type::FixedArray(_, length) => length,
+            _ => 1,
+        };
     }
 }
 
@@ -770,7 +1352,9 @@ fn preconditions_to_bool(contract: &Contract, args: &[BV], result: &BV) -> Resul
         .map(
             |expr| match spec_to_value(expr, contract, args, result, &empty_locals)? {
                 Value::Bool(value) => Ok(value),
-                Value::U32(_) | Value::I32(_) => Err("requires clause must be boolean".to_string()),
+                Value::U32(_) | Value::I32(_) | Value::Array(_) => {
+                    Err("requires clause must be boolean".to_string())
+                }
             },
         )
         .collect::<Result<Vec<_>, String>>()?;
@@ -790,7 +1374,9 @@ fn ensures_to_bool(contract: &Contract, args: &[BV], result: &BV) -> Result<Bool
         .map(
             |expr| match spec_to_value(expr, contract, args, result, &empty_locals)? {
                 Value::Bool(value) => Ok(value),
-                Value::U32(_) | Value::I32(_) => Err("ensures clause must be boolean".to_string()),
+                Value::U32(_) | Value::I32(_) | Value::Array(_) => {
+                    Err("ensures clause must be boolean".to_string())
+                }
             },
         )
         .collect::<Result<Vec<_>, String>>()?;
@@ -838,6 +1424,16 @@ fn expr_to_bv(expr: &Expr, args: &[BV]) -> Result<BV, String> {
             let else_branch = expr_to_bv(else_branch, args)?;
             Ok(condition.ite(&then_branch, &else_branch))
         }
+        Expr::ArrayGet { elements, index } => {
+            let index = expr_to_bv(index, args)?;
+            let mut selected = BV::from_u64(0, 32);
+            for (position, element) in elements.iter().enumerate().rev() {
+                let matches = index.eq(BV::from_u64(position as u64, 32));
+                selected = matches.ite(&expr_to_bv(element, args)?, &selected);
+            }
+            Ok(selected)
+        }
+        Expr::Guard { value, .. } => expr_to_bv(value, args),
     }
 }
 
@@ -861,6 +1457,216 @@ fn expr_to_bool(expr: &Expr, args: &[BV]) -> Result<Bool, String> {
 
 fn bool_to_bv(value: Bool) -> BV {
     value.ite(&BV::from_u64(1, 32), &BV::from_u64(0, 32))
+}
+
+fn require_defined_when(
+    contract: &Contract,
+    args: &[BV],
+    assumption: &Bool,
+    defined: &Bool,
+    constraints: &[Bool],
+    metrics: &mut Option<&mut VerificationMetrics>,
+    subject: &str,
+) -> Result<(), String> {
+    let solver = Solver::new();
+    constrain_bool_parameters(&solver, contract, args);
+    for constraint in constraints {
+        solver.assert(constraint);
+    }
+    let violation = Bool::and(&[assumption, &defined.not()]);
+    solver.assert(&violation);
+    match solver_check(&solver, metrics) {
+        SatResult::Unsat => Ok(()),
+        SatResult::Sat => Err(format!(
+            "{subject} has an unproven bounds, loop-invariant, or recursion-depth guard at {:?}",
+            model_inputs(&solver, args)?
+        )),
+        SatResult::Unknown => Err(format!(
+            "{subject} fixed-array bounds check is solver-unknown"
+        )),
+    }
+}
+
+fn spec_definedness(
+    expr: &SpecExpr,
+    contract: &Contract,
+    args: &[BV],
+    result: &BV,
+    locals: &HashMap<String, Value>,
+) -> Result<Bool, String> {
+    let and = |values: Vec<Bool>| Bool::and(&values.iter().collect::<Vec<_>>());
+    match expr {
+        SpecExpr::Index(array, index_expr) => {
+            let array_value = spec_to_value(array, contract, args, result, locals)?;
+            let Value::Array(elements) = array_value else {
+                return Err("indexed reads require a fixed verified array".to_string());
+            };
+            let index_value = spec_to_value(index_expr, contract, args, result, locals)?;
+            let index = match index_value {
+                Value::U32(index) | Value::I32(index) => index,
+                _ => return Err("array index must be u32 or i32".to_string()),
+            };
+            Ok(and(vec![
+                spec_definedness(array, contract, args, result, locals)?,
+                spec_definedness(index_expr, contract, args, result, locals)?,
+                index.bvult(BV::from_u64(elements.len() as u64, 32)),
+            ]))
+        }
+        SpecExpr::ArrayUpdate(array, index_expr, value) => {
+            let array_value = spec_to_value(array, contract, args, result, locals)?;
+            let Value::Array(elements) = array_value else {
+                return Err("array_update requires a fixed verified array".to_string());
+            };
+            let index_value = spec_to_value(index_expr, contract, args, result, locals)?;
+            let index = match index_value {
+                Value::U32(index) | Value::I32(index) => index,
+                _ => return Err("array index must be u32 or i32".to_string()),
+            };
+            Ok(and(vec![
+                spec_definedness(array, contract, args, result, locals)?,
+                spec_definedness(index_expr, contract, args, result, locals)?,
+                spec_definedness(value, contract, args, result, locals)?,
+                index.bvult(BV::from_u64(elements.len() as u64, 32)),
+            ]))
+        }
+        SpecExpr::Let(name, value, body) => {
+            let value_result = spec_to_value(value, contract, args, result, locals)?;
+            let mut nested = locals.clone();
+            nested.insert(name.clone(), value_result);
+            Ok(and(vec![
+                spec_definedness(value, contract, args, result, locals)?,
+                spec_definedness(body, contract, args, result, &nested)?,
+            ]))
+        }
+        SpecExpr::If(condition, then_branch, else_branch) => {
+            let condition_value = match spec_to_value(condition, contract, args, result, locals)? {
+                Value::Bool(condition) => condition,
+                _ => return Err("if condition must be boolean".to_string()),
+            };
+            let then_defined = spec_definedness(then_branch, contract, args, result, locals)?;
+            let else_defined = spec_definedness(else_branch, contract, args, result, locals)?;
+            Ok(and(vec![
+                spec_definedness(condition, contract, args, result, locals)?,
+                condition_value.ite(&then_defined, &else_defined),
+            ]))
+        }
+        SpecExpr::Binary(BinaryOp::And, lhs, rhs) => {
+            let Value::Bool(lhs_value) = spec_to_value(lhs, contract, args, result, locals)? else {
+                return Err("logical conjunction requires boolean operands".to_string());
+            };
+            let rhs_defined = spec_definedness(rhs, contract, args, result, locals)?;
+            Ok(and(vec![
+                spec_definedness(lhs, contract, args, result, locals)?,
+                Bool::or(&[&lhs_value.not(), &rhs_defined]),
+            ]))
+        }
+        SpecExpr::Binary(BinaryOp::Or, lhs, rhs) => {
+            let Value::Bool(lhs_value) = spec_to_value(lhs, contract, args, result, locals)? else {
+                return Err("logical disjunction requires boolean operands".to_string());
+            };
+            let rhs_defined = spec_definedness(rhs, contract, args, result, locals)?;
+            Ok(and(vec![
+                spec_definedness(lhs, contract, args, result, locals)?,
+                Bool::or(&[&lhs_value, &rhs_defined]),
+            ]))
+        }
+        SpecExpr::Binary(_, lhs, rhs) => Ok(and(vec![
+            spec_definedness(lhs, contract, args, result, locals)?,
+            spec_definedness(rhs, contract, args, result, locals)?,
+        ])),
+        SpecExpr::Call(_, values) | SpecExpr::List(values) => Ok(and(values
+            .iter()
+            .map(|value| spec_definedness(value, contract, args, result, locals))
+            .collect::<Result<Vec<_>, _>>()?)),
+        SpecExpr::Record { fields, .. } => Ok(and(fields
+            .iter()
+            .map(|(_, value)| spec_definedness(value, contract, args, result, locals))
+            .collect::<Result<Vec<_>, _>>()?)),
+        SpecExpr::Field(value, _) => spec_definedness(value, contract, args, result, locals),
+        SpecExpr::For { .. } => {
+            Err("bounded loops are only allowed in fn implementation expressions".to_string())
+        }
+        SpecExpr::Ident(_) | SpecExpr::Number(_) | SpecExpr::Bool(_) | SpecExpr::Text(_) => {
+            Ok(Bool::from_bool(true))
+        }
+    }
+}
+
+fn ami_definedness(expr: &Expr, args: &[BV]) -> Result<Bool, String> {
+    let and = |values: Vec<Bool>| Bool::and(&values.iter().collect::<Vec<_>>());
+    match expr {
+        Expr::Arg(_) | Expr::Const(_) => Ok(Bool::from_bool(true)),
+        Expr::ArrayGet { elements, index } => {
+            let index_value = expr_to_bv(index, args)?;
+            let index_defined = ami_definedness(index, args)?;
+            let mut selected_defined = Vec::with_capacity(elements.len());
+            for (position, element) in elements.iter().enumerate() {
+                let is_selected = index_value.eq(BV::from_u64(position as u64, 32));
+                let element_defined = ami_definedness(element, args)?;
+                selected_defined.push(Bool::or(&[&is_selected.not(), &element_defined]));
+            }
+            Ok(and(vec![
+                index_defined,
+                index_value.bvult(BV::from_u64(elements.len() as u64, 32)),
+                and(selected_defined),
+            ]))
+        }
+        Expr::Guard { condition, value } => {
+            let condition_value = expr_to_bv(condition, args)?;
+            let value_defined = ami_definedness(value, args)?;
+            Ok(and(vec![
+                ami_definedness(condition, args)?,
+                condition_value.ne(BV::from_u64(0, 32)),
+                value_defined,
+            ]))
+        }
+        Expr::Select {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            let condition_value = expr_to_bool(condition, args)?;
+            let then_defined = ami_definedness(then_branch, args)?;
+            let else_defined = ami_definedness(else_branch, args)?;
+            Ok(and(vec![
+                ami_definedness(condition, args)?,
+                condition_value.ite(&then_defined, &else_defined),
+            ]))
+        }
+        Expr::And(lhs, rhs) | Expr::Or(lhs, rhs) => {
+            let lhs_value = expr_to_bool(lhs, args)?;
+            let rhs_defined = ami_definedness(rhs, args)?;
+            let rhs_required = if matches!(expr, Expr::And(_, _)) {
+                lhs_value
+            } else {
+                lhs_value.not()
+            };
+            Ok(and(vec![
+                ami_definedness(lhs, args)?,
+                Bool::or(&[&rhs_required.not(), &rhs_defined]),
+            ]))
+        }
+        Expr::Add(lhs, rhs)
+        | Expr::Sub(lhs, rhs)
+        | Expr::Mul(lhs, rhs)
+        | Expr::Shl(lhs, rhs)
+        | Expr::BitAnd(lhs, rhs)
+        | Expr::BitOr(lhs, rhs)
+        | Expr::BitXor(lhs, rhs)
+        | Expr::Eq(lhs, rhs)
+        | Expr::Ne(lhs, rhs)
+        | Expr::Lt(lhs, rhs)
+        | Expr::Le(lhs, rhs)
+        | Expr::Gt(lhs, rhs)
+        | Expr::Ge(lhs, rhs)
+        | Expr::SLt(lhs, rhs)
+        | Expr::SLe(lhs, rhs)
+        | Expr::SGt(lhs, rhs)
+        | Expr::SGe(lhs, rhs) => Ok(and(vec![
+            ami_definedness(lhs, args)?,
+            ami_definedness(rhs, args)?,
+        ])),
+    }
 }
 
 fn spec_to_value(
@@ -887,19 +1693,69 @@ fn spec_to_value(
                 .iter()
                 .position(|param| param.name == *name)
                 .ok_or_else(|| format!("unknown identifier: {name}"))?;
-            let value = args
-                .get(index)
-                .cloned()
-                .ok_or_else(|| format!("missing argument: {name}"))?;
+            let (offsets, _) = axiom_parser::verified_abi_layout(&contract.params)?;
+            let offset = offsets[index];
             match contract.params[index].ty {
-                Type::Bool => Ok(Value::Bool(value.ne(BV::from_u64(0, 32)))),
-                Type::I32 => Ok(Value::I32(value)),
-                _ => Ok(Value::U32(value)),
+                Type::Bool => Ok(Value::Bool(args[offset].ne(BV::from_u64(0, 32)))),
+                Type::I32 => Ok(Value::I32(args[offset].clone())),
+                Type::FixedArray(_, length) => {
+                    Ok(Value::Array(args[offset..offset + length].to_vec()))
+                }
+                _ => Ok(Value::U32(args[offset].clone())),
             }
         }
         SpecExpr::Number(value) => Ok(Value::U32(BV::from_u64(*value as u64, 32))),
         SpecExpr::Bool(value) => Ok(Value::Bool(Bool::from_bool(*value))),
-        SpecExpr::Text(_) | SpecExpr::List(_) | SpecExpr::Record { .. } | SpecExpr::Field(_, _) => {
+        SpecExpr::Field(value, field) => {
+            match spec_to_value(value, contract, args, result, locals)? {
+                Value::Array(elements) if field == "length" => {
+                    Ok(Value::U32(BV::from_u64(elements.len() as u64, 32)))
+                }
+                _ => Err("field access is only supported for fixed array length".to_string()),
+            }
+        }
+        SpecExpr::Index(array, index) => {
+            let array = spec_to_value(array, contract, args, result, locals)?;
+            let index = match spec_to_value(index, contract, args, result, locals)? {
+                Value::U32(index) | Value::I32(index) => index,
+                _ => return Err("array index must be u32 or i32".to_string()),
+            };
+            let Value::Array(elements) = array else {
+                return Err("indexed reads require a fixed verified array".to_string());
+            };
+            let mut selected = BV::from_u64(0, 32);
+            for (position, element) in elements.iter().enumerate().rev() {
+                let matches = index.eq(BV::from_u64(position as u64, 32));
+                selected = matches.ite(element, &selected);
+            }
+            Ok(Value::U32(selected))
+        }
+        SpecExpr::ArrayUpdate(array, index, value) => {
+            let array = spec_to_value(array, contract, args, result, locals)?;
+            let index = match spec_to_value(index, contract, args, result, locals)? {
+                Value::U32(index) | Value::I32(index) => index,
+                _ => return Err("array index must be u32 or i32".to_string()),
+            };
+            let value = match spec_to_value(value, contract, args, result, locals)? {
+                Value::U32(value) => value,
+                _ => return Err("array update value must be u32".to_string()),
+            };
+            let Value::Array(elements) = array else {
+                return Err("array_update requires a fixed verified array".to_string());
+            };
+            Ok(Value::Array(
+                elements
+                    .iter()
+                    .enumerate()
+                    .map(|(position, element)| {
+                        index
+                            .eq(BV::from_u64(position as u64, 32))
+                            .ite(&value, element)
+                    })
+                    .collect(),
+            ))
+        }
+        SpecExpr::Text(_) | SpecExpr::List(_) | SpecExpr::Record { .. } => {
             Err("non-scalar expressions cannot be verified as contracts".to_string())
         }
         SpecExpr::Let(name, value, body) => {
@@ -908,10 +1764,13 @@ fn spec_to_value(
             nested.insert(name.clone(), value);
             spec_to_value(body, contract, args, result, &nested)
         }
+        SpecExpr::For { .. } => {
+            Err("bounded loops are only allowed in fn implementation expressions".to_string())
+        }
         SpecExpr::If(condition, then_branch, else_branch) => {
             let condition = match spec_to_value(condition, contract, args, result, locals)? {
                 Value::Bool(value) => value,
-                Value::U32(_) | Value::I32(_) => {
+                Value::U32(_) | Value::I32(_) | Value::Array(_) => {
                     return Err("if condition must be boolean".to_string());
                 }
             };
@@ -926,6 +1785,17 @@ fn spec_to_value(
                 }
                 (Value::I32(then_branch), Value::I32(else_branch)) => {
                     Ok(Value::I32(condition.ite(&then_branch, &else_branch)))
+                }
+                (Value::Array(then_branch), Value::Array(else_branch))
+                    if then_branch.len() == else_branch.len() =>
+                {
+                    Ok(Value::Array(
+                        then_branch
+                            .iter()
+                            .zip(&else_branch)
+                            .map(|(then_value, else_value)| condition.ite(then_value, else_value))
+                            .collect(),
+                    ))
                 }
                 _ => Err("if branches must have the same type".to_string()),
             }
@@ -1003,6 +1873,24 @@ fn spec_to_value(
                 | (BinaryOp::Ne, Value::U32(lhs), Value::I32(rhs)) => Ok(Value::Bool(lhs.ne(rhs))),
                 (BinaryOp::Eq, Value::Bool(lhs), Value::Bool(rhs)) => Ok(Value::Bool(lhs.eq(rhs))),
                 (BinaryOp::Ne, Value::Bool(lhs), Value::Bool(rhs)) => Ok(Value::Bool(lhs.ne(rhs))),
+                (BinaryOp::Eq, Value::Array(lhs), Value::Array(rhs)) if lhs.len() == rhs.len() => {
+                    let equalities = lhs
+                        .iter()
+                        .zip(&rhs)
+                        .map(|(lhs, rhs)| lhs.eq(rhs))
+                        .collect::<Vec<_>>();
+                    let refs = equalities.iter().collect::<Vec<_>>();
+                    Ok(Value::Bool(Bool::and(&refs)))
+                }
+                (BinaryOp::Ne, Value::Array(lhs), Value::Array(rhs)) if lhs.len() == rhs.len() => {
+                    let equalities = lhs
+                        .iter()
+                        .zip(&rhs)
+                        .map(|(lhs, rhs)| lhs.eq(rhs))
+                        .collect::<Vec<_>>();
+                    let refs = equalities.iter().collect::<Vec<_>>();
+                    Ok(Value::Bool(Bool::and(&refs).not()))
+                }
                 (BinaryOp::Lt, Value::U32(lhs), Value::U32(rhs)) => {
                     Ok(Value::Bool(lhs.bvult(&rhs)))
                 }
@@ -1154,6 +2042,52 @@ mod tests {
     }
 
     #[test]
+    fn structural_recursion_is_proved_bounded_and_traps_over_the_depth_limit() {
+        let function = parse(
+            "fn sum_to(n: u32) -> u32 { \
+             requires n <= 16; \
+             return if n == 0 { 0 } else { 1 +% sum_to(n -% 1) }; \
+             ensures result == n; }",
+        )
+        .unwrap();
+        assert_eq!(check_contract(&function).unwrap(), ContractCheck::Valid);
+        let candidate = implementation_to_ami(&function).unwrap();
+        assert_eq!(
+            verify(&function, &candidate).unwrap(),
+            ProofResult::Verified
+        );
+        let module = axiom_wasm::emit(&candidate, 1).unwrap();
+
+        for n in [0, 1, axiom_parser::MAX_VERIFIED_RECURSION_DEPTH] {
+            let args = [n];
+            assert_eq!(candidate.try_eval(&args).unwrap(), n);
+            assert_eq!(reference::eval_ami(&candidate, &args).unwrap(), n);
+            assert_eq!(axiom_wasm::run_with_args(&module, &args).unwrap(), n);
+            assert!(reference::contract_holds(&function, &candidate, &args).unwrap());
+        }
+        assert!(
+            candidate
+                .try_eval(&[axiom_parser::MAX_VERIFIED_RECURSION_DEPTH + 1])
+                .is_err()
+        );
+        assert!(
+            axiom_wasm::run_with_args(&module, &[axiom_parser::MAX_VERIFIED_RECURSION_DEPTH + 1])
+                .is_err()
+        );
+
+        let unbounded = parse(
+            "fn unbounded(n: u32) -> u32 { \
+             return if n == 0 { 0 } else { 1 +% unbounded(n -% 1) }; \
+             ensures result == n; }",
+        )
+        .unwrap();
+        assert!(matches!(
+            check_contract(&unbounded).unwrap(),
+            ContractCheck::Invalid(message) if message.contains("recursion-depth")
+        ));
+    }
+
+    #[test]
     fn rejects_fn_implementation_that_breaks_its_contract() {
         let function = parse(
             "fn broken(value: u32) -> u32 { \
@@ -1280,5 +2214,401 @@ mod tests {
             verify(&contract, &candidate).unwrap(),
             VerificationResult::Verified
         );
+    }
+
+    #[test]
+    fn fixed_array_reads_match_reference_z3_and_wasm_at_boundaries() {
+        let contract = parse(
+            "fn read(values: [u32; 3], index: u32) -> u32 { \
+             requires index < values.length; \
+             return values[index]; \
+             ensures result == values[index]; }",
+        )
+        .unwrap();
+        let candidate = implementation_to_ami(&contract).unwrap();
+        assert_eq!(check_contract(&contract).unwrap(), ContractCheck::Valid);
+        assert_eq!(
+            verify(&contract, &candidate).unwrap(),
+            ProofResult::Verified
+        );
+
+        let module = axiom_wasm::emit(&candidate, 4).unwrap();
+        for (index, expected) in [(0, 11), (2, 33)] {
+            let args = [11, 22, 33, index];
+            assert_eq!(candidate.try_eval(&args).unwrap(), expected);
+            assert_eq!(reference::eval_ami(&candidate, &args).unwrap(), expected);
+            assert_eq!(axiom_wasm::run_with_args(&module, &args).unwrap(), expected);
+            assert!(reference::contract_holds(&contract, &candidate, &args).unwrap());
+        }
+
+        let out_of_bounds = [11, 22, 33, 3];
+        assert!(candidate.try_eval(&out_of_bounds).is_err());
+        assert!(axiom_wasm::run_with_args(&module, &out_of_bounds).is_err());
+        assert!(reference::contract_holds(&contract, &candidate, &out_of_bounds).unwrap());
+
+        let length_contract = parse(
+            "fn length(values: [u32; 3]) -> u32 { return values.length; ensures result == 3; }",
+        )
+        .unwrap();
+        let length_candidate = implementation_to_ami(&length_contract).unwrap();
+        assert_eq!(
+            verify(&length_contract, &length_candidate).unwrap(),
+            ProofResult::Verified
+        );
+        assert_eq!(length_candidate.try_eval(&[11, 22, 33]).unwrap(), 3);
+    }
+
+    #[test]
+    fn fixed_array_updates_copy_and_preserve_unchanged_elements() {
+        let contract = parse(
+            "fn update(values: [u32; 3], index: u32, replacement: u32) -> u32 { \
+             requires index < values.length; \
+             return array_update(values, index, replacement)[index]; \
+             ensures result == replacement && array_update(values, index, replacement)[0] == if index == 0 { replacement } else { values[0] }; }",
+        )
+        .unwrap();
+        let candidate = implementation_to_ami(&contract).unwrap();
+        assert_eq!(check_contract(&contract).unwrap(), ContractCheck::Valid);
+
+        let args = [11, 22, 33, 2, 99];
+        assert_eq!(candidate.try_eval(&args).unwrap(), 99);
+        assert!(reference::contract_holds(&contract, &candidate, &args).unwrap());
+        let module = axiom_wasm::emit(&candidate, 5).unwrap();
+        assert_eq!(axiom_wasm::run_with_args(&module, &args).unwrap(), 99);
+
+        let update = &contract.ensures[0];
+        assert_eq!(
+            reference::eval_spec(update, &contract, &args, 99).unwrap(),
+            reference::Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn signed_negative_and_out_of_bounds_indices_are_rejected() {
+        let contract = parse(
+            "fn read(values: [u32; 2], index: i32) -> u32 { \
+             requires index >= 0; \
+             requires index < 2; \
+             return values[index]; \
+             ensures result == values[index]; }",
+        )
+        .unwrap();
+        let candidate = implementation_to_ami(&contract).unwrap();
+        assert_eq!(check_contract(&contract).unwrap(), ContractCheck::Valid);
+        assert_eq!(
+            verify(&contract, &candidate).unwrap(),
+            ProofResult::Verified
+        );
+        assert!(candidate.try_eval(&[7, 8, u32::MAX]).is_err());
+        assert!(candidate.try_eval(&[7, 8, 2]).is_err());
+
+        let unsafe_contract = parse(
+            "fn unsafe_read(values: [u32; 2], index: u32) -> u32 { \
+             return values[index]; \
+             ensures result == 0; }",
+        )
+        .unwrap();
+        assert!(matches!(
+            check_contract(&unsafe_contract).unwrap(),
+            ContractCheck::Invalid(message) if message.contains("unproven")
+        ));
+
+        let unsafe_update = parse(
+            "fn unsafe_update(values: [u32; 2], index: u32) -> u32 { \
+             return array_update(values, index, 0)[0]; \
+             ensures result == 0; }",
+        )
+        .unwrap();
+        assert!(matches!(
+            check_contract(&unsafe_update).unwrap(),
+            ContractCheck::Invalid(message) if message.contains("unproven")
+        ));
+
+        let unsafe_requires = parse(
+            "contract unsafe_requires(values: [u32; 2], index: u32) -> u32 { \
+             requires values[index] == 0; \
+             ensures result == 0; }",
+        )
+        .unwrap();
+        assert!(matches!(
+            check_contract(&unsafe_requires).unwrap(),
+            ContractCheck::Invalid(message) if message.contains("requires clause")
+        ));
+    }
+
+    #[test]
+    fn short_circuit_conditions_guard_fixed_array_accesses() {
+        for source in [
+            "contract guarded_and(values: [u32; 2], index: u32) -> u32 { \
+             requires index < values.length && values[index] == 0; \
+             ensures result == 0; }",
+            "contract guarded_or(values: [u32; 2], index: u32) -> u32 { \
+             requires index >= values.length || values[index] == 0; \
+             ensures result == 0; }",
+        ] {
+            let contract = parse(source).unwrap();
+            assert_eq!(
+                check_preconditions(&contract).unwrap(),
+                PreconditionResult::Satisfiable
+            );
+            assert_eq!(check_contract(&contract).unwrap(), ContractCheck::Valid);
+            for args in [[0, 1, 0], [0, 1, 2], [1, 1, 0]] {
+                assert!(reference::contract_holds(&contract, &Expr::Const(0), &args).unwrap());
+            }
+        }
+
+        let conditional = parse(
+            "fn guarded_read(values: [u32; 2], index: u32) -> u32 { \
+             return if index < values.length { values[index] } else { 0 }; \
+             ensures result == if index < values.length { values[index] } else { 0 }; }",
+        )
+        .unwrap();
+        let candidate = implementation_to_ami(&conditional).unwrap();
+        assert_eq!(check_contract(&conditional).unwrap(), ContractCheck::Valid);
+        assert_eq!(candidate.try_eval(&[7, 8, 2]).unwrap(), 0);
+        assert!(reference::contract_holds(&conditional, &candidate, &[7, 8, 2]).unwrap());
+
+        let guarded_ensures = parse(
+            "contract guarded_ensures(values: [u32; 2], index: u32) -> u32 { \
+             ensures index >= values.length || result == values[index]; }",
+        )
+        .unwrap();
+        assert_eq!(
+            check_contract(&guarded_ensures).unwrap(),
+            ContractCheck::Valid
+        );
+        assert!(reference::contract_holds(&guarded_ensures, &Expr::Const(0), &[7, 8, 2]).unwrap());
+    }
+
+    #[test]
+    fn fixed_array_equality_matches_reference_z3_and_wasm() {
+        let contract = parse(
+            "fn equal(left: [u32; 2], right: [u32; 2]) -> bool { \
+             return left == right; \
+             ensures result == (left == right); }",
+        )
+        .unwrap();
+        let candidate = implementation_to_ami(&contract).unwrap();
+        assert_eq!(check_contract(&contract).unwrap(), ContractCheck::Valid);
+        assert_eq!(
+            verify(&contract, &candidate).unwrap(),
+            ProofResult::Verified
+        );
+        let module = axiom_wasm::emit(&candidate, 4).unwrap();
+
+        for (args, expected) in [([4, 9, 4, 9], 1), ([4, 9, 9, 4], 0)] {
+            assert_eq!(candidate.try_eval(&args).unwrap(), expected);
+            assert_eq!(reference::eval_ami(&candidate, &args).unwrap(), expected);
+            assert_eq!(axiom_wasm::run_with_args(&module, &args).unwrap(), expected);
+            assert!(reference::contract_holds(&contract, &candidate, &args).unwrap());
+        }
+    }
+
+    #[test]
+    fn bounded_array_sum_proves_the_loop_and_matches_reference_and_wasm() {
+        let function = parse(
+            "fn sum(values: [u32; 4]) -> u32 { \
+             return for i in 0..4 with acc = 0 invariant acc == acc { acc +% values[i] }; \
+             ensures result == values[0] +% values[1] +% values[2] +% values[3]; }",
+        )
+        .unwrap();
+        let candidate = implementation_to_ami(&function).unwrap();
+        assert_eq!(check_contract(&function).unwrap(), ContractCheck::Valid);
+        assert_eq!(
+            verify(&function, &candidate).unwrap(),
+            ProofResult::Verified
+        );
+        let module = axiom_wasm::emit(&candidate, 4).unwrap();
+
+        for (args, expected) in [([u32::MAX, 1, 2, 3], 5), ([3, 4, 5, 6], 18)] {
+            assert_eq!(candidate.try_eval(&args).unwrap(), expected);
+            assert_eq!(reference::eval_ami(&candidate, &args).unwrap(), expected);
+            assert_eq!(
+                reference::eval_spec(
+                    function.implementation.as_ref().unwrap(),
+                    &function,
+                    &args,
+                    expected
+                )
+                .unwrap(),
+                reference::Value::U32(expected)
+            );
+            assert_eq!(axiom_wasm::run_with_args(&module, &args).unwrap(), expected);
+            assert!(reference::contract_holds(&function, &candidate, &args).unwrap());
+        }
+    }
+
+    #[test]
+    fn bounded_array_loop_search_covers_found_and_not_found() {
+        let function = parse(
+            "fn contains(values: [u32; 4], needle: u32) -> bool { \
+             return for i in 0..4 with acc = false invariant acc == acc { \
+               acc || values[i] == needle }; \
+             ensures result == (values[0] == needle || values[1] == needle || values[2] == needle || values[3] == needle); }",
+        )
+        .unwrap();
+        let candidate = implementation_to_ami(&function).unwrap();
+        assert_eq!(check_contract(&function).unwrap(), ContractCheck::Valid);
+        assert_eq!(
+            verify(&function, &candidate).unwrap(),
+            ProofResult::Verified
+        );
+        let module = axiom_wasm::emit(&candidate, 5).unwrap();
+
+        for (args, expected) in [([3, 5, 8, 2, 8], 1), ([3, 5, 8, 2, 9], 0)] {
+            assert_eq!(candidate.try_eval(&args).unwrap(), expected);
+            assert_eq!(reference::eval_ami(&candidate, &args).unwrap(), expected);
+            assert_eq!(
+                reference::eval_spec(
+                    function.implementation.as_ref().unwrap(),
+                    &function,
+                    &args,
+                    expected
+                )
+                .unwrap(),
+                reference::Value::Bool(expected != 0)
+            );
+            assert_eq!(axiom_wasm::run_with_args(&module, &args).unwrap(), expected);
+            assert!(reference::contract_holds(&function, &candidate, &args).unwrap());
+        }
+    }
+
+    #[test]
+    fn bounded_loops_prove_max_min_validation_and_array_updates() {
+        let maximum = parse(
+            "fn maximum(values: [u32; 4]) -> u32 { \
+             return for i in 1..4 with acc = values[0] invariant acc >= values[0] { \
+               if acc >= values[i] { acc } else { values[i] } }; \
+             ensures result >= values[0]; ensures result >= values[1]; \
+             ensures result >= values[2]; ensures result >= values[3]; \
+             ensures result == values[0] || result == values[1] || result == values[2] || result == values[3]; }",
+        )
+        .unwrap();
+        let minimum = parse(
+            "fn minimum(values: [u32; 4]) -> u32 { \
+             return for i in 1..4 with acc = values[0] invariant acc <= values[0] { \
+               if acc <= values[i] { acc } else { values[i] } }; \
+             ensures result <= values[0]; ensures result <= values[1]; \
+             ensures result <= values[2]; ensures result <= values[3]; \
+             ensures result == values[0] || result == values[1] || result == values[2] || result == values[3]; }",
+        )
+        .unwrap();
+        for (function, expected) in [(&maximum, 9), (&minimum, 2)] {
+            let candidate = implementation_to_ami(function).unwrap();
+            assert_eq!(check_contract(function).unwrap(), ContractCheck::Valid);
+            assert_eq!(verify(function, &candidate).unwrap(), ProofResult::Verified);
+            assert_eq!(candidate.try_eval(&[4, 2, 9, 3]).unwrap(), expected);
+            let module = axiom_wasm::emit(&candidate, 4).unwrap();
+            assert_eq!(
+                axiom_wasm::run_with_args(&module, &[4, 2, 9, 3]).unwrap(),
+                expected
+            );
+        }
+
+        let validation = parse(
+            "fn validate(values: [u32; 4]) -> bool { \
+             return for i in 0..4 with acc = true invariant acc == true || acc == false { \
+               acc && values[i] <= 100 }; \
+             ensures result == (values[0] <= 100 && values[1] <= 100 && values[2] <= 100 && values[3] <= 100); }",
+        )
+        .unwrap();
+        let candidate = implementation_to_ami(&validation).unwrap();
+        assert_eq!(check_contract(&validation).unwrap(), ContractCheck::Valid);
+        assert_eq!(
+            verify(&validation, &candidate).unwrap(),
+            ProofResult::Verified
+        );
+        let module = axiom_wasm::emit(&candidate, 4).unwrap();
+        assert_eq!(
+            axiom_wasm::run_with_args(&module, &[0, 100, 99, 1]).unwrap(),
+            1
+        );
+        assert_eq!(
+            axiom_wasm::run_with_args(&module, &[0, 101, 99, 1]).unwrap(),
+            0
+        );
+
+        let update = parse(
+            "fn increment_first(values: [u32; 4]) -> u32 { \
+             return (for i in 0..4 with acc = values invariant acc == acc { \
+               if i == 0 { array_update(acc, i, acc[i] +% 1) } else { acc } })[0]; \
+             ensures result == values[0] +% 1; }",
+        )
+        .unwrap();
+        let candidate = implementation_to_ami(&update).unwrap();
+        assert_eq!(check_contract(&update).unwrap(), ContractCheck::Valid);
+        assert_eq!(verify(&update, &candidate).unwrap(), ProofResult::Verified);
+        assert_eq!(candidate.try_eval(&[7, 8, 9, 10]).unwrap(), 8);
+        let module = axiom_wasm::emit(&candidate, 4).unwrap();
+        assert_eq!(
+            axiom_wasm::run_with_args(&module, &[7, 8, 9, 10]).unwrap(),
+            8
+        );
+    }
+
+    #[test]
+    fn bounded_loops_cover_zero_one_and_maximum_iterations() {
+        let zero = parse(
+            "fn zero(values: [u32; 1]) -> u32 { \
+             return for i in 1..1 with acc = 7 invariant acc == 7 { acc +% values[i] }; \
+             ensures result == 7; }",
+        )
+        .unwrap();
+        let zero_candidate = implementation_to_ami(&zero).unwrap();
+        assert_eq!(check_contract(&zero).unwrap(), ContractCheck::Valid);
+        assert_eq!(zero_candidate.try_eval(&[42]).unwrap(), 7);
+
+        let one = parse(
+            "fn one(values: [u32; 1]) -> u32 { \
+             return for i in 0..1 with acc = 0 invariant acc == acc { acc +% values[i] }; \
+             ensures result == values[0]; }",
+        )
+        .unwrap();
+        let one_candidate = implementation_to_ami(&one).unwrap();
+        assert_eq!(check_contract(&one).unwrap(), ContractCheck::Valid);
+        assert_eq!(one_candidate.try_eval(&[42]).unwrap(), 42);
+
+        let expected = (0..16)
+            .map(|index| format!("values[{index}]"))
+            .collect::<Vec<_>>()
+            .join(" +% ");
+        let source = format!(
+            "fn sum16(values: [u32; 16]) -> u32 {{ \
+             return for i in 0..16 with acc = 0 invariant acc == acc {{ acc +% values[i] }}; \
+             ensures result == {expected}; }}"
+        );
+        let maximum = parse(&source).unwrap();
+        let candidate = implementation_to_ami(&maximum).unwrap();
+        assert_eq!(check_contract(&maximum).unwrap(), ContractCheck::Valid);
+        assert_eq!(verify(&maximum, &candidate).unwrap(), ProofResult::Verified);
+        let args: [u32; 16] = std::array::from_fn(|index| index as u32);
+        assert_eq!(candidate.try_eval(&args).unwrap(), 120);
+    }
+
+    #[test]
+    fn bounded_loop_invariant_failure_is_invalid_and_traps_at_runtime() {
+        let function = parse(
+            "fn broken(values: [u32; 2]) -> u32 { \
+             return for i in 0..2 with acc = 0 invariant acc > 0 { acc +% values[i] }; \
+             ensures result == values[0] +% values[1]; }",
+        )
+        .unwrap();
+        let candidate = implementation_to_ami(&function).unwrap();
+        assert!(matches!(
+            check_contract(&function).unwrap(),
+            ContractCheck::Invalid(message) if message.contains("loop-invariant")
+        ));
+        assert!(
+            reference::eval_spec(
+                function.implementation.as_ref().unwrap(),
+                &function,
+                &[2, 3],
+                0
+            )
+            .is_err()
+        );
+        assert!(candidate.try_eval(&[2, 3]).is_err());
+        let module = axiom_wasm::emit(&candidate, 2).unwrap();
+        assert!(axiom_wasm::run_with_args(&module, &[2, 3]).is_err());
     }
 }

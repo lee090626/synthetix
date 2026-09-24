@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use axiom_ami::Expr;
 use axiom_parser::{
@@ -57,6 +58,8 @@ pub struct Project {
     pub verification_callee_ids: HashMap<PathBuf, HashMap<String, ContractId>>,
     /// Dependency-first order for verifying summaries.
     pub verification_order: Vec<ContractId>,
+    /// Exact source bytes used to parse each module, for sound incremental proof keys.
+    pub source_contents: HashMap<PathBuf, Arc<[u8]>>,
     pub pages: Vec<LinkedPage>,
     pub files: Vec<PathBuf>,
 }
@@ -95,7 +98,7 @@ impl Project {
         verified_summaries: &HashMap<ContractId, Contract>,
     ) -> Result<axiom_verify::CompositionalProof, String> {
         let summary = self.source_summary(linked)?;
-        let callees = self.verified_callees(linked, summary, verified_summaries)?;
+        let callees = self.verified_callees(linked, verified_summaries)?;
         axiom_verify::verify_compositional(&summary.contract, candidate, &callees)
     }
 
@@ -112,7 +115,7 @@ impl Project {
         String,
     > {
         let summary = self.source_summary(linked)?;
-        let callees = self.verified_callees(linked, summary, verified_summaries)?;
+        let callees = self.verified_callees(linked, verified_summaries)?;
         axiom_verify::verify_compositional_with_metrics(&summary.contract, candidate, &callees)
     }
 
@@ -123,21 +126,17 @@ impl Project {
             .ok_or_else(|| format!("missing verification summary: {}", linked.contract.name))
     }
 
-    fn all_linked_summaries(&self) -> HashMap<ContractId, Contract> {
-        self.contracts
+    pub fn verification_summary(&self, id: &ContractId) -> Option<&LinkedContract> {
+        self.verification_summaries
             .iter()
-            .map(|linked| (ContractId::from(linked), linked.contract.clone()))
-            .collect()
+            .find(|linked| ContractId::from(*linked) == *id)
     }
 
-    fn verified_callees(
+    pub fn verification_dependencies(
         &self,
         linked: &LinkedContract,
-        summary: &LinkedContract,
-        verified_summaries: &HashMap<ContractId, Contract>,
-    ) -> Result<HashMap<String, Contract>, String> {
-        let identities = self.verification_callee_ids.get(&linked.source);
-        let signatures = self.verification_callees.get(&linked.source);
+    ) -> Result<Vec<(String, ContractId)>, String> {
+        let summary = self.source_summary(linked)?;
         let mut dependencies = Vec::new();
         for clause in summary
             .contract
@@ -154,12 +153,37 @@ impl Project {
         names.sort();
         names.dedup();
 
+        let identities = self.verification_callee_ids.get(&linked.source);
+        names
+            .into_iter()
+            .map(|name| {
+                let id = identities
+                    .and_then(|identities| identities.get(&name))
+                    .cloned()
+                    .ok_or_else(|| {
+                        format!("unknown callee `{name}` in {}", linked.contract.name)
+                    })?;
+                Ok((name, id))
+            })
+            .collect()
+    }
+
+    fn all_linked_summaries(&self) -> HashMap<ContractId, Contract> {
+        self.contracts
+            .iter()
+            .map(|linked| (ContractId::from(linked), linked.contract.clone()))
+            .collect()
+    }
+
+    fn verified_callees(
+        &self,
+        linked: &LinkedContract,
+        verified_summaries: &HashMap<ContractId, Contract>,
+    ) -> Result<HashMap<String, Contract>, String> {
+        let signatures = self.verification_callees.get(&linked.source);
         let mut callees = HashMap::new();
-        for name in names {
-            let id = identities
-                .and_then(|identities| identities.get(&name))
-                .ok_or_else(|| format!("unknown callee `{name}` in {}", linked.contract.name))?;
-            if let Some(contract) = verified_summaries.get(id) {
+        for (name, id) in self.verification_dependencies(linked)? {
+            if let Some(contract) = verified_summaries.get(&id) {
                 callees.insert(name, contract.clone());
                 continue;
             }
@@ -190,6 +214,7 @@ struct Definition {
 struct ModuleInfo {
     path: PathBuf,
     module: Module,
+    source_contents: Arc<[u8]>,
 }
 
 #[derive(Debug, Clone)]
@@ -342,13 +367,18 @@ fn visit_module(
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     let module = axiom_parser::parse_module(&source)
         .map_err(|error| format!("{}: {error}", path.display()))?;
+    let source_contents = Arc::<[u8]>::from(source.as_bytes());
     let imports = module.imports.clone();
     for import in &imports {
         let imported = resolve_import(&path, import)?;
         visit_module(&imported, modules, visiting)?;
     }
     visiting.pop();
-    modules.push(ModuleInfo { path, module });
+    modules.push(ModuleInfo {
+        path,
+        module,
+        source_contents,
+    });
     Ok(())
 }
 
@@ -544,6 +574,12 @@ fn link_project(config: ProjectConfig, modules: Vec<ModuleInfo>) -> Result<Proje
         }
     }
 
+    let source_contents = modules
+        .iter()
+        .map(|module| (module.path.clone(), Arc::clone(&module.source_contents)))
+        .collect();
+    let files = modules.iter().map(|module| module.path.clone()).collect();
+
     Ok(Project {
         config,
         contracts,
@@ -551,8 +587,9 @@ fn link_project(config: ProjectConfig, modules: Vec<ModuleInfo>) -> Result<Proje
         verification_callees,
         verification_callee_ids,
         verification_order,
+        source_contents,
         pages,
-        files: modules.into_iter().map(|module| module.path).collect(),
+        files,
     })
 }
 
@@ -693,6 +730,25 @@ fn collect_contract_dependencies(
             }
         }
         SpecExpr::Field(value, _) => collect_contract_dependencies(value, span, dependencies),
+        SpecExpr::Index(array, index) => {
+            collect_contract_dependencies(array, span, dependencies);
+            collect_contract_dependencies(index, span, dependencies);
+        }
+        SpecExpr::ArrayUpdate(array, index, value) => {
+            collect_contract_dependencies(array, span, dependencies);
+            collect_contract_dependencies(index, span, dependencies);
+            collect_contract_dependencies(value, span, dependencies);
+        }
+        SpecExpr::For {
+            initial,
+            invariant,
+            body,
+            ..
+        } => {
+            collect_contract_dependencies(initial, span, dependencies);
+            collect_contract_dependencies(invariant, span, dependencies);
+            collect_contract_dependencies(body, span, dependencies);
+        }
         SpecExpr::Ident(_) | SpecExpr::Number(_) | SpecExpr::Bool(_) | SpecExpr::Text(_) => {}
     }
 }
@@ -774,6 +830,81 @@ fn expand_expr(
             )?),
             field.clone(),
         )),
+        SpecExpr::Index(array, index) => Ok(SpecExpr::Index(
+            Box::new(expand_expr(
+                array,
+                scope,
+                definitions,
+                scopes,
+                cache,
+                stack,
+            )?),
+            Box::new(expand_expr(
+                index,
+                scope,
+                definitions,
+                scopes,
+                cache,
+                stack,
+            )?),
+        )),
+        SpecExpr::ArrayUpdate(array, index, value) => Ok(SpecExpr::ArrayUpdate(
+            Box::new(expand_expr(
+                array,
+                scope,
+                definitions,
+                scopes,
+                cache,
+                stack,
+            )?),
+            Box::new(expand_expr(
+                index,
+                scope,
+                definitions,
+                scopes,
+                cache,
+                stack,
+            )?),
+            Box::new(expand_expr(
+                value,
+                scope,
+                definitions,
+                scopes,
+                cache,
+                stack,
+            )?),
+        )),
+        SpecExpr::For {
+            index,
+            start,
+            end,
+            accumulator,
+            initial,
+            invariant,
+            body,
+        } => Ok(SpecExpr::For {
+            index: index.clone(),
+            start: *start,
+            end: *end,
+            accumulator: accumulator.clone(),
+            initial: Box::new(expand_expr(
+                initial,
+                scope,
+                definitions,
+                scopes,
+                cache,
+                stack,
+            )?),
+            invariant: Box::new(expand_expr(
+                invariant,
+                scope,
+                definitions,
+                scopes,
+                cache,
+                stack,
+            )?),
+            body: Box::new(expand_expr(body, scope, definitions, scopes, cache, stack)?),
+        }),
         SpecExpr::Let(name, value, body) => Ok(SpecExpr::Let(
             name.clone(),
             Box::new(expand_expr(
@@ -899,9 +1030,48 @@ fn substitute(expr: &SpecExpr, values: &HashMap<String, SpecExpr>) -> SpecExpr {
             name.clone(),
             args.iter().map(|arg| substitute(arg, values)).collect(),
         ),
-        SpecExpr::Text(_) | SpecExpr::List(_) | SpecExpr::Record { .. } | SpecExpr::Field(_, _) => {
-            expr.clone()
+        SpecExpr::Index(array, index) => SpecExpr::Index(
+            Box::new(substitute(array, values)),
+            Box::new(substitute(index, values)),
+        ),
+        SpecExpr::ArrayUpdate(array, index, value) => SpecExpr::ArrayUpdate(
+            Box::new(substitute(array, values)),
+            Box::new(substitute(index, values)),
+            Box::new(substitute(value, values)),
+        ),
+        SpecExpr::For {
+            index,
+            start,
+            end,
+            accumulator,
+            initial,
+            invariant,
+            body,
+        } => {
+            let mut nested = values.clone();
+            nested.remove(index);
+            nested.remove(accumulator);
+            SpecExpr::For {
+                index: index.clone(),
+                start: *start,
+                end: *end,
+                accumulator: accumulator.clone(),
+                initial: Box::new(substitute(initial, values)),
+                invariant: Box::new(substitute(invariant, &nested)),
+                body: Box::new(substitute(body, &nested)),
+            }
         }
+        SpecExpr::List(items) => {
+            SpecExpr::List(items.iter().map(|item| substitute(item, values)).collect())
+        }
+        SpecExpr::Record { name, fields } => SpecExpr::Record {
+            name: name.clone(),
+            fields: fields
+                .iter()
+                .map(|(field, value)| (field.clone(), substitute(value, values)))
+                .collect(),
+        },
+        SpecExpr::Text(_) | SpecExpr::Field(_, _) => expr.clone(),
     }
 }
 
@@ -967,6 +1137,12 @@ fn validate_page(
 ) -> Result<(), String> {
     let mut states = HashMap::new();
     for state in &page.states {
+        if matches!(state.ty, Type::FixedArray(_, _)) {
+            return Err(format!(
+                "{}: verified fixed arrays cannot be used as application state",
+                source.display()
+            ));
+        }
         if states
             .insert(state.name.clone(), state.ty.clone())
             .is_some()
@@ -1132,6 +1308,14 @@ fn page_expr_type(
                     )
                 })
         }
+        SpecExpr::Index(_, _) | SpecExpr::ArrayUpdate(_, _, _) => Err(format!(
+            "{}: verified fixed arrays cannot be used in application expressions",
+            source.display()
+        )),
+        SpecExpr::For { .. } => Err(format!(
+            "{}: bounded verified loops cannot be used in application expressions",
+            source.display()
+        )),
         SpecExpr::Let(name, value, body) => {
             let value_type = page_expr_type(value, states, records, locals, source)?;
             let mut nested = locals.clone();
@@ -1223,6 +1407,7 @@ fn types_compatible(actual: &Type, expected: &Type) -> bool {
     }
     match (actual, expected) {
         (Type::List(actual), Type::List(expected)) => types_compatible(actual, expected),
+        (Type::FixedArray(_, _), _) | (_, Type::FixedArray(_, _)) => actual == expected,
         _ => actual == expected,
     }
 }
@@ -1816,6 +2001,33 @@ mod tests {
                 .iter()
                 .any(|element| matches!(element, PageElement::List { .. }))
         );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn keeps_verified_fixed_arrays_out_of_application_state() {
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-project-verified-array-boundary-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("entry.ax"),
+            "page Boundary { state values: [u32; 2] = []; }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("synthetix.toml"),
+            "[project]\nentry = \"entry.ax\"\ntarget = \"web\"\n",
+        )
+        .unwrap();
+
+        let error = load(root.join("synthetix.toml")).unwrap_err();
+        assert!(error.contains("verified fixed arrays cannot be used as application state"));
 
         fs::remove_dir_all(root).unwrap();
     }

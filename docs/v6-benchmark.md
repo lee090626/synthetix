@@ -94,6 +94,95 @@ Non-guarantee measurements for the current scalar core and application boundary.
 
 Indexed array reads/writes, fixed-array bounds checks, and element-wise collection validation are not separate executable cases: the current proof boundary rejects list parameters before those operations can be expressed. That is a type-boundary observation, not evidence that every such operation would be costly after arrays exist.
 
+## v6.4 Collection Scope Decision
+
+This follow-up uses the baseline above plus the v6.1 fixed-array and v6.2 loop
+implementations. It makes no new timing or performance guarantee; the v6.0
+measurements remain historical.
+
+- `bounded_array_sum_proves_the_loop_and_matches_reference_and_wasm` proves and
+  executes sum/fold over a bounded array with the existing loop model.
+- `bounded_array_loop_search_covers_found_and_not_found` verifies both search
+  outcomes and compares the specification reference, AMI, and WASM results.
+- The proof model still has no empty array or variable-length output, so dynamic
+  filter results are outside its expressiveness. The repository examples use
+  `List` as application data; the baseline measures application list rendering
+  and serialization separately and does not identify a verified collection
+  workload or a list performance blocker.
+
+Decision: **DEFERRED**. Keep application `List` separate from verified arrays.
+Revisit a verified collection only when a real contract requires an empty or
+variable-length result, or a measured workload exceeds the current 16-element
+bound.
+
+## v6.5 Incremental Proof Cache Baseline
+
+This is a reproducible scenario with one local timing run, not a performance
+guarantee. It does not replace the v6.0 baseline above or the v6.9 final
+release baseline.
+
+- Commit base: `103e073a816535d2dbfd614c8705edf093aca4d9`; v6.5 changes were in
+  the working tree during measurement.
+- Environment: macOS arm64 (`Darwin arm64`), `rustc 1.98.1
+  (48a229cea 2026-09-01)`.
+- Build/run: debug `cargo test` profile, one run of
+  `cargo test -p axiom-cli proof_cache_ -- --nocapture`.
+- Default synthesis bounds: no timeout, 50,000 candidates, 64 MiB estimated
+  memory. Timers include project loading and verification/cache lookup, but not
+  fixture creation or source edits.
+- The five-contract fixture is a `C → B → A → root` chain plus one unrelated
+  contract. The large fixture is a 32-module caller chain. Each contract yields
+  one accepted candidate; the tests do not expose total rejected search
+  candidates.
+
+| Scenario | Contracts/modules | Elapsed | Cache evidence |
+| --- | ---: | ---: | --- |
+| Five-contract cold | 5 | 1,429.186 ms | 5 misses, 0 hits |
+| Five-contract warm | 5 | 0.638 ms | 5 hits, 0 misses |
+| Change leaf `C` | 5 | 1,343.803 ms | `C/B/A/root` invalidated; unrelated contract hit |
+| Change root only | 5 | 340.981 ms | root invalidated; other 4 contracts hit |
+| Change unrelated contract | 5 | Not timed | only unrelated contract invalidated; chain hit |
+| Large graph cold | 32 | 507.421 ms | 32 misses, 0 hits |
+| Large graph warm | 32 | 4.156 ms | 32 hits, 0 misses |
+
+Separate assertions verify that a semantics-version change and a synthesis-setting
+change invalidate all five keys, while a failed call-site precondition is not
+stored and fails again on the next attempt. Wall-clock values are single-run,
+host-dependent debug measurements; use the same tests and bounds for a later
+comparison, and do not infer a general speedup from these numbers.
+
+## v6.6 Synthesis Scaling Re-measurement
+
+The v6.0 baseline above remains unchanged. This before/after run uses the same
+release benchmark harness and the same default bounds: no timeout, 50,000
+candidates, and 64 MiB estimated memory. Both runs were on macOS arm64 with
+`rustc 1.98.1`, commit base `103e073a816535d2dbfd614c8705edf093aca4d9`, a dirty
+worktree, and three measured repeats with median timings.
+
+The pre-change `candidate_count` is the number of proof attempts (also reported
+by `synthesis_iterations`); rejected candidates were not yet instrumented.
+Generated counts are post-canonicalization and count each batch independently.
+
+| Case | Before result; proof attempts / generated | Before time | After result; proof attempts / rejected / generated | After time | Solver calls after |
+| --- | --- | ---: | --- | ---: | ---: |
+| `maximum_3` | RESOURCE_LIMIT; 0 / 138,136 | 233.101 ms | FOUND; 1 / 138,136 / 138,137 | 267.605 ms | 8 |
+| `bitwise_combo` | RESOURCE_LIMIT; 0 / 96,370 | 79.772 ms | FOUND; 1 / 96,370 / 96,371 | 93.543 ms | 8 |
+| `sum_8` | RESOURCE_LIMIT; 0 / 0 | 1.080 ms | FOUND; 1 / 0 / 1 | 1.667 ms | 8 |
+
+The resource-limit path now tries a small deterministic fallback set: an exact
+`result == expression` candidate, or a fixed `u32` min/max fold when the contract
+states the corresponding result bounds. Each candidate still has to pass full
+Z3 verification. The fallback runs only after sample or candidate-generation
+resource exhaustion; it does not enlarge the search bounds or change integer,
+array, or loop semantics. `sum_8` is proved before constructing its oversized
+sample product. The existing grammar still reaches its generation bound for
+`maximum_3` and `bitwise_combo`; those cases now finish with a verified fallback.
+
+The proof attempts add time in these three cases, so these measurements show
+improved bounded coverage, not a wall-clock speedup. Repeated benchmark results
+were deterministic for all three cases, and the added test executes representative
+boundary inputs through generated WASM.
+
 ## Bottleneck and feature assessment
 
 - **Synthesis:** `candidate_count` is the number of candidates sent through verification, including the source-shaped seed; generated candidates and search-batch iterations are separate. `NO_CANDIDATE` and `RESOURCE_LIMIT` describe only the configured grammar/budget, never proof of implementation impossibility. A generation-bound row may stop before any candidate reaches Z3. `synthesis_non_solver_time_ms` subtracts instrumented solver time from synthesis wall time.

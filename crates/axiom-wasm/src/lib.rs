@@ -35,6 +35,14 @@ pub fn instruction_cost(expr: &Expr) -> usize {
                 + instruction_cost(then_branch)
                 + instruction_cost(else_branch)
         }
+        Expr::ArrayGet { elements, index } => {
+            instruction_cost(index)
+                + elements.iter().map(instruction_cost).sum::<usize>()
+                + elements.len() * 4
+        }
+        Expr::Guard { condition, value } => {
+            1 + instruction_cost(condition) + instruction_cost(value)
+        }
     }
 }
 
@@ -227,23 +235,61 @@ fn encode_expr(expr: &Expr, param_count: u32, output: &mut Vec<u8>) -> Result<()
         }
         Expr::And(lhs, rhs) => {
             encode_expr(lhs, param_count, output)?;
+            output.extend([0x04, 0x7f]); // if (result i32)
             encode_expr(rhs, param_count, output)?;
-            output.push(0x71); // i32.and
+            output.push(0x45); // i32.eqz
+            output.push(0x45); // normalize to 0 or 1
+            output.push(0x05); // else
+            output.extend([0x41, 0x00]);
+            output.push(0x0b);
         }
         Expr::Or(lhs, rhs) => {
             encode_expr(lhs, param_count, output)?;
+            output.extend([0x04, 0x7f]); // if (result i32)
+            output.extend([0x41, 0x01]);
+            output.push(0x05); // else
             encode_expr(rhs, param_count, output)?;
-            output.push(0x72); // i32.or
+            output.push(0x45); // i32.eqz
+            output.push(0x45); // normalize to 0 or 1
+            output.push(0x0b);
         }
         Expr::Select {
             condition,
             then_branch,
             else_branch,
         } => {
-            encode_expr(then_branch, param_count, output)?;
-            encode_expr(else_branch, param_count, output)?;
             encode_expr(condition, param_count, output)?;
-            output.push(0x1b); // select
+            output.extend([0x04, 0x7f]); // if (result i32)
+            encode_expr(then_branch, param_count, output)?;
+            output.push(0x05); // else
+            encode_expr(else_branch, param_count, output)?;
+            output.push(0x0b); // end
+        }
+        Expr::ArrayGet { elements, index } => {
+            if elements.is_empty() {
+                return Err("cannot read from an empty fixed array".to_string());
+            }
+            for (array_index, element) in elements.iter().enumerate() {
+                encode_expr(index, param_count, output)?;
+                output.push(0x41);
+                push_sleb(array_index as i64, output);
+                output.push(0x46); // i32.eq
+                output.extend([0x04, 0x7f]); // if (result i32)
+                encode_expr(element, param_count, output)?;
+                output.push(0x05); // else
+            }
+            output.push(0x00); // unreachable on an invalid index
+            for _ in elements {
+                output.push(0x0b); // end
+            }
+        }
+        Expr::Guard { condition, value } => {
+            encode_expr(condition, param_count, output)?;
+            output.extend([0x04, 0x7f]); // if (result i32)
+            encode_expr(value, param_count, output)?;
+            output.push(0x05); // else
+            output.push(0x00); // unreachable when the condition is false
+            output.push(0x0b); // end
         }
     }
     Ok(())

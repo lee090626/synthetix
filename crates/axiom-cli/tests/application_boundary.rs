@@ -125,11 +125,53 @@ page Account {
     ] {
         assert!(dist.join(file).is_file(), "missing static output {file}");
     }
-    let proof = fs::read_to_string(dist.join("app.proof.json")).unwrap();
-    assert!(proof.contains("\"name\":\"increment\""));
-    assert!(proof.contains("\"source\":\"main.ax\""));
-    assert!(proof.contains("\"proof_result\":\"VERIFIED\""));
-    assert!(!proof.contains("balance"));
+    let proof: serde_json::Value =
+        serde_json::from_slice(&fs::read(dist.join("app.proof.json")).unwrap()).unwrap();
+    assert_eq!(proof["version"], 4);
+    assert_eq!(proof["verification"]["scope"], "WASM_CONTRACTS_ONLY");
+    assert_eq!(proof["verification"]["proof_result"], "VERIFIED");
+    assert_eq!(proof["verification"]["verified"], true);
+    assert_eq!(
+        proof["verification_scope"]["contracts"],
+        "WASM_CONTRACTS_ONLY"
+    );
+    assert_eq!(
+        proof["verification_scope"]["extern_implementations"],
+        "UNVERIFIED"
+    );
+    assert_eq!(
+        proof["verification_scope"]["extern_response_validation"],
+        "DECLARED_TYPE_ONLY"
+    );
+    assert!(
+        proof["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|contract| {
+                contract["name"] == "increment"
+                    && contract["source"] == "main.ax"
+                    && contract["proof_result"] == "VERIFIED"
+            })
+    );
+    assert!(
+        proof["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|contract| contract["name"] != "balance")
+    );
+    let balance = &proof["external_boundaries"]["balance"];
+    assert_eq!(balance["source"], "api.ax");
+    assert_eq!(balance["params"][0], "u32");
+    assert_eq!(balance["result"], "u32");
+    assert_eq!(balance["effect"], "HOST_EFFECT");
+    assert_eq!(balance["verification_status"], "UNVERIFIED");
+    assert_eq!(balance["implementation_verified"], false);
+    assert_eq!(balance["trust_boundary"], "EXTERNAL_IMPLEMENTATION");
+    assert_eq!(balance["response_validation"], "DECLARED_TYPE_ONLY");
+    assert_eq!(balance["audit_metadata"]["status"], "NOT_PROVIDED");
+    assert!(balance["assumptions"].as_array().unwrap().len() >= 2);
     let html = fs::read_to_string(dist.join("index.html")).unwrap();
     assert!(html.find("app.config.js").unwrap() < html.find("app.js").unwrap());
     fs::write(
@@ -143,10 +185,11 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const bytes = fs.readFileSync(process.env.AXIOM_TEST_WASM);
 const proof = JSON.parse(fs.readFileSync(process.env.AXIOM_TEST_PROOF, 'utf8'));
-if (proof.proof_result !== 'VERIFIED'
+if (proof.verification.proof_result !== 'VERIFIED'
   || !proof.contracts.some((contract) => contract.name === 'increment'
     && contract.source === 'main.ax' && contract.proof_result === 'VERIFIED')
-  || proof.contracts.some((contract) => contract.name === 'balance'))
+  || proof.contracts.some((contract) => contract.name === 'balance')
+  || proof.external_boundaries.balance?.verification_status !== 'UNVERIFIED')
   throw new Error('proof manifest does not match the verified project');
 const wasmExportNames = WebAssembly.Module.exports(new WebAssembly.Module(bytes)).map((entry) => entry.name);
 if (!wasmExportNames.includes('increment') || wasmExportNames.includes('balance')) throw new Error(`unexpected WASM exports: ${wasmExportNames}`);
@@ -186,7 +229,9 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
   const stateAfterVerifiedAction = window.synthetix.state.count;
   const verifiedCall = window.synthetix.call('increment', [41]);
   window.synthetix.registerEffectAdapter(async (request) => {
-    if (request.name !== 'balance' || request.source !== 'api.ax' || request.responseType !== 'u32')
+    if (request.name !== 'balance' || request.source !== 'api.ax' || request.responseType !== 'u32'
+      || request.effect !== 'HOST_EFFECT' || request.verificationStatus !== 'UNVERIFIED'
+      || request.trustBoundary !== 'EXTERNAL_IMPLEMENTATION')
       throw new Error('typed API request metadata mismatch');
     if (window.synthetix.config.apiBaseUrl !== 'https://api.example.invalid')
       throw new Error('deployment config unavailable to API adapter');
@@ -229,5 +274,97 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
         String::from_utf8(runtime_result.stdout).unwrap(),
         "1|42|21|21|21|21|SUCCEEDED|release-test"
     );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn v6_release_path_runs_verified_array_loop_modular_wasm_and_static_application() {
+    let root = std::env::temp_dir().join(format!(
+        "synthetix-v6-release-{}",
+        SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/v6-release");
+    let first = root.join("build-a");
+    let second = root.join("build-b");
+    for project in [&first, &second] {
+        fs::create_dir_all(project).unwrap();
+        for file in [
+            "synthetix.toml",
+            "main.ax",
+            "arrays.ax",
+            "logic.ax",
+            "recursive.ax",
+            "api.ax",
+        ] {
+            fs::copy(fixture.join(file), project.join(file)).unwrap();
+        }
+    }
+
+    let check = Command::new(env!("CARGO_BIN_EXE_axiom"))
+        .arg("check")
+        .current_dir(&first)
+        .output()
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "project check failed: {}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+
+    for project in [&first, &second] {
+        let build = Command::new(env!("CARGO_BIN_EXE_axiom"))
+            .arg("build")
+            .current_dir(project)
+            .output()
+            .unwrap();
+        assert!(
+            build.status.success(),
+            "project build failed: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+    }
+    for file in [
+        "index.html",
+        "app.config.js",
+        "app.js",
+        "app.css",
+        "app.wasm",
+        "app.proof.json",
+    ] {
+        assert_eq!(
+            fs::read(first.join("dist").join(file)).unwrap(),
+            fs::read(second.join("dist").join(file)).unwrap(),
+            "static release output differs for {file} across clean project directories"
+        );
+    }
+    let smoke = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/v6-release-smoke.cjs");
+    let runtime = Command::new("node")
+        .arg(smoke)
+        .arg(first.join("dist"))
+        .output()
+        .expect("Node.js is required for the v6 static deployment regression");
+    assert!(
+        runtime.status.success(),
+        "static release smoke failed: {}",
+        String::from_utf8_lossy(&runtime.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&runtime.stdout).unwrap();
+    assert_eq!(report["status"], "PASS");
+    assert_eq!(report["array_sum"], 10);
+    assert_eq!(report["modular_call"], 11);
+    assert_eq!(report["recursion"], 16);
+    assert_eq!(report["increment"], 11);
+    assert_eq!(report["api"], 22);
+    assert_eq!(report["persisted"], true);
+    assert!(report["runtime_boot_time_ms"].as_f64().unwrap() >= 0.0);
+    assert!(report["transition_time_ms"].as_f64().unwrap() >= 0.0);
+    assert!(report["effect_time_ms"].as_f64().unwrap() >= 0.0);
+    assert!(report["persistence_restore_time_ms"].as_f64().unwrap() >= 0.0);
+    assert!(report["wasm_bytes"].as_u64().unwrap() > 8);
+
     fs::remove_dir_all(root).unwrap();
 }

@@ -1,0 +1,1 @@
+export extern fn balance(seed: u32) -> u32;

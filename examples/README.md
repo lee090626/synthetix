@@ -11,6 +11,7 @@
 | `friendly/` | `program`, `gives`, `number`, `plus`처럼 읽기 쉬운 문법 |
 | `errors/` | 문법 오류·타입 오류·검증 실패를 재현하는 예제. `unsat_precondition.ax`와 `unsat_postcondition.ax`는 v4 상태 모델 회귀 fixture다. |
 | `web-counter/` | 여러 `.ax` 파일을 연결한 v2 웹 예제 |
+| `v6-release/` | 배열·제한된 loop·compositional proof와 application effect의 static release fixture |
 | `v3-status/` | `bool` 상태와 조건부 화면 |
 | `v3-todo/` | 고정 항목 상태 앱 |
 | `v3-todo-v31/` | 입력·record·list·reducer·persist를 포함한 Todo 앱 |
