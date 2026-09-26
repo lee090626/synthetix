@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
 
   build-cli:
     name: Build ${{ matrix.platform }}
@@ -64,7 +64,7 @@ jobs:
         id: build_cli
         run: |
           rustup target add ${{ matrix.target }}
-          cargo build --release -p axiom-cli --target ${{ matrix.target }}
+          cargo build --locked --release -p axiom-cli --target ${{ matrix.target }}
       - name: Smoke test native release CLI
         id: smoke_cli
         shell: bash
