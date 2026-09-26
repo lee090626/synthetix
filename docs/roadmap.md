@@ -74,7 +74,7 @@ DB, 인증 내부까지 Synthetix가 증명하는 것은 목표가 아니다.
 | v7.6 | PASS: WASM/browser bundle-size gate ([결과](v7.6-benchmark.md)) |
 | v7.7 | PASS: CLI diagnostics and documentation gate ([결과](v7.7-benchmark.md)) |
 | v7.8 | PASS: four-platform CLI and VSIX qualification ([결과](v7.8-benchmark.md)) |
-| v7.9 | IN PROGRESS: local regression PASS; final-source four-platform gate pending ([근거](v7.9-benchmark.md)) |
+| v7.9 | PASS: semantics-preserving Freeze; local and hosted regression, four-platform CLI/VSIX gate ([근거](v7.9-benchmark.md)) |
 
 v4.9와 v5.9는 각각 proof와 application 경계를 동결했다. v6.0 benchmark는
 검증된 배열 입력이 거부되는 expressiveness 경계를 재현했고, v6.1은 앱
@@ -1283,8 +1283,8 @@ runtime target은 현재 제품 수요가 없어 NOT NEEDED로 판정됐다. v6.
 CLI matrix와 release regression 검증을 마쳤다. v7.0 clean performance/architecture
 baseline, v7.1 bounded synthesis hot path, v7.2 verifier query reuse, v7.3 process-local
 proof cache, v7.4 core lowering refactor, v7.5 memory gate, v7.6 WASM/browser bundle,
-v7.7 CLI/docs, v7.8 four-platform qualification은 결과 문서에 따라 PASS다. v7.9 Freeze
-검증이 진행 중이며, v8–v10 구현은 시작하지 않았다.
+v7.7 CLI/docs, v7.8 four-platform qualification과 v7.9 Freeze는 결과 문서에 따라 PASS다.
+v8–v10 구현은 시작하지 않았다.
 
 ```text
 v4.1 완료
@@ -1325,7 +1325,7 @@ v4.1 완료
   → v7.6 PASS
   → v7.7 PASS
   → v7.8 PASS
-  → v7.9 Freeze 검증 중
+  → v7.9 Freeze PASS
 ```
 
 v4.9에서 의미론, 결과 상태, supported grammar, negative fixture, release

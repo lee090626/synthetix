@@ -8,13 +8,13 @@
 현재 상태: v7.0 clean baseline, v7.1 bounded synthesis optimization, v7.2 verifier query reuse,
 v7.3 process-local proof cache, v7.4 core lowering refactor, v7.5 measured memory gate,
 v7.6 WASM/browser bundle, v7.7 CLI/docs, v7.8 four-platform qualification은 PASS다. v7.5
-runtime memory optimization은 NOT NEEDED이며 v7.9 Freeze 검증이 진행 중이다. v8–v10 구현은
+runtime memory optimization은 NOT NEEDED이며 v7.9 Freeze는 PASS다. v8–v10 구현은
 시작하지 않았다. 결과는 [v7.0 baseline](v7-benchmark-baseline.md), [v7.1 comparison](v7.1-benchmark.md),
 [v7.2 comparison](v7.2-benchmark.md), [v7.3 proof-cache report](v7.3-benchmark.md),
 [v7.4 core-lowering report](v7.4-benchmark.md), [v7.5 memory report](v7.5-benchmark.md),
 [v7.6 bundle report](v7.6-benchmark.md), [v7.7 CLI/docs report](v7.7-benchmark.md),
 [v7.8 platform/package report](v7.8-benchmark.md),
-[v7.9 local freeze evidence](v7.9-benchmark.md)에서 확인한다.
+[v7.9 freeze evidence](v7.9-benchmark.md)에서 확인한다.
 
 ## 핵심 근거
 
@@ -221,7 +221,7 @@ host-effect 경계이며 Rust `unsafe` FFI 구현이 아니다.
 
 ### v7.5 — Measured Memory and Allocation Work
 
-**상태: PASS — runtime memory optimization NOT NEEDED.** 동일 host/toolchain/profile/source snapshot/executable/fixtures의 두 process-RSS batch에서 네 workload를 각각 5회 측정했다. 결과는 RSS 감소 전후 비교가 아니며 runtime 개선을 주장하지 않는다. 기존 estimated-memory limit와 실행 결과를 보존했다. 상세 수치와 40개 raw run은 [v7.5 benchmark](v7.5-benchmark.md), [JSON](v7.5-benchmark.json)에 있다. v7.6–v7.8은 PASS이며 v7.9 Freeze 검증이 진행 중이다. v8–v10은 시작하지 않았다.
+**상태: PASS — runtime memory optimization NOT NEEDED.** 동일 host/toolchain/profile/source snapshot/executable/fixtures의 두 process-RSS batch에서 네 workload를 각각 5회 측정했다. 결과는 RSS 감소 전후 비교가 아니며 runtime 개선을 주장하지 않는다. 기존 estimated-memory limit와 실행 결과를 보존했다. 상세 수치와 40개 raw run은 [v7.5 benchmark](v7.5-benchmark.md), [JSON](v7.5-benchmark.json)에 있다. v7.6–v7.9는 PASS다. v8–v10은 시작하지 않았다.
 
 - **목표·근거·작업:** 현재 추정치가 실제 peak RSS와 다를 수 있으므로 우선 v7.0의
   candidate-heavy, array/loop/recursion workload에 대한 process peak 측정을 만든다.

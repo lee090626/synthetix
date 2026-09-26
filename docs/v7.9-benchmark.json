@@ -1,7 +1,7 @@
 {
   "format_version": 1,
   "milestone": "v7.9",
-  "gate_status": "LOCAL_PASS_HOSTED_PENDING",
+  "gate_status": "PASS",
   "purpose": "Finite-timeout classification repair and current v7 source regression",
   "environment": {
     "operating_system": "macOS",
@@ -22550,11 +22550,24 @@
     "app.wasm": "30db9c09a7a6b82b7d7e81240226adf66a2d1468d057f50890cdc2ed1f669f93",
     "app.proof.json": "e42009757311fdfd5089f4f77797eea30c17d9830a0a9b41402f2e06a3163f48"
   },
-  "pending": [
-    "Hosted Linux x64, Windows x64, macOS arm64, macOS x64 CLI smoke",
-    "Four-platform VSIX source/package SHA and Node activation smoke",
-    "Final Freeze status decision"
-  ],
+  "hosted_gate": {
+    "run_id": 36277856970,
+    "source_commit": "ca47543e1407a94df89744b014d54ece761ea09b",
+    "conclusion": "success",
+    "workspace_tests_passed": 155,
+    "native_cli_platforms_passed": ["linux-x64", "win32-x64", "darwin-arm64", "darwin-x64"],
+    "vsix_source_package_hash_and_activation": "PASS",
+    "extension_sha256": "62d978abab8c182eb59ae1978553f21e649d0ff56f8c70419f73d79557e31f91",
+    "bundled_cli_sha256": {
+      "linux-x64": "26c0d80512cabb4b48e8c1fc6b6b65e9fa691a3cc59685cfd7561714096481db",
+      "win32-x64": "910b98cde85f5e4114bdf0339fc2bb01617bfa2c0b433b4ceac43df03bd27142",
+      "darwin-arm64": "59068e30458ec606ab15d46744d2b82501971de5e685d239e2aa31c49f8d57f0",
+      "darwin-x64": "c119678449d97adda2bf8c29c8e9cdb5edf7c4c0a30ff7cf469d1e160fe8984b"
+    },
+    "vsix_sha256": "74572a93e3972e6470bd1863cdf66bb05f8a9f0f69ea019a9fd8bb46e7347ee7",
+    "github_release_job": "skipped"
+  },
+  "pending": [],
   "local_vsix_sha256": "17f340802c354e9a90240e1d971e5988e63ca86e3c2befeed55ea2797196dbe7",
   "local_vsix_extension_sha256": "62d978abab8c182eb59ae1978553f21e649d0ff56f8c70419f73d79557e31f91"
 }
