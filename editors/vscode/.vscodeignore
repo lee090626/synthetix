@@ -1,3 +1,5 @@
 .vscode/**
 *.vsix
 node_modules/**
+check-vsix.js
+smoke-test.js
