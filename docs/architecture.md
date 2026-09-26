@@ -133,8 +133,8 @@ from proof results.
   - Formulates the verification condition:
     $$\Phi(x) = \text{Requires}(x) \land (\text{Candidate}(x) \neq \text{Ensures}(x))$$
   - Submits $\Phi(x)$ to Z3 SMT Solver (bit-vector theory `QF_BV`).
-  - If UNSAT, the candidate satisfies the specification for every input in the
-    modeled scalar or flattened fixed-array domain.
+  - If UNSAT, the candidate satisfies the specification for every input
+    satisfying `Requires` in the modeled scalar or flattened fixed-array domain.
 - **Current scope**: proves scalar and fixed-array expressions, including the
   bounded loop and structural-recursion forms described above, with bundled
   Z3. Loops and recursion are statically unrolled under their fixed limits;
