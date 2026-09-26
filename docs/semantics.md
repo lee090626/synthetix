@@ -1,10 +1,11 @@
 # Synthetix Target Semantics & Bit-Vector Specification
 
-This document defines the semantics that all pipeline components must share. The
-current repository slice implements the DSL lexer/parser, AMI evaluator, SMT
-translation, WASM emission, and embedded runtime for pure `u32`/`i32`/`bool`
-expressions, unsigned and signed comparisons, conditional values, and `let`
-bindings; broader semantics are still a target.
+This document defines the semantics that all pipeline components must share.
+The frozen v4.1 scalar baseline covers pure `u32`/`i32`/`bool` expressions,
+comparisons, conditional values, and `let` bindings. Implemented v6 extensions
+add fixed `[u32; N]` proof inputs, statically bounded loops in verified function
+bodies, and bounded structural recursion; these do not change the emitted
+`v4.1-scalar-baseline` identifier.
 
 ## v4.1 Semantic Baseline
 

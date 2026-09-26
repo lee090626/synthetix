@@ -1,0 +1,453 @@
+{
+  "format_version": 1,
+  "milestone": "v7.4 — Core Lowering and Project Code Boundaries",
+  "status": "PASS",
+  "decision": "Runtime optimization NOT NEEDED",
+  "decision_scope": "The bounded-loop lowering extraction is a private structural refactor. Directly relevant timing ranges overlap, so no speedup is claimed and no further runtime optimization is justified by this gate.",
+  "scope": {
+    "change": "Extracted the existing SpecExpr::For lowering arm into private lower_bounded_loop in crates/axiom-verify/src/lib.rs.",
+    "project_crate_split": "NOT NEEDED; axiom-project already has private graph/order and expansion seams.",
+    "v6_semantics_changed": false,
+    "proof_classification_changed": false,
+    "observable_behavior_changed": false,
+    "preexisting_v7_2_metric_edits_preserved": true
+  },
+  "environment": {
+    "commit_sha": "4f13d088ed0ab2c4c4249ef217b380a51de2a650",
+    "working_tree_dirty": true,
+    "operating_system": "macOS",
+    "architecture": "arm64",
+    "rustc": "1.98.1",
+    "cargo": "1.98.1",
+    "node": "24.19.0",
+    "profile": "release",
+    "benchmark_command": "cargo run --release -p axiom-cli --example v6_benchmark -- --json <capture.json> --markdown <capture.md> --title <capture title>",
+    "serial_captures_per_state": 5,
+    "rows_per_capture": 54,
+    "internal_repeats": 3,
+    "benchmark_source_sha256_before_and_after": "99d701ed6146f2cbba79c88379a1770ca77007818ac31b4c8af52cfc46b6d4e2",
+    "benchmark_source_changed": false
+  },
+  "benchmark_comparison": {
+    "before_captures": 5,
+    "after_captures": 5,
+    "rows_each_capture": [
+      54,
+      54,
+      54,
+      54,
+      54,
+      54,
+      54,
+      54,
+      54,
+      54
+    ],
+    "stable_mismatch_count": 0,
+    "outcome_counts_match_each_pair": [
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "outcome_counts": {
+      "APPLICATION_DATA_ONLY": 5,
+      "CACHE_COLD_VERIFIED": 2,
+      "CACHE_WARM_HIT": 2,
+      "COUNTEREXAMPLE": 1,
+      "DEPENDENTS_REVERIFIED": 1,
+      "EXPECTED_CALL_PRECONDITION_DIAGNOSTIC": 1,
+      "EXPECTED_CIRCULAR_CALL_REJECTION": 1,
+      "EXPECTED_INVALID": 1,
+      "FOUND": 11,
+      "RESOURCE_LIMIT": 2,
+      "ROOT_REVERIFIED": 1,
+      "TIMEOUT": 1,
+      "VERIFIED": 16,
+      "VERIFIED_RELEASE_PATH": 1,
+      "VERIFIED_WASM_RUNTIME_AND_PERSISTENCE": 8
+    },
+    "timing_units": "ms; five independent capture values per state; each value is a median of three internal repeats.",
+    "affected_rows": {
+      "fixed_array_sum4": {
+        "total_time_ms": {
+          "before_samples": [
+            0.486084,
+            0.447333,
+            0.467584,
+            0.447792,
+            0.4465
+          ],
+          "before_median": 0.447792,
+          "before_range": [
+            0.4465,
+            0.486084
+          ],
+          "after_samples": [
+            0.452,
+            0.511834,
+            0.452084,
+            0.440917,
+            0.438708
+          ],
+          "after_median": 0.452,
+          "after_range": [
+            0.438708,
+            0.511834
+          ],
+          "ranges_overlap": true
+        },
+        "z3_verification_time_ms": {
+          "before_samples": [
+            0.047416,
+            0.036291,
+            0.038543,
+            0.0365,
+            0.036042
+          ],
+          "before_median": 0.0365,
+          "before_range": [
+            0.036042,
+            0.047416
+          ],
+          "after_samples": [
+            0.035958,
+            0.050292,
+            0.036582,
+            0.035292,
+            0.035165
+          ],
+          "after_median": 0.035958,
+          "after_range": [
+            0.035165,
+            0.050292
+          ],
+          "ranges_overlap": true
+        }
+      },
+      "bounded_loop_sum4": {
+        "total_time_ms": {
+          "before_samples": [
+            0.723417,
+            0.703875,
+            0.704792,
+            0.695709,
+            0.819291
+          ],
+          "before_median": 0.704792,
+          "before_range": [
+            0.695709,
+            0.819291
+          ],
+          "after_samples": [
+            0.699917,
+            0.718209,
+            0.746541,
+            0.715917,
+            0.701291
+          ],
+          "after_median": 0.715917,
+          "after_range": [
+            0.699917,
+            0.746541
+          ],
+          "ranges_overlap": true
+        },
+        "z3_verification_time_ms": {
+          "before_samples": [
+            0.041999,
+            0.040708,
+            0.040416,
+            0.039791,
+            0.044584
+          ],
+          "before_median": 0.040708,
+          "before_range": [
+            0.039791,
+            0.044584
+          ],
+          "after_samples": [
+            0.04021,
+            0.040875,
+            0.0445,
+            0.039752,
+            0.039875
+          ],
+          "after_median": 0.04021,
+          "after_range": [
+            0.039752,
+            0.0445
+          ],
+          "ranges_overlap": true
+        }
+      },
+      "bounded_recursion_sum_to": {
+        "total_time_ms": {
+          "before_samples": [
+            4.682792,
+            4.0015,
+            4.521333,
+            4.168916,
+            4.730125
+          ],
+          "before_median": 4.521333,
+          "before_range": [
+            4.0015,
+            4.730125
+          ],
+          "after_samples": [
+            4.359375,
+            4.239208,
+            3.98825,
+            4.030042,
+            4.085541
+          ],
+          "after_median": 4.085541,
+          "after_range": [
+            3.98825,
+            4.359375
+          ],
+          "ranges_overlap": true
+        },
+        "z3_verification_time_ms": {
+          "before_samples": [
+            3.711042,
+            3.156627,
+            3.625542,
+            3.289749,
+            3.732209
+          ],
+          "before_median": 3.625542,
+          "before_range": [
+            3.156627,
+            3.732209
+          ],
+          "after_samples": [
+            3.484042,
+            3.369834,
+            3.157167,
+            3.151251,
+            3.171293
+          ],
+          "after_median": 3.171293,
+          "after_range": [
+            3.151251,
+            3.484042
+          ],
+          "ranges_overlap": true
+        }
+      },
+      "v6_release_array_loop_recursion_application": {
+        "total_time_ms": {
+          "before_samples": [
+            196.89166600000001,
+            170.134458,
+            197.526167,
+            169.1565,
+            187.018167
+          ],
+          "before_median": 187.018167,
+          "before_range": [
+            169.1565,
+            197.526167
+          ],
+          "after_samples": [
+            168.094875,
+            166.91324799999998,
+            166.40683499999997,
+            167.182251,
+            168.67258299999997
+          ],
+          "after_median": 167.182251,
+          "after_range": [
+            166.40683499999997,
+            168.67258299999997
+          ],
+          "ranges_overlap": false
+        },
+        "build_time_ms": {
+          "before_samples": [
+            193.725125,
+            165.933041,
+            193.988042,
+            164.969208,
+            182.486625
+          ],
+          "before_median": 182.486625,
+          "before_range": [
+            164.969208,
+            193.988042
+          ],
+          "after_samples": [
+            163.61487499999998,
+            162.41162500000002,
+            161.94687499999998,
+            162.694292,
+            164.937083
+          ],
+          "after_median": 162.694292,
+          "after_range": [
+            161.94687499999998,
+            164.937083
+          ],
+          "ranges_overlap": false
+        },
+        "runtime_boot_time_ms": {
+          "before_samples": [
+            2.748625000000004,
+            2.723166999999997,
+            4.0156670000000005,
+            3.895083,
+            3.8467920000000007
+          ],
+          "before_median": 3.8467920000000007,
+          "before_range": [
+            2.723166999999997,
+            4.0156670000000005
+          ],
+          "after_samples": [
+            4.094166999999999,
+            4.114041,
+            4.060958999999997,
+            4.092792000000003,
+            4.056958000000002
+          ],
+          "after_median": 4.092792000000003,
+          "after_range": [
+            4.056958000000002,
+            4.114041
+          ],
+          "ranges_overlap": false
+        },
+        "runtime_transition_ms_per_action": {
+          "before_samples": [
+            0.12716599999999545,
+            0.11620800000000032,
+            0.12812499999999716,
+            0.11641600000000096,
+            0.13766600000000295
+          ],
+          "before_median": 0.12716599999999545,
+          "before_range": [
+            0.11620800000000032,
+            0.13766600000000295
+          ],
+          "after_samples": [
+            0.11545800000000384,
+            0.11562499999999432,
+            0.117834000000002,
+            0.119374999999998,
+            0.11841700000000088
+          ],
+          "after_median": 0.117834000000002,
+          "after_range": [
+            0.11545800000000384,
+            0.119374999999998
+          ],
+          "ranges_overlap": true
+        }
+      }
+    },
+    "interpretation": "All total and Z3 timing ranges for fixed_array_sum4, bounded_loop_sum4, and bounded_recursion_sum_to overlap. These samples show neither a speedup nor a repeatable lowerer-specific regression. The combined v6 release application row is reported separately and is not attributable to this helper extraction. Its runtime_boot_time_ms range is disjoint and higher after; generated benchmark source and outputs are unchanged. This is an observation, not a lowerer regression finding."
+  },
+  "runtime_equivalence": {
+    "method": "Before and after release CLI runs used identical canonical output paths; complete JSON reports and emitted WASM bytes were compared.",
+    "cases": [
+      {
+        "case": "loop",
+        "report_byte_identical": true,
+        "wasm_byte_identical": true,
+        "wasm_sha256_before": "69205701eb9b98e183278bd7f83863aefbf6dc2ea311a3569431dae4b5c8a365",
+        "wasm_sha256_after": "69205701eb9b98e183278bd7f83863aefbf6dc2ea311a3569431dae4b5c8a365",
+        "wasm_bytes": 1650
+      },
+      {
+        "case": "zero",
+        "report_byte_identical": true,
+        "wasm_byte_identical": true,
+        "wasm_sha256_before": "2484d761bc265c997b9a4559594186e45f314b8b517967ae4ec1c2419acf15be",
+        "wasm_sha256_after": "2484d761bc265c997b9a4559594186e45f314b8b517967ae4ec1c2419acf15be",
+        "wasm_bytes": 46
+      },
+      {
+        "case": "scalar-0",
+        "report_byte_identical": true,
+        "wasm_byte_identical": true,
+        "wasm_sha256_before": "f9391190c69aa16585557fd99e8daa2bcee8a7e4491a2be39f3af2f8cb4a1a32",
+        "wasm_sha256_after": "f9391190c69aa16585557fd99e8daa2bcee8a7e4491a2be39f3af2f8cb4a1a32",
+        "wasm_bytes": 173
+      },
+      {
+        "case": "scalar-4294967292",
+        "report_byte_identical": true,
+        "wasm_byte_identical": true,
+        "wasm_sha256_before": "f9391190c69aa16585557fd99e8daa2bcee8a7e4491a2be39f3af2f8cb4a1a32",
+        "wasm_sha256_after": "f9391190c69aa16585557fd99e8daa2bcee8a7e4491a2be39f3af2f8cb4a1a32",
+        "wasm_bytes": 173
+      },
+      {
+        "case": "scalar-4294967295",
+        "report_byte_identical": true,
+        "wasm_byte_identical": true,
+        "wasm_sha256_before": "f9391190c69aa16585557fd99e8daa2bcee8a7e4491a2be39f3af2f8cb4a1a32",
+        "wasm_sha256_after": "f9391190c69aa16585557fd99e8daa2bcee8a7e4491a2be39f3af2f8cb4a1a32",
+        "wasm_bytes": 173
+      }
+    ],
+    "scalar_loop_outputs": {
+      "input_0": 4,
+      "input_4294967292": 0,
+      "input_4294967295": 3
+    },
+    "bounded_loop_candidate": {
+      "verified": true,
+      "debug_length_bytes": 3058,
+      "debug_sha256": "c9178b3932264f968d944a76661b2c6953e6c25ef792929ca2549b4c94ac501b",
+      "wasm_bytes": 1650,
+      "wasm_sha256": "69205701eb9b98e183278bd7f83863aefbf6dc2ea311a3569431dae4b5c8a365"
+    },
+    "zero_loop_wasm": {
+      "bytes": 46,
+      "sha256": "2484d761bc265c997b9a4559594186e45f314b8b517967ae4ec1c2419acf15be"
+    },
+    "scalar_loop_wasm": {
+      "bytes": 173,
+      "sha256": "f9391190c69aa16585557fd99e8daa2bcee8a7e4491a2be39f3af2f8cb4a1a32"
+    }
+  },
+  "identities": {
+    "verifier_source_sha256_before": "f8e47763a2d9948d165df611a60de114f17d256df6aea9896c843470d986286b",
+    "verifier_source_sha256_after": "a612a7a2ac5e8d38bdb9078a9f3f06c373be96468c689bd3131ac0d761f38410",
+    "release_cli_sha256_before": "46a42681119843b6c56f6a76767fb3bcc8237b2628a3c8559e814394eaba77cc",
+    "release_cli_sha256_after": "888e618d2f4b03f77a9e0c5ebea91dd1601aeade948b6bd3919f898f91deef20",
+    "benchmark_executable_sha256_before": "c7565d62ac7c6f3ef577ab1a829124b17681c276a529a7653eb7a19520b830e1",
+    "benchmark_executable_sha256_after": "24eff7288d9299889cc8e1dad980829e3ffd40d1ce94156268987a1ae701c5fd",
+    "bounded_loop_fixture_sha256": "ed9d7534c285ee1d7ab3bb30cf020d92cb75ca31c9638fe3029d48051506d7ac"
+  },
+  "checks": {
+    "cargo_test_axiom_verify": {
+      "passed": 28,
+      "failed": 0
+    },
+    "cargo_test_axiom_project": {
+      "passed": 10,
+      "failed": 0
+    },
+    "cargo_test_workspace": {
+      "passed": 153,
+      "failed": 0
+    },
+    "cargo_check_axiom_verify": "PASS",
+    "cargo_fmt_all_check": "PASS",
+    "git_diff_check": "PASS",
+    "supplementary_clippy_workspace_all_targets_warnings_denied": {
+      "result": "FAIL; supplementary check, not an approved gate",
+      "diagnostics": [
+        "too_many_arguments on lower_bounded_loop",
+        "ptr_arg diagnostics on lower_bounded_loop index and accumulator &String parameters; baseline clippy result not measured"
+      ],
+      "action": "No lint-driven code changes were made; this refactor was kept limited to the approved extraction."
+    }
+  }
+}
