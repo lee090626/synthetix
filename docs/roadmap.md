@@ -30,6 +30,17 @@ WASM은 언어의 정체성이 아니라 검증된 순수 로직을 실행하는
 | **v4** | Synthetix의 증명 결과를 신뢰할 수 있게 만든다. |
 | **v5** | 검증된 코어와 웹·상태·effect·API 경계를 연결한다. |
 | **v6** | 증명 가능한 프로그램의 크기와 구조를 확장한다. |
+| **v7** | 같은 correctness를 더 빠르고 단순하게 만든다. |
+| **v8** | 큰 프로젝트에서도 변경된 부분만 정확하게 다시 계산하고 검증한다. |
+| **v9** | 어떤 source가 어떤 proof와 executable을 만들었는지 기계적으로 추적한다. |
+| **v10** | 언어와 도구가 발전해도 기존 사용자가 의존할 안정성 계약과 호환성 회귀 기준을 확정한다. |
+
+v7–v10의 detailed milestone, rationale, research gate, dependency map과 freeze
+기준은 [v7–v10 상세 로드맵](roadmap-v7-v10.md)에 있다.
+Rust API 안정성은 외부 consumer 근거가 확인될 때 R10-A — Stable Rust Library API
+Research Gate에서만 평가하며, 현재 numbered milestone에는 포함하지 않는다.
+v10의 마지막 단계는 v10.7 Compatibility Regression Corpus → v10.8 Release
+Qualification → v10.9 Stable Language & Ecosystem Contract Freeze 순서다.
 
 기능 수보다 soundness와 명확한 verification boundary를 우선한다. 서버,
 DB, 인증 내부까지 Synthetix가 증명하는 것은 목표가 아니다.
@@ -48,19 +59,30 @@ DB, 인증 내부까지 Synthetix가 증명하는 것은 목표가 아니다.
 | v6.1 | 제한된 배열 완료 |
 | v6.2 | 제한된 반복문 완료 |
 | v6.3 | 구조적 재귀 완료 |
-| v6.4 | 검증된 Collection: 필요 근거 부족으로 보류 (DEFERRED) |
+| v6.4 | 검증된 Collection: 현 workload에 별도 필요 없음 (NOT NEEDED) |
 | v6.5 | 대규모 Modular Proof cache/invalidation 완료 |
 | v6.6 | budget 실패 뒤 proof-checked fallback과 benchmark 계측 완료 |
-| v6.7 | WASI/Node/Edge 제품 수요 없음 (DEFERRED) |
+| v6.7 | WASI/Node/Edge 제품 수요 없음 (NOT NEEDED) |
 | v6.8 | extern effect와 unverified trust boundary 완료 |
 | v6.9 | Freeze 완료: native CLI 4개 플랫폼 검증 완료 |
+| v7.0 | PASS: clean performance/architecture baseline ([결과](v7-benchmark-baseline.md)) |
+| v7.1 | PASS: bounded synthesis hot path ([비교](v7.1-benchmark.md)) |
+| v7.2 | PASS: verifier query reuse and boundaries ([비교](v7.2-benchmark.md)) |
+| v7.3 | PASS: process-local proof cache correctness; runtime optimization NOT NEEDED ([결과](v7.3-benchmark.md)) |
+| v7.4 | PASS: private bounded-loop lowering extraction; runtime optimization NOT NEEDED ([결과](v7.4-benchmark.md)) |
+| v7.5 | PASS: runtime memory optimization NOT NEEDED ([결과](v7.5-benchmark.md)) |
+| v7.6 | PASS: WASM/browser bundle-size gate ([결과](v7.6-benchmark.md)) |
+| v7.7 | PASS: CLI diagnostics and documentation gate ([결과](v7.7-benchmark.md)) |
+| v7.8 | PASS: four-platform CLI and VSIX qualification ([결과](v7.8-benchmark.md)) |
+| v7.9 | IN PROGRESS: local regression PASS; final-source four-platform gate pending ([근거](v7.9-benchmark.md)) |
 
 v4.9와 v5.9는 각각 proof와 application 경계를 동결했다. v6.0 benchmark는
 검증된 배열 입력이 거부되는 expressiveness 경계를 재현했고, v6.1은 앱
 `List`가 아닌 최대 16개 원소의 고정 증명 입력으로만 이를 확장했다. v6.3은
 bounded loop와 별개로 제한된 단일 함수 self-recursion만 정적으로 펼친다.
 v6.4는 현재 bounded array/loop가 sum/fold와 search를 표현함을 확인했고,
-추가 dynamic collection semantics를 요구하는 실제 workload가 없어 보류했다.
+추가 dynamic collection semantics를 요구하는 실제 workload가 없어 NOT NEEDED로
+판정했다.
 v6.5는 `axiom dev`의 process-local proof cache에서 정확히 파싱한 source bytes,
 semantics version, synthesis 설정, dependency key를 묶어 VERIFIED 후보만 재사용하고,
 변경된 contract와 그 caller만 다시 검증한다. 조건부 v6.6은 benchmark에서 병목을
@@ -68,8 +90,8 @@ semantics version, synthesis 설정, dependency key를 묶어 VERIFIED 후보만
 source-derived 후보로 구제했다. 추가 검색 기능이나 budget 증가는 하지 않았다.
 v6.7 검토에서는 delivered runtime이 browser/WASM이고 Node.js는
 integration/benchmark test host임을 확인했다. WASI/Node/Edge deployment에 대한
-실제 제품 요구가 없어 새 target은 보류한다. v6.8은 proof artifact에서 검증된
-WASM contract와 host가 제공하는 미검증 extern 구현을 분리하고, typed effect와
+실제 제품 요구가 없어 새 target은 NOT NEEDED로 판정했다. v6.8은 proof artifact에서
+검증된 WASM contract와 host가 제공하는 미검증 extern 구현을 분리하고, typed effect와
 명시적 가정 및 audit 미제공 상태를 기록한다. v6.9는 release regression을 고정하고,
 commit `2e355cb91c872963048fe6a6dd167be75568e469`의 [GitHub Actions run]
 (36029482437)에서 Linux x64, Windows x64, macOS arm64, macOS x64 native CLI
@@ -1090,7 +1112,7 @@ v6의 loop, recursion, array, map, set은 단순한 문법 추가가 아니다. 
 
 ### v6.4 구현 기록
 
-상태: **DEFERRED — 현재 근거로 별도 verified collection이 필요하지 않음**
+상태: **NOT NEEDED — 현재 workload에 별도 verified collection이 필요하지 않음**
 
 - v6.0 benchmark의 verified-list aggregation 사례는 입력 type boundary에서
   거부됐다. v6.1의 고정 배열과 v6.2의 bounded loop 뒤에는 sum/fold가
@@ -1172,7 +1194,7 @@ milestone gate: `cargo test --workspace` 145개,
 | 의존성 | v4.8 backend conformance와 실제 배포 수요가 필요하다. |
 | 범위 밖 | WASM을 버리고 JS/TypeScript 생성으로 방향을 바꾸는 것. |
 
-상태: **DEFERRED**. Product-facing runtime은 browser의 generated WASM 경로다.
+상태: **NOT NEEDED**. Product-facing runtime은 browser의 generated WASM 경로다.
 현재 Node.js 사용은 integration/benchmark에서 browser bundle을 실행하는 test
 host이며, WASI나 별도 Node/Edge target의 배포 요구를 증명하지 않는다. 실제
 deployment consumer가 생길 때 필요한 target 하나를 선택하고 conformance를
@@ -1242,9 +1264,10 @@ application runtime 오류는 proof counterexample가 아니다. 외부 구현�
    것처럼 Z3/WASM proof type이 아니라 application runtime data이며, 새
    v5.0에서 이 경계를 공식적으로 재확인한다.
 
-따라서 이 문서는 기존 phase 체크리스트를 대체하는 **공식 v4~v6 방향 문서**다.
+이 문서는 v4~v6의 결정과 구현 기록을 보존하고, 현재 상태와 major 방향을 요약한다.
+v7~v10의 milestone 실행 기준은 별도 [상세 roadmap](roadmap-v7-v10.md)에 둔다.
 `docs/v2.md`, `docs/v3.md`, `docs/semantics.md`, `docs/architecture.md`는
-각 버전의 상세 사양과 현재 구현 경계를 설명하는 하위 문서로 계속 사용한다.
+각 버전의 사양과 구현 경계를 설명하는 문서로 유지한다.
 
 ## 현재 상태
 
@@ -1254,10 +1277,14 @@ v5.4 Browser Effect와 Persistence, v5.5 External Adapter, v5.6 Async와 실패
 흐름, v5.7 Web Integration Test, v5.8 Packaging과 Deployment, v5.9 Freeze,
 v6.0 Scale Benchmark, v6.1 제한된 배열, v6.2 제한된 반복문, v6.3 구조적
 재귀, v6.5 대규모 Modular Proof, v6.8 FFI trust boundary가 완료되었고 v6.4 검증된 Collection은
-근거에 따라 보류되었다. v6.6은 같은 bounded search에서 세 measured resource
-limit 사례를 proof-checked fallback으로 구제했다. v6.7 추가 runtime target은
-현재 제품 수요가 없어 보류했다. v6.9 Freeze는 native CLI matrix와 release
-regression 검증을 마쳤다.
+현재 workload에 필요하지 않아 NOT NEEDED로 판정됐다. v6.6은 같은 bounded search에서
+세 measured resource limit 사례를 proof-checked fallback으로 구제했다. v6.7 추가
+runtime target은 현재 제품 수요가 없어 NOT NEEDED로 판정됐다. v6.9 Freeze는 native
+CLI matrix와 release regression 검증을 마쳤다. v7.0 clean performance/architecture
+baseline, v7.1 bounded synthesis hot path, v7.2 verifier query reuse, v7.3 process-local
+proof cache, v7.4 core lowering refactor, v7.5 memory gate, v7.6 WASM/browser bundle,
+v7.7 CLI/docs, v7.8 four-platform qualification은 결과 문서에 따라 PASS다. v7.9 Freeze
+검증이 진행 중이며, v8–v10 구현은 시작하지 않았다.
 
 ```text
 v4.1 완료
@@ -1283,12 +1310,22 @@ v4.1 완료
   → v6.1 완료
   → v6.2 완료
   → v6.3 완료
-  → v6.4 DEFERRED
+  → v6.4 NOT NEEDED
   → v6.5 완료
   → v6.6 완료
-  → v6.7 DEFERRED
+  → v6.7 NOT NEEDED
   → v6.8 완료
   → v6.9 완료
+  → v7.0 PASS
+  → v7.1 PASS
+  → v7.2 PASS
+  → v7.3 PASS
+  → v7.4 PASS
+  → v7.5 PASS
+  → v7.6 PASS
+  → v7.7 PASS
+  → v7.8 PASS
+  → v7.9 Freeze 검증 중
 ```
 
 v4.9에서 의미론, 결과 상태, supported grammar, negative fixture, release

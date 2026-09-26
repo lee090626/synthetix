@@ -76,12 +76,16 @@ pub enum PreconditionResult {
 /// do not collect it, so production verification does not pay the timing cost.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct VerificationMetrics {
+    pub precondition_check_invocations: usize,
+    pub precondition_translation_time_ns: u128,
     pub solver_invocations: usize,
     pub solver_time_ns: u128,
 }
 
 impl VerificationMetrics {
     pub fn merge(&mut self, other: Self) {
+        self.precondition_check_invocations += other.precondition_check_invocations;
+        self.precondition_translation_time_ns += other.precondition_translation_time_ns;
         self.solver_invocations += other.solver_invocations;
         self.solver_time_ns += other.solver_time_ns;
     }
@@ -116,10 +120,22 @@ fn check_preconditions_inner(
     contract: &Contract,
     metrics: &mut Option<&mut VerificationMetrics>,
 ) -> Result<PreconditionResult, String> {
+    if let Some(metrics) = metrics.as_deref_mut() {
+        metrics.precondition_check_invocations += 1;
+    }
+    let setup_started = metrics.as_ref().is_some().then(Instant::now);
     let args = symbolic_args(contract)?;
     let result = BV::new_const("__axiom_result", 32);
+    if let (Some(metrics), Some(started)) = (metrics.as_deref_mut(), setup_started) {
+        metrics.precondition_translation_time_ns += started.elapsed().as_nanos();
+    }
     for clause in &contract.requires {
-        let defined = spec_definedness(clause, contract, &args, &result, &HashMap::new())?;
+        let translation_started = metrics.as_ref().is_some().then(Instant::now);
+        let defined_result = spec_definedness(clause, contract, &args, &result, &HashMap::new());
+        if let (Some(metrics), Some(started)) = (metrics.as_deref_mut(), translation_started) {
+            metrics.precondition_translation_time_ns += started.elapsed().as_nanos();
+        }
+        let defined = defined_result?;
         require_defined_when(
             contract,
             &args,
@@ -130,7 +146,12 @@ fn check_preconditions_inner(
             "requires clause",
         )?;
     }
-    let requires = preconditions_to_bool(contract, &args, &result)?;
+    let translation_started = metrics.as_ref().is_some().then(Instant::now);
+    let requires_result = preconditions_to_bool(contract, &args, &result);
+    if let (Some(metrics), Some(started)) = (metrics.as_deref_mut(), translation_started) {
+        metrics.precondition_translation_time_ns += started.elapsed().as_nanos();
+    }
+    let requires = requires_result?;
     let solver = Solver::new();
     constrain_bool_parameters(&solver, contract, &args);
     solver.assert(&requires);
@@ -670,11 +691,12 @@ fn lower_implementation_value(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_bounded_loop(
-    index: &String,
+    index: &str,
     start: &u32,
     end: &u32,
-    accumulator: &String,
+    accumulator: &str,
     initial: &SpecExpr,
     invariant: &SpecExpr,
     body: &SpecExpr,
@@ -687,20 +709,20 @@ fn lower_bounded_loop(
         lower_implementation_value(initial, contract, types, values, recursion_depth)?;
     let accumulator_type = axiom_parser::type_of_expr(initial, types, None)?;
     let mut loop_types = types.clone();
-    loop_types.insert(index.clone(), Type::U32);
-    loop_types.insert(accumulator.clone(), accumulator_type);
+    loop_types.insert(index.to_owned(), Type::U32);
+    loop_types.insert(accumulator.to_owned(), accumulator_type);
     let mut loop_defined = lowered_defined(&current);
 
     for iteration in *start..*end {
         let mut loop_values = values.clone();
         loop_values.insert(
-            index.clone(),
+            index.to_owned(),
             LoweredImplementation::Scalar {
                 expr: Expr::Const(iteration),
                 defined: Expr::Const(1),
             },
         );
-        loop_values.insert(accumulator.clone(), current.clone());
+        loop_values.insert(accumulator.to_owned(), current.clone());
 
         let invariant_value = lower_implementation_value(
             invariant,
@@ -725,13 +747,13 @@ fn lower_bounded_loop(
 
     let mut final_values = values.clone();
     final_values.insert(
-        index.clone(),
+        index.to_owned(),
         LoweredImplementation::Scalar {
             expr: Expr::Const(*end),
             defined: Expr::Const(1),
         },
     );
-    final_values.insert(accumulator.clone(), current.clone());
+    final_values.insert(accumulator.to_owned(), current.clone());
     let final_invariant = lower_implementation_value(
         invariant,
         contract,
@@ -2007,6 +2029,21 @@ mod tests {
             check_preconditions(&contract).unwrap(),
             PreconditionResult::Satisfiable
         );
+    }
+
+    #[test]
+    fn precondition_metrics_separate_translation_from_solver_checks() {
+        let contract =
+            parse("contract guarded(x: u32) -> u32 { requires x > 0; ensures result == x; }")
+                .unwrap();
+
+        let (result, metrics) = check_preconditions_with_metrics(&contract).unwrap();
+
+        assert_eq!(result, PreconditionResult::Satisfiable);
+        assert_eq!(metrics.precondition_check_invocations, 1);
+        assert!(metrics.solver_invocations > metrics.precondition_check_invocations);
+        assert!(metrics.precondition_translation_time_ns > 0);
+        assert!(metrics.solver_time_ns > 0);
     }
 
     #[test]

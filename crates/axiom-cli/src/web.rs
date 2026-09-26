@@ -1938,6 +1938,104 @@ mod tests {
     }
 
     #[test]
+    fn proof_cache_keeps_independent_entry_across_remove_readd_and_source_edit() {
+        fn wasm_bytes(compiled: &[CompiledFunction]) -> Vec<u8> {
+            let mut exports = Vec::with_capacity(compiled.len() * 2);
+            for function in compiled {
+                exports.push((function.name.as_str(), &function.candidate, function.params));
+                if let (Some(requires), Some(name)) =
+                    (&function.requires, &function.requires_export)
+                {
+                    exports.push((name.as_str(), requires, function.params));
+                }
+            }
+            axiom_wasm::emit_functions(&exports).unwrap()
+        }
+
+        fn assert_clean_equivalent(
+            config: &Path,
+            cached: &[CompiledFunction],
+            options: axiom_synth::SynthesisOptions,
+        ) {
+            let mut clean_cache = VerificationCache::default();
+            let clean = compile_cached(
+                config,
+                &mut clean_cache,
+                options,
+                VERIFIED_SEMANTICS_VERSION,
+            )
+            .unwrap();
+            assert_eq!(
+                cached
+                    .iter()
+                    .map(|function| (&function.name, &function.candidate))
+                    .collect::<Vec<_>>(),
+                clean
+                    .iter()
+                    .map(|function| (&function.name, &function.candidate))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(wasm_bytes(cached), wasm_bytes(&clean));
+        }
+
+        let root = temp_dir("proof-cache-remove-readd");
+        let config = write_import_graph(&root);
+        let entry = root.join("entry.ax");
+        let independent = root.join("independent.ax");
+        let independent_source =
+            "export contract independent(x: u32) -> u32 { ensures result == x; }\n";
+        let options = axiom_synth::SynthesisOptions::default();
+        let mut cache = VerificationCache::default();
+
+        compile_cached(&config, &mut cache, options, VERIFIED_SEMANTICS_VERSION).unwrap();
+        assert_eq!(cache.entries.len(), 5);
+
+        fs::write(
+            &entry,
+            "import { a } from \"./a.ax\";\ncontract root(x: u32) -> u32 { ensures result == a(x); }\n",
+        )
+        .unwrap();
+        fs::remove_file(&independent).unwrap();
+        let absent =
+            compile_cached(&config, &mut cache, options, VERIFIED_SEMANTICS_VERSION).unwrap();
+        assert_eq!(absent.len(), 4);
+        assert_eq!(cache.stats.hits, 3);
+        assert_eq!(cache.stats.misses, 1);
+        assert_eq!(cache.stats.invalidations, 1);
+        assert_eq!(cache.entries.len(), 5);
+        assert_clean_equivalent(&config, &absent, options);
+
+        fs::write(&independent, independent_source).unwrap();
+        fs::write(
+            &entry,
+            "import { a } from \"./a.ax\";\nimport { independent } from \"./independent.ax\";\ncontract root(x: u32) -> u32 { ensures result == a(x); }\n",
+        )
+        .unwrap();
+        let readded =
+            compile_cached(&config, &mut cache, options, VERIFIED_SEMANTICS_VERSION).unwrap();
+        assert_eq!(cache.stats.hits, 4);
+        assert_eq!(cache.stats.misses, 1);
+        assert_eq!(cache.stats.invalidations, 1);
+        assert_eq!(cache.entries.len(), 5);
+        assert_clean_equivalent(&config, &readded, options);
+
+        fs::write(
+            &independent,
+            "export contract independent(x: u32) -> u32 { ensures result == x +% 3; }\n",
+        )
+        .unwrap();
+        let edited =
+            compile_cached(&config, &mut cache, options, VERIFIED_SEMANTICS_VERSION).unwrap();
+        assert_eq!(cache.stats.hits, 4);
+        assert_eq!(cache.stats.misses, 1);
+        assert_eq!(cache.stats.invalidations, 1);
+        assert_eq!(cache.entries.len(), 5);
+        assert_clean_equivalent(&config, &edited, options);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn proof_cache_does_not_store_failed_or_partial_verification() {
         let root = temp_dir("proof-cache-failure");
         fs::create_dir_all(&root).unwrap();
