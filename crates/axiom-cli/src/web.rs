@@ -73,22 +73,24 @@ struct DevState {
 
 pub fn build(config_path: &Path, output_dir: &Path) -> Result<BuildResult, String> {
     let mut cache = VerificationCache::default();
-    build_with_cache(config_path, output_dir, &mut cache)
+    build_with_cache(config_path, output_dir, &mut cache, false)
 }
 
 fn build_with_cache(
     config_path: &Path,
     output_dir: &Path,
     cache: &mut VerificationCache,
+    dev_runtime: bool,
 ) -> Result<BuildResult, String> {
     let project = axiom_project::load(config_path)?;
-    build_project(&project, output_dir, cache)
+    build_project(&project, output_dir, cache, dev_runtime)
 }
 
 fn build_project(
     project: &Project,
     output_dir: &Path,
     cache: &mut VerificationCache,
+    dev_runtime: bool,
 ) -> Result<BuildResult, String> {
     let compiled = compile_contracts_with_cache(
         project,
@@ -126,7 +128,7 @@ fn build_project(
     )?;
     write_file(
         &output_dir.join("app.js"),
-        page_javascript(project).as_bytes(),
+        page_javascript(project, dev_runtime).as_bytes(),
     )?;
     write_file(&output_dir.join("app.css"), DEFAULT_CSS.as_bytes())?;
     write_file(
@@ -167,7 +169,7 @@ pub fn dev(config_path: &Path, port: u16, open_browser: bool, once: bool) -> Res
         .ok_or_else(|| "cannot determine project root".to_string())?;
     let output_dir = root.join(".synthetix").join("dev");
     let mut cache = VerificationCache::default();
-    let initial = build_with_cache(config_path, &output_dir, &mut cache)?;
+    let initial = build_with_cache(config_path, &output_dir, &mut cache, true)?;
     if once {
         return Ok(());
     }
@@ -472,7 +474,7 @@ fn page_html(project: &Project) -> String {
     )
 }
 
-fn page_javascript(project: &Project) -> String {
+fn page_javascript(project: &Project, dev_runtime: bool) -> String {
     let page = project
         .pages
         .first()
@@ -1126,9 +1128,14 @@ boot().catch((error) => {
   reportApplicationError(error);
 });
 
+"#
+    .to_string();
+    if dev_runtime {
+        script.push_str(
+            r#"
 // Local development uses polling instead of a WebSocket so the dev server stays dependency-free.
 let __devVersion = null;
-    setInterval(async () => {
+setInterval(async () => {
   try {
     const response = await fetch('/__synthetix/version', { cache: 'no-store' });
     if (!response.ok) return;
@@ -1142,8 +1149,9 @@ let __devVersion = null;
     errorNode.textContent = error;
   } catch (_) {}
 }, 500);
-"#
-    .to_string();
+"#,
+        );
+    }
     script = script
         .replace("__PAGE_JSON__", &page)
         .replace("__CONTRACTS__", &contracts)
@@ -1622,7 +1630,7 @@ fn rebuild_if_changed(
     *watched_files = project.files.clone();
     watched_files.push(config_path.to_path_buf());
     let mut guard = state.lock().expect("dev state lock poisoned");
-    match build_project(&project, output_dir, cache) {
+    match build_project(&project, output_dir, cache, true) {
         Ok(result) => {
             guard.version = guard.version.saturating_add(1);
             guard.error = None;
@@ -2052,11 +2060,14 @@ mod tests {
             files: Vec::new(),
         };
 
-        let javascript = page_javascript(&project);
+        let javascript = page_javascript(&project, false);
         assert!(javascript.contains("WebAssembly.instantiate(bytes, {})"));
         assert!(javascript.contains("callContract(element.function"));
         assert!(javascript.contains("requestEffect(request, targetState"));
         assert!(javascript.contains("fetch('./app.wasm')"));
+        assert!(!javascript.contains("/__synthetix/version"));
+        assert!(!javascript.contains("/__synthetix/error"));
+        assert!(!javascript.contains("setInterval("));
     }
 
     #[test]
@@ -2177,7 +2188,11 @@ mod tests {
         )
         .unwrap();
         let mut cache = VerificationCache::default();
-        build_with_cache(&config, &output_dir, &mut cache).unwrap();
+        build_with_cache(&config, &output_dir, &mut cache, true).unwrap();
+        let dev_javascript = std::fs::read_to_string(output_dir.join("app.js")).unwrap();
+        assert!(dev_javascript.contains("/__synthetix/version"));
+        assert!(dev_javascript.contains("/__synthetix/error"));
+        assert!(dev_javascript.contains("}, 500);"));
         let project = axiom_project::load(&config).unwrap();
         let mut watched_files = project.files;
         watched_files.push(config.clone());
@@ -2547,7 +2562,7 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
             }],
             files: Vec::new(),
         };
-        let javascript = page_javascript(&project);
+        let javascript = page_javascript(&project, true);
         let wasm = axiom_wasm::emit_functions(&exports).unwrap();
         let cases = [
             ("mul8", [5, 0]),
