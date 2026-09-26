@@ -340,81 +340,19 @@ fn lower_implementation_value(
             initial,
             invariant,
             body,
-        } => {
-            let mut current =
-                lower_implementation_value(initial, contract, types, values, recursion_depth)?;
-            let accumulator_type = axiom_parser::type_of_expr(initial, types, None)?;
-            let mut loop_types = types.clone();
-            loop_types.insert(index.clone(), Type::U32);
-            loop_types.insert(accumulator.clone(), accumulator_type);
-            let mut loop_defined = lowered_defined(&current);
-
-            for iteration in *start..*end {
-                let mut loop_values = values.clone();
-                loop_values.insert(
-                    index.clone(),
-                    LoweredImplementation::Scalar {
-                        expr: Expr::Const(iteration),
-                        defined: Expr::Const(1),
-                    },
-                );
-                loop_values.insert(accumulator.clone(), current.clone());
-
-                let invariant_value = lower_implementation_value(
-                    invariant,
-                    contract,
-                    &loop_types,
-                    &loop_values,
-                    recursion_depth,
-                )?;
-                let LoweredImplementation::Scalar {
-                    expr: invariant_expr,
-                    defined: invariant_defined,
-                } = invariant_value
-                else {
-                    return Err("loop invariant must be boolean".to_string());
-                };
-                loop_defined = and_expr(loop_defined, and_expr(invariant_defined, invariant_expr));
-
-                current = lower_implementation_value(
-                    body,
-                    contract,
-                    &loop_types,
-                    &loop_values,
-                    recursion_depth,
-                )?;
-                loop_defined = and_expr(loop_defined, lowered_defined(&current));
-            }
-
-            let mut final_values = values.clone();
-            final_values.insert(
-                index.clone(),
-                LoweredImplementation::Scalar {
-                    expr: Expr::Const(*end),
-                    defined: Expr::Const(1),
-                },
-            );
-            final_values.insert(accumulator.clone(), current.clone());
-            let final_invariant = lower_implementation_value(
-                invariant,
-                contract,
-                &loop_types,
-                &final_values,
-                recursion_depth,
-            )?;
-            let LoweredImplementation::Scalar {
-                expr: final_invariant_expr,
-                defined: final_invariant_defined,
-            } = final_invariant
-            else {
-                return Err("loop invariant must be boolean".to_string());
-            };
-            loop_defined = and_expr(
-                loop_defined,
-                and_expr(final_invariant_defined, final_invariant_expr),
-            );
-            Ok(with_defined(current, loop_defined))
-        }
+        } => lower_bounded_loop(
+            index,
+            start,
+            end,
+            accumulator,
+            initial,
+            invariant,
+            body,
+            contract,
+            types,
+            values,
+            recursion_depth,
+        ),
         SpecExpr::If(condition, then_branch, else_branch) => {
             let condition =
                 lower_implementation_value(condition, contract, types, values, recursion_depth)?;
@@ -730,6 +668,89 @@ fn lower_implementation_value(
             Err("fn return expression is outside the scalar boundary".to_string())
         }
     }
+}
+
+fn lower_bounded_loop(
+    index: &String,
+    start: &u32,
+    end: &u32,
+    accumulator: &String,
+    initial: &SpecExpr,
+    invariant: &SpecExpr,
+    body: &SpecExpr,
+    contract: &Contract,
+    types: &HashMap<String, Type>,
+    values: &HashMap<String, LoweredImplementation>,
+    recursion_depth: u32,
+) -> Result<LoweredImplementation, String> {
+    let mut current =
+        lower_implementation_value(initial, contract, types, values, recursion_depth)?;
+    let accumulator_type = axiom_parser::type_of_expr(initial, types, None)?;
+    let mut loop_types = types.clone();
+    loop_types.insert(index.clone(), Type::U32);
+    loop_types.insert(accumulator.clone(), accumulator_type);
+    let mut loop_defined = lowered_defined(&current);
+
+    for iteration in *start..*end {
+        let mut loop_values = values.clone();
+        loop_values.insert(
+            index.clone(),
+            LoweredImplementation::Scalar {
+                expr: Expr::Const(iteration),
+                defined: Expr::Const(1),
+            },
+        );
+        loop_values.insert(accumulator.clone(), current.clone());
+
+        let invariant_value = lower_implementation_value(
+            invariant,
+            contract,
+            &loop_types,
+            &loop_values,
+            recursion_depth,
+        )?;
+        let LoweredImplementation::Scalar {
+            expr: invariant_expr,
+            defined: invariant_defined,
+        } = invariant_value
+        else {
+            return Err("loop invariant must be boolean".to_string());
+        };
+        loop_defined = and_expr(loop_defined, and_expr(invariant_defined, invariant_expr));
+
+        current =
+            lower_implementation_value(body, contract, &loop_types, &loop_values, recursion_depth)?;
+        loop_defined = and_expr(loop_defined, lowered_defined(&current));
+    }
+
+    let mut final_values = values.clone();
+    final_values.insert(
+        index.clone(),
+        LoweredImplementation::Scalar {
+            expr: Expr::Const(*end),
+            defined: Expr::Const(1),
+        },
+    );
+    final_values.insert(accumulator.clone(), current.clone());
+    let final_invariant = lower_implementation_value(
+        invariant,
+        contract,
+        &loop_types,
+        &final_values,
+        recursion_depth,
+    )?;
+    let LoweredImplementation::Scalar {
+        expr: final_invariant_expr,
+        defined: final_invariant_defined,
+    } = final_invariant
+    else {
+        return Err("loop invariant must be boolean".to_string());
+    };
+    loop_defined = and_expr(
+        loop_defined,
+        and_expr(final_invariant_defined, final_invariant_expr),
+    );
+    Ok(with_defined(current, loop_defined))
 }
 
 fn lowered_defined(value: &LoweredImplementation) -> Expr {
