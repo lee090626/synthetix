@@ -55,6 +55,64 @@ fn app_run_rejects_text_instead_of_coercing_it_to_a_core_integer() {
 }
 
 #[test]
+fn build_parser_failure_report_preserves_v4_diagnostic_contract() {
+    let root = std::env::temp_dir().join(format!(
+        "synthetix-parser-report-{}",
+        SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let source = root.join("invalid.ax");
+    let report = root.join("report.json");
+    fs::write(
+        &source,
+        "contract broken(x: u32) -> u32 {\n  ensures result == ;\n}\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_axiom"))
+        .args([
+            "build",
+            source.to_str().unwrap(),
+            "--report",
+            report.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let artifact: serde_json::Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
+    assert_eq!(artifact["version"], 4);
+    assert_eq!(artifact["command"], "build");
+    assert_eq!(artifact["contract_check"], "INVALID");
+    assert_eq!(artifact["diagnostic"], serde_json::Value::Null);
+    let reason = artifact["reason"].as_str().unwrap();
+    assert!(reason.starts_with("INVALID: 2:21:"), "reason: {reason}");
+    for field in [
+        "source",
+        "semantics_version",
+        "contract_check",
+        "synthesis_result",
+        "proof_result",
+        "diagnostic",
+        "reason",
+        "next_action",
+        "verified",
+        "synthesis_bounds",
+        "candidates_checked",
+        "timed_out",
+        "wasm_hash",
+    ] {
+        assert!(
+            artifact.get(field).is_some(),
+            "missing v4 report field {field}"
+        );
+    }
+}
+
+#[test]
 fn v5_release_path_keeps_proof_wasm_state_effect_and_static_config_together() {
     let root = std::env::temp_dir().join(format!(
         "synthetix-v5-release-{}",
