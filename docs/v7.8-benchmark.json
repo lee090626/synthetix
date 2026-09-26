@@ -1,7 +1,7 @@
 {
   "milestone": "v7.8",
-  "status": "INCOMPLETE_LOCAL_GATES_PASS",
-  "status_reason": "Local locked build/regression and macOS arm64 native/static/package checks passed. v7.8 requires real native CLI and static release smoke evidence for Linux x64, Windows x64, macOS arm64, and macOS x64 plus a fresh four-platform VSIX; the other three runners and four-platform VSIX were not executed.",
+  "status": "PASS",
+  "status_reason": "Hosted workflow 36240302965 completed successfully at the pushed v7.8 validation commit. Workspace regression, all four native CLI/static release smokes, four-platform VSIX source/package hashes, and the Node activation smoke passed.",
   "date_utc": "2026-09-26",
   "repository": {
     "head_before_v7_8": "4f13d088ed0ab2c4c4249ef217b380a51de2a650",
@@ -392,16 +392,64 @@
     "live_vscode_ui": "NOT_RUN: activation check is the packaged Node harness.",
     "live_browser": "NOT_RUN: v6 static smoke uses Node, a local HTTP server, and a DOM/WASM shim."
   },
+  "hosted_evidence": {
+    "workflow_run": {
+      "run_id": 36240302965,
+      "url": "https://github.com/lee090626/synthetix/actions/runs/36240302965",
+      "event": "workflow_dispatch",
+      "branch": "release/v7.8.0",
+      "head_sha": "c2c74b314df3eef1761ee47adc6641ffd312a91c",
+      "conclusion": "success",
+      "workspace_tests": {
+        "command": "cargo test --locked --workspace",
+        "status": "PASS",
+        "passed": 147,
+        "failed": 0,
+        "non_empty_suites": 9,
+        "zero_test_suites": 7
+      }
+    },
+    "native_cli": {
+      "scenario": "check/build/run, expected UNSAT classifications and reports, and v6 array/loop/modular WASM/static smoke",
+      "platform_sha256": {
+        "linux-x64": "a526abc35bf66c20354126a6a9a91e5867a6d0e516d87d2512f4face94d79127",
+        "win32-x64": "bc2be27f1f6be0c3957d9da6f147981678768d7d0286c085b00583a9fe750994",
+        "darwin-arm64": "66e09ed843fdaa43606d91f44f148e7cdd7bbcd4c0ce423b8fd2b46ba8f4df03",
+        "darwin-x64": "3023ef250a8ce43dbf4654848a4ca92549760241d0a5ef4f8ce621931f225d97"
+      },
+      "source_package_hashes_match": true
+    },
+    "vsix": {
+      "filename": "synthetix-vscode-0.14.1.vsix",
+      "sha256": "52a3a104bac6bacf5fccbf35c69656930c3d68c2bbdd602dca54c38947b01221",
+      "actions_artifact_zip_sha256": "02a299d9c9be4e9076b0c9309590a8b610dfec8d872197ab1e8454a38f7df6f7",
+      "extension_js_source_package_sha256": "62d978abab8c182eb59ae1978553f21e649d0ff56f8c70419f73d79557e31f91",
+      "cli_source_package_sha256": {
+        "darwin-arm64": "66e09ed843fdaa43606d91f44f148e7cdd7bbcd4c0ce423b8fd2b46ba8f4df03",
+        "darwin-x64": "3023ef250a8ce43dbf4654848a4ca92549760241d0a5ef4f8ce621931f225d97",
+        "linux-x64": "a526abc35bf66c20354126a6a9a91e5867a6d0e516d87d2512f4face94d79127",
+        "win32-x64": "bc2be27f1f6be0c3957d9da6f147981678768d7d0286c085b00583a9fe750994"
+      },
+      "archive_integrity": "PASS",
+      "activation_smoke": "PASS: check-vsix.js ran the Node mock-VS-Code activation harness; live VS Code was not launched."
+    },
+    "release_actions": {
+      "create_release_job": "SKIPPED: run was a branch workflow_dispatch and release creation is tag-gated",
+      "tag_created": false,
+      "github_release_created_by_run": false,
+      "package_published": false
+    }
+  },
   "platform_gate": {
-    "linux-x64": "NOT_RUN",
-    "win32-x64": "NOT_RUN",
-    "darwin-arm64": "LOCAL_PASS; hosted matrix NOT_RUN",
-    "darwin-x64": "NOT_RUN",
-    "fresh_four_platform_vsix": "NOT_RUN",
-    "hosted_workflow_dispatch": "NOT_DISPATCHED",
-    "commit_or_push": "NOT_PERFORMED",
-    "v7_9": "NOT_STARTED",
+    "linux-x64": "PASS: hosted native CLI and static release smoke",
+    "win32-x64": "PASS: hosted native CLI and static release smoke",
+    "darwin-arm64": "PASS: hosted native CLI and static release smoke",
+    "darwin-x64": "PASS: hosted native CLI and static release smoke",
+    "fresh_four_platform_vsix": "PASS: extension and all four CLI source/package hashes; activation smoke",
+    "hosted_workflow_dispatch": "PASS: run 36240302965 concluded success",
+    "commit_or_push": "PASS: c2c74b314df3eef1761ee47adc6641ffd312a91c pushed to release/v7.8.0",
+    "v7_9": "IN_PROGRESS",
     "v8": "NOT_STARTED"
   },
-  "decision": "Do not mark v7.8 PASS or start v7.9 until all four real platform smokes and the four-platform VSIX hash/activation gate have evidence."
+  "decision": "v7.8 PASS; proceed with v7.9 Freeze verification. v8 remains NOT_STARTED."
 }
