@@ -59,8 +59,16 @@ struct Measurement {
     peak_sample_count: Option<usize>,
     synthesis_time_ms: Option<f64>,
     synthesis_non_solver_time_ms: Option<f64>,
+    instrumented_synthesis_time_ms: Option<f64>,
     candidate_generation_time_ms: Option<f64>,
     sample_generation_time_ms: Option<f64>,
+    typed_filter_time_ms: Option<f64>,
+    resource_estimation_time_ms: Option<f64>,
+    candidate_sort_time_ms: Option<f64>,
+    sample_evaluation_time_ms: Option<f64>,
+    other_search_residual_time_ms: Option<f64>,
+    precondition_check_invocation_count: Option<usize>,
+    precondition_translation_time_ms: Option<f64>,
     z3_verification_time_ms: Option<f64>,
     solver_invocation_count: Option<usize>,
     project_link_time_ms: Option<f64>,
@@ -423,6 +431,10 @@ fn run_synthesis_case(
             record.initial_sample_count = Some(metrics.initial_sample_count);
             record.peak_sample_count = Some(metrics.peak_sample_count);
             record.solver_invocation_count = Some(metrics.solver_invocations);
+            record.precondition_check_invocation_count =
+                Some(metrics.precondition_check_invocations);
+            record.precondition_translation_time_ms =
+                Some(metrics.precondition_translation_time_ns as f64 / 1e6);
             record.z3_verification_time_ms = Some(metrics.solver_time_ns as f64 / 1e6);
             record.peak_resource_estimate_bytes = Some(metrics.peak_resource_estimate_bytes);
             record.details = Some(format!(
@@ -460,6 +472,42 @@ fn run_synthesis_case(
             ) as f64
                 / 1e6,
         );
+        record.typed_filter_time_ms = Some(
+            median_u128(
+                &metric_runs
+                    .iter()
+                    .map(|m| m.typed_filter_time_ns)
+                    .collect::<Vec<_>>(),
+            ) as f64
+                / 1e6,
+        );
+        record.resource_estimation_time_ms = Some(
+            median_u128(
+                &metric_runs
+                    .iter()
+                    .map(|m| m.resource_estimation_time_ns)
+                    .collect::<Vec<_>>(),
+            ) as f64
+                / 1e6,
+        );
+        record.candidate_sort_time_ms = Some(
+            median_u128(
+                &metric_runs
+                    .iter()
+                    .map(|m| m.candidate_sort_time_ns)
+                    .collect::<Vec<_>>(),
+            ) as f64
+                / 1e6,
+        );
+        record.sample_evaluation_time_ms = Some(
+            median_u128(
+                &metric_runs
+                    .iter()
+                    .map(|m| m.sample_evaluation_time_ns)
+                    .collect::<Vec<_>>(),
+            ) as f64
+                / 1e6,
+        );
         record.sample_generation_time_ms = Some(
             median_u128(
                 &metric_runs
@@ -484,6 +532,21 @@ fn run_synthesis_case(
                 .map(|m| m.solver_invocations)
                 .collect::<Vec<_>>(),
         ));
+        record.precondition_check_invocation_count = Some(median_usize(
+            &metric_runs
+                .iter()
+                .map(|m| m.precondition_check_invocations)
+                .collect::<Vec<_>>(),
+        ));
+        record.precondition_translation_time_ms = Some(
+            median_u128(
+                &metric_runs
+                    .iter()
+                    .map(|m| m.precondition_translation_time_ns)
+                    .collect::<Vec<_>>(),
+            ) as f64
+                / 1e6,
+        );
         record.peak_resource_estimate_bytes = Some(
             metric_runs
                 .iter()
@@ -529,6 +592,24 @@ fn run_synthesis_case(
                 record.details.as_deref().unwrap_or_default()
             ));
         }
+        record.instrumented_synthesis_time_ms = Some(
+            median_u128(
+                &metric_runs
+                    .iter()
+                    .map(|metrics| metrics.total_synthesis_time_ns)
+                    .collect::<Vec<_>>(),
+            ) as f64
+                / 1e6,
+        );
+        record.other_search_residual_time_ms = Some(
+            median_u128(
+                &metric_runs
+                    .iter()
+                    .map(|metrics| metrics.other_search_residual_time_ns)
+                    .collect::<Vec<_>>(),
+            ) as f64
+                / 1e6,
+        );
     }
     record.total_time_ms = Some(median_duration_ns(&elapsed) as f64 / 1e6);
     record.synthesis_time_ms = record.total_time_ms;
@@ -569,8 +650,16 @@ fn blank_measurement(
         peak_sample_count: None,
         synthesis_time_ms: None,
         synthesis_non_solver_time_ms: None,
+        instrumented_synthesis_time_ms: None,
         candidate_generation_time_ms: None,
         sample_generation_time_ms: None,
+        typed_filter_time_ms: None,
+        resource_estimation_time_ms: None,
+        candidate_sort_time_ms: None,
+        sample_evaluation_time_ms: None,
+        other_search_residual_time_ms: None,
+        precondition_check_invocation_count: None,
+        precondition_translation_time_ms: None,
         z3_verification_time_ms: None,
         solver_invocation_count: None,
         project_link_time_ms: None,
@@ -1143,6 +1232,9 @@ fn run_call_precondition_diagnostic_case() -> Result<Measurement, String> {
     record.expression_node_count = Some(contract_expression_nodes(&linked.contract));
     record.parameter_count = Some(1);
     record.solver_invocation_count = Some(metrics.solver_invocations);
+    record.precondition_check_invocation_count = Some(metrics.precondition_check_invocations);
+    record.precondition_translation_time_ms =
+        Some(metrics.precondition_translation_time_ns as f64 / 1e6);
     record.z3_verification_time_ms = Some(metrics.solver_time_ns as f64 / 1e6);
     record.details = Some(format!(
         "callee={callee}; source_location=entry.ax:{}:{}; proof_result=none",

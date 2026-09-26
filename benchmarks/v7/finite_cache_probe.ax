@@ -1,0 +1,33 @@
+contract finite_cache_probe(x: u32, y: u32, z: u32, w: u32) -> u32 {
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    requires x == x && y == y && z == z && w == w;
+    ensures result == if x < y { x } else { y };
+}

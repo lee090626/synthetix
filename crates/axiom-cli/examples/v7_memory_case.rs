@@ -184,6 +184,7 @@ fn emit(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_with_metrics(
     scenario: &str,
     status: &str,
