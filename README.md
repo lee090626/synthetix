@@ -77,7 +77,8 @@ synthetix/
 ├── docs/
 │   ├── architecture.md    # Component responsibilities & design principles
 │   ├── semantics.md       # Bit-vector modulo 2^32 semantics
-│   ├── roadmap.md         # Official v4-v6 product and verification roadmap
+│   ├── roadmap.md         # Major direction and milestone summary
+│   ├── specs/             # Implementation and verification contracts
 │   ├── v4-migration.md    # v4 frozen boundary and migration notes
 │   └── setup.md           # Fresh-checkout setup and smoke test
 ├── crates/
@@ -138,7 +139,7 @@ The proof core supports pure `u32`, signed `i32`, and `bool` values with finite 
 v3.1 adds browser-side records, lists, text inputs, components, and explicit
 localStorage persistence around verified scalar reducers. See [the v2
 specification](docs/v2.md), [the v3 specification](docs/v3.md), and [the
-roadmap](docs/roadmap.md) for the web build boundary.
+v4-v7 record](docs/roadmap-v4-v7-record.md) for the web build boundary.
 
 For the browser workflow:
 

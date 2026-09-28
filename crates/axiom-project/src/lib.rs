@@ -64,6 +64,92 @@ pub struct Project {
     pub files: Vec<PathBuf>,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RetainedLoadStats {
+    pub modules_parsed: usize,
+    pub modules_reused: usize,
+    pub contracts_relinked: usize,
+    pub contracts_reused: usize,
+    pub pages_relinked: usize,
+    pub pages_reused: usize,
+    pub affected_modules: Vec<PathBuf>,
+}
+
+#[derive(Default, Clone)]
+pub struct RetainedProjectLoader {
+    state: Option<RetainedState>,
+    watch_paths: Vec<PathBuf>,
+}
+
+#[derive(Clone)]
+struct RetainedState {
+    config: ProjectConfig,
+    modules: HashMap<PathBuf, ModuleInfo>,
+    project: Project,
+}
+
+impl RetainedProjectLoader {
+    /// Paths observed during the most recent load attempt, including unresolved imports.
+    pub fn watch_paths(&self) -> &[PathBuf] {
+        &self.watch_paths
+    }
+
+    /// Loads a fresh project graph while retaining byte-identical parse and link products.
+    /// The ordinary `load` function remains the cold, stateless reference path.
+    pub fn load(
+        &mut self,
+        config_path: impl AsRef<Path>,
+    ) -> Result<(Project, RetainedLoadStats), String> {
+        self.watch_paths.clear();
+        push_watch_path(&mut self.watch_paths, config_path.as_ref().to_path_buf());
+        let config = parse_config(config_path.as_ref())?;
+        let previous = self.state.as_ref();
+        let mut modules = Vec::new();
+        let mut visiting = Vec::new();
+        let mut stats = RetainedLoadStats::default();
+        visit_module_retained(
+            &config.entry,
+            &mut modules,
+            &mut visiting,
+            previous.map(|state| &state.modules),
+            &mut stats,
+            &mut self.watch_paths,
+        )?;
+
+        let current_modules = modules
+            .iter()
+            .cloned()
+            .map(|module| (module.path.clone(), module))
+            .collect::<HashMap<_, _>>();
+        let mut affected = affected_modules(previous, &config, &current_modules);
+        let global_relink = previous.is_none_or(|state| {
+            global_declarations(&state.modules) != global_declarations(&current_modules)
+        });
+        if global_relink {
+            affected.extend(current_modules.keys().cloned());
+            if let Some(state) = previous {
+                affected.extend(state.modules.keys().cloned());
+            }
+        }
+        stats.affected_modules = affected.iter().cloned().collect();
+        stats.affected_modules.sort();
+
+        let project = link_project_retained(
+            config.clone(),
+            modules,
+            previous.map(|state| &state.project),
+            &affected,
+            &mut stats,
+        )?;
+        self.state = Some(RetainedState {
+            config,
+            modules: current_modules,
+            project: project.clone(),
+        });
+        Ok((project, stats))
+    }
+}
+
 impl Project {
     /// Verifies a linked contract against the project's closed contract summaries.
     pub fn verify_compositional(
@@ -382,14 +468,148 @@ fn visit_module(
     Ok(())
 }
 
-fn resolve_import(source: &Path, import: &Import) -> Result<PathBuf, String> {
-    let mut path = source
-        .parent()
-        .ok_or_else(|| format!("cannot determine parent of {}", source.display()))?
-        .join(&import.path);
-    if path.extension().is_none() {
-        path.set_extension("ax");
+fn visit_module_retained(
+    path: &Path,
+    modules: &mut Vec<ModuleInfo>,
+    visiting: &mut Vec<PathBuf>,
+    previous: Option<&HashMap<PathBuf, ModuleInfo>>,
+    stats: &mut RetainedLoadStats,
+    watch_paths: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    push_watch_path(watch_paths, path.to_path_buf());
+    let path = canonical(path)?;
+    push_watch_path(watch_paths, path.clone());
+    if modules.iter().any(|module| module.path == path) {
+        return Ok(());
     }
+    if visiting.contains(&path) {
+        let cycle = visiting
+            .iter()
+            .chain(std::iter::once(&path))
+            .map(|item| item.display().to_string())
+            .collect::<Vec<_>>()
+            .join(" -> ");
+        return Err(format!("circular import: {cycle}"));
+    }
+
+    visiting.push(path.clone());
+    let source = fs::read_to_string(&path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let source_bytes = source.as_bytes();
+    let cached = previous
+        .and_then(|cache| cache.get(&path))
+        .filter(|module| module.source_contents.as_ref() == source_bytes);
+    let (module, source_contents) = if let Some(cached) = cached {
+        stats.modules_reused += 1;
+        (cached.module.clone(), Arc::clone(&cached.source_contents))
+    } else {
+        stats.modules_parsed += 1;
+        let module = axiom_parser::parse_module(&source)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        (module, Arc::<[u8]>::from(source_bytes))
+    };
+    for import in &module.imports {
+        push_watch_path(watch_paths, import_candidate_path(&path, import)?);
+        let imported = resolve_import(&path, import)?;
+        visit_module_retained(&imported, modules, visiting, previous, stats, watch_paths)?;
+    }
+    visiting.pop();
+    modules.push(ModuleInfo {
+        path,
+        module,
+        source_contents,
+    });
+    Ok(())
+}
+
+fn push_watch_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.contains(&path) {
+        paths.push(path);
+    }
+}
+
+fn affected_modules(
+    previous: Option<&RetainedState>,
+    config: &ProjectConfig,
+    current: &HashMap<PathBuf, ModuleInfo>,
+) -> HashSet<PathBuf> {
+    let Some(previous) = previous else {
+        return current.keys().cloned().collect();
+    };
+    let old = &previous.modules;
+    let mut affected = HashSet::new();
+    for (path, module) in current {
+        if old
+            .get(path)
+            .is_none_or(|cached| cached.source_contents.as_ref() != module.source_contents.as_ref())
+        {
+            affected.insert(path.clone());
+        }
+    }
+    affected.extend(
+        old.keys()
+            .filter(|path| !current.contains_key(*path))
+            .cloned(),
+    );
+    if previous.config.entry != config.entry {
+        if let Ok(path) = canonical(&previous.config.entry) {
+            affected.insert(path);
+        }
+        if let Ok(path) = canonical(&config.entry) {
+            affected.insert(path);
+        }
+    }
+
+    let mut reverse = HashMap::<PathBuf, HashSet<PathBuf>>::new();
+    for modules in [old, current] {
+        for module in modules.values() {
+            for import in &module.module.imports {
+                if let Ok(target) = resolve_import(&module.path, import) {
+                    reverse
+                        .entry(target)
+                        .or_default()
+                        .insert(module.path.clone());
+                }
+            }
+        }
+    }
+    let mut pending = affected.iter().cloned().collect::<Vec<_>>();
+    while let Some(path) = pending.pop() {
+        if let Some(importers) = reverse.get(&path) {
+            for importer in importers {
+                if affected.insert(importer.clone()) {
+                    pending.push(importer.clone());
+                }
+            }
+        }
+    }
+    affected
+}
+
+fn global_declarations(modules: &HashMap<PathBuf, ModuleInfo>) -> Vec<String> {
+    let mut declarations = modules
+        .values()
+        .flat_map(|module| {
+            module
+                .module
+                .records
+                .iter()
+                .map(|record| format!("record:{record:?}"))
+                .chain(
+                    module
+                        .module
+                        .components
+                        .iter()
+                        .map(|component| format!("component:{component:?}")),
+                )
+        })
+        .collect::<Vec<_>>();
+    declarations.sort();
+    declarations
+}
+
+fn resolve_import(source: &Path, import: &Import) -> Result<PathBuf, String> {
+    let path = import_candidate_path(source, import)?;
     if !path.is_file() {
         return Err(format!(
             "{}:{}: imported file not found: {}",
@@ -401,11 +621,33 @@ fn resolve_import(source: &Path, import: &Import) -> Result<PathBuf, String> {
     canonical(&path)
 }
 
+fn import_candidate_path(source: &Path, import: &Import) -> Result<PathBuf, String> {
+    let mut path = source
+        .parent()
+        .ok_or_else(|| format!("cannot determine parent of {}", source.display()))?
+        .join(&import.path);
+    if path.extension().is_none() {
+        path.set_extension("ax");
+    }
+    Ok(path)
+}
+
 fn canonical(path: &Path) -> Result<PathBuf, String> {
     fs::canonicalize(path).map_err(|error| format!("cannot resolve {}: {error}", path.display()))
 }
 
 fn link_project(config: ProjectConfig, modules: Vec<ModuleInfo>) -> Result<Project, String> {
+    let mut stats = RetainedLoadStats::default();
+    link_project_retained(config, modules, None, &HashSet::new(), &mut stats)
+}
+
+fn link_project_retained(
+    config: ProjectConfig,
+    modules: Vec<ModuleInfo>,
+    previous: Option<&Project>,
+    affected: &HashSet<PathBuf>,
+    stats: &mut RetainedLoadStats,
+) -> Result<Project, String> {
     let mut definitions = HashMap::<ContractKey, Definition>::new();
     let mut module_paths = HashSet::new();
     let mut records = HashMap::<String, RecordDef>::new();
@@ -537,17 +779,40 @@ fn link_project(config: ProjectConfig, modules: Vec<ModuleInfo>) -> Result<Proje
         .collect();
     let mut contracts = Vec::new();
     let mut verification_summaries = Vec::new();
+    let previous_contracts = previous
+        .map(|project| {
+            project
+                .contracts
+                .iter()
+                .map(|linked| (ContractId::from(linked), linked))
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
     for module in &modules {
         for contract in &module.module.contracts {
             let key = (module.path.clone(), contract.name.clone());
+            let id = ContractId {
+                source: module.path.clone(),
+                name: contract.name.clone(),
+            };
             verification_summaries.push(LinkedContract {
                 source: module.path.clone(),
                 contract: contract.clone(),
             });
-            let linked = expand_contract(&key, &definitions, &scopes, &mut cache, &mut Vec::new())
-                .map_err(|error| format!("{}: {error}", module.path.display()))?;
-            axiom_parser::validate(&linked)
-                .map_err(|error| format!("{}: {error}", module.path.display()))?;
+            let linked = if !affected.contains(&module.path)
+                && let Some(previous) = previous_contracts.get(&id)
+            {
+                stats.contracts_reused += 1;
+                previous.contract.clone()
+            } else {
+                stats.contracts_relinked += 1;
+                let linked =
+                    expand_contract(&key, &definitions, &scopes, &mut cache, &mut Vec::new())
+                        .map_err(|error| format!("{}: {error}", module.path.display()))?;
+                axiom_parser::validate(&linked)
+                    .map_err(|error| format!("{}: {error}", module.path.display()))?;
+                linked
+            };
             contracts.push(LinkedContract {
                 source: module.path.clone(),
                 contract: linked,
@@ -557,7 +822,21 @@ fn link_project(config: ProjectConfig, modules: Vec<ModuleInfo>) -> Result<Proje
 
     let mut pages = Vec::new();
     for module in &modules {
+        if !affected.contains(&module.path)
+            && let Some(previous) = previous
+        {
+            let reused = previous
+                .pages
+                .iter()
+                .filter(|page| page.source == module.path)
+                .cloned()
+                .collect::<Vec<_>>();
+            stats.pages_reused += reused.len();
+            pages.extend(reused);
+            continue;
+        }
         for page in &module.module.pages {
+            stats.pages_relinked += 1;
             let mut page = page.clone();
             expand_components(&mut page, &components, &module.path)?;
             validate_page(
@@ -1643,6 +1922,248 @@ fn validate_elements(
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn assert_same_project(left: &Project, right: &Project) {
+        assert_eq!(left.config, right.config);
+        assert_eq!(left.files, right.files);
+        assert_eq!(left.verification_order, right.verification_order);
+        assert_eq!(left.verification_callee_ids, right.verification_callee_ids);
+        assert_eq!(left.verification_callees, right.verification_callees);
+        assert_eq!(
+            left.contracts
+                .iter()
+                .map(|linked| (&linked.source, &linked.contract))
+                .collect::<Vec<_>>(),
+            right
+                .contracts
+                .iter()
+                .map(|linked| (&linked.source, &linked.contract))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            left.verification_summaries
+                .iter()
+                .map(|linked| (&linked.source, &linked.contract))
+                .collect::<Vec<_>>(),
+            right
+                .verification_summaries
+                .iter()
+                .map(|linked| (&linked.source, &linked.contract))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            left.pages
+                .iter()
+                .map(|page| (&page.source, &page.page))
+                .collect::<Vec<_>>(),
+            right
+                .pages
+                .iter()
+                .map(|page| (&page.source, &page.page))
+                .collect::<Vec<_>>()
+        );
+        let source_bytes = |project: &Project| {
+            let mut values = project
+                .source_contents
+                .iter()
+                .map(|(path, bytes)| (path.clone(), bytes.to_vec()))
+                .collect::<Vec<_>>();
+            values.sort_by(|left, right| left.0.cmp(&right.0));
+            values
+        };
+        assert_eq!(source_bytes(left), source_bytes(right));
+    }
+
+    #[test]
+    fn retained_loader_matches_cold_load_across_edit_classes_and_recovery() {
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-retained-loader-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("leaf.ax"),
+            "export contract leaf(value: u32) -> u32 { requires value > 0; ensures result == value; }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("middle.ax"),
+            "import { leaf } from \"./leaf.ax\";\nexport contract middle(value: u32) -> u32 { requires value > 0; ensures result == leaf(value); }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("unrelated.ax"),
+            "export contract unrelated(value: u32) -> u32 { ensures result == value; }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("entry.ax"),
+            "import { middle } from \"./middle.ax\";\nimport { unrelated } from \"./unrelated.ax\";\ncontract root(value: u32) -> u32 { requires value > 0; ensures result == middle(value); }",
+        )
+        .unwrap();
+        let config = root.join("synthetix.toml");
+        fs::write(
+            &config,
+            "[project]\nentry = \"entry.ax\"\ntarget = \"web\"\n",
+        )
+        .unwrap();
+
+        let mut loader = RetainedProjectLoader::default();
+        let (first, first_stats) = loader.load(&config).unwrap();
+        assert_same_project(&first, &load(&config).unwrap());
+        assert_eq!(first_stats.modules_parsed, 4);
+        assert_eq!(first_stats.contracts_relinked, 4);
+        let (noop, noop_stats) = loader.load(&config).unwrap();
+        assert_same_project(&noop, &load(&config).unwrap());
+        assert_eq!(noop_stats.modules_parsed, 0);
+        assert_eq!(noop_stats.modules_reused, 4);
+        assert_eq!(noop_stats.contracts_relinked, 0);
+        assert_eq!(noop_stats.contracts_reused, 4);
+        assert!(noop_stats.affected_modules.is_empty());
+
+        fs::write(
+            &config,
+            "[project]\nentry = \"entry.ax\"\ntarget = \"web\"\nstorage_schema_version = 2\n",
+        )
+        .unwrap();
+        let (manifest_edit, manifest_stats) = loader.load(&config).unwrap();
+        assert_same_project(&manifest_edit, &load(&config).unwrap());
+        assert_eq!(manifest_stats.modules_parsed, 0);
+        assert_eq!(manifest_stats.contracts_relinked, 0);
+        assert_eq!(manifest_stats.contracts_reused, 4);
+        assert!(manifest_stats.affected_modules.is_empty());
+
+        let leaf_path = root.join("leaf.ax");
+        let leaf_source = fs::read_to_string(&leaf_path).unwrap();
+        fs::write(
+            &leaf_path,
+            leaf_source.replace("result == value", "result == value +% 0"),
+        )
+        .unwrap();
+        let (leaf_edit, leaf_stats) = loader.load(&config).unwrap();
+        assert_same_project(&leaf_edit, &load(&config).unwrap());
+        assert_eq!(leaf_stats.modules_parsed, 1);
+        assert_eq!(leaf_stats.modules_reused, 3);
+        assert_eq!(leaf_stats.contracts_relinked, 3);
+        assert_eq!(leaf_stats.contracts_reused, 1);
+
+        let entry_path = root.join("entry.ax");
+        let entry_source = fs::read_to_string(&entry_path).unwrap();
+        fs::write(
+            &entry_path,
+            entry_source.replace("result == middle(value)", "result == middle(value) +% 0"),
+        )
+        .unwrap();
+        let (root_edit, root_stats) = loader.load(&config).unwrap();
+        assert_same_project(&root_edit, &load(&config).unwrap());
+        assert_eq!(root_stats.modules_parsed, 1);
+        assert_eq!(root_stats.modules_reused, 3);
+        assert_eq!(root_stats.contracts_relinked, 1);
+        assert_eq!(root_stats.contracts_reused, 3);
+
+        let entry_source = fs::read_to_string(&entry_path).unwrap();
+        fs::write(
+            &entry_path,
+            entry_source
+                .lines()
+                .filter(|line| !line.contains("unrelated"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let (import_edit, import_stats) = loader.load(&config).unwrap();
+        assert_same_project(&import_edit, &load(&config).unwrap());
+        assert_eq!(import_stats.modules_parsed, 1);
+        assert_eq!(import_stats.modules_reused, 2);
+        assert_eq!(import_stats.contracts_relinked, 1);
+        assert_eq!(import_stats.contracts_reused, 2);
+        assert_eq!(import_edit.files.len(), 3);
+        assert!(
+            !import_edit
+                .files
+                .contains(&canonical(&root.join("unrelated.ax")).unwrap())
+        );
+
+        let middle_path = root.join("middle.ax");
+        let middle_source = fs::read_to_string(&middle_path).unwrap();
+        fs::rename(&leaf_path, root.join("renamed.ax")).unwrap();
+        fs::write(
+            &middle_path,
+            middle_source.replace("./leaf.ax", "./renamed.ax"),
+        )
+        .unwrap();
+        let (renamed, rename_stats) = loader.load(&config).unwrap();
+        assert_same_project(&renamed, &load(&config).unwrap());
+        assert_eq!(rename_stats.modules_parsed, 2);
+        assert_eq!(rename_stats.modules_reused, 1);
+        assert_eq!(rename_stats.contracts_relinked, 3);
+        assert_eq!(rename_stats.contracts_reused, 0);
+        assert!(
+            renamed
+                .files
+                .contains(&canonical(&root.join("renamed.ax")).unwrap())
+        );
+        assert!(!renamed.files.iter().any(|path| path.ends_with("leaf.ax")));
+
+        let broken_source = middle_source.replace("./leaf.ax", "./missing.ax");
+        fs::write(&middle_path, &broken_source).unwrap();
+        let retained_error = loader.load(&config).unwrap_err();
+        let cold_error = load(&config).unwrap_err();
+        assert_eq!(retained_error, cold_error);
+        fs::write(
+            &middle_path,
+            middle_source.replace("./leaf.ax", "./renamed.ax"),
+        )
+        .unwrap();
+        let (recovered, recovered_stats) = loader.load(&config).unwrap();
+        assert_same_project(&recovered, &load(&config).unwrap());
+        assert_eq!(recovered_stats.modules_parsed, 0);
+        assert_eq!(recovered_stats.modules_reused, 3);
+        assert_eq!(recovered_stats.contracts_relinked, 0);
+        assert_eq!(recovered_stats.contracts_reused, 3);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retained_loader_relinks_all_modules_when_global_records_change() {
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-retained-global-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("dep.ax"),
+            "export contract leaf(value: u32) -> u32 { ensures result == value; }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("entry.ax"),
+            "import { leaf } from \"./dep.ax\";\ncontract root(value: u32) -> u32 { ensures result == leaf(value); }",
+        )
+        .unwrap();
+        let config = root.join("synthetix.toml");
+        fs::write(&config, "[project]\nentry = \"entry.ax\"\n").unwrap();
+        let mut loader = RetainedProjectLoader::default();
+        loader.load(&config).unwrap();
+        fs::write(
+            root.join("dep.ax"),
+            "record Shared { value: u32; }\nexport contract leaf(value: u32) -> u32 { ensures result == value; }",
+        )
+        .unwrap();
+        let (project, stats) = loader.load(&config).unwrap();
+        assert_same_project(&project, &load(&config).unwrap());
+        assert_eq!(stats.modules_parsed, 1);
+        assert_eq!(stats.contracts_relinked, 2);
+        assert_eq!(stats.contracts_reused, 0);
+        assert_eq!(stats.affected_modules.len(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn links_imported_contracts_without_a_folder_convention() {
