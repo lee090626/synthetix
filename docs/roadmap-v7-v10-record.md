@@ -1,3 +1,5 @@
+> **보존된 계획 기록:** 이 문서는 v7 실행 근거와 v8~v10 최초 상세 계획 및 작성 당시 상태를 그대로 보존한다. 본문의 상태 문구는 snapshot이며 현재 진행 상태를 나타내지 않는다. 현재 방향은 [로드맵](roadmap.md), 향후 구현·PASS 계약은 [SPEC-V8-A](specs/v8/SPEC-V8-A.md), [SPEC-V8-B](specs/v8/SPEC-V8-B.md), [SPEC-V9](specs/v9/SPEC-V9.md), [SPEC-V10](specs/v10/SPEC-V10.md)을 따른다. 아래의 과거 상태 모델과 중단 문구는 현재 workflow의 PASS/CONDITIONAL/FAIL/PENDING/BLOCKED 판정을 대체하지 않는다.
+
 # Synthetix v7.0–v10.9 기술 로드맵
 
 이 문서는 v7–v10 구현 계획이다. 기준 checkout은 `main`의 `4f13d08`이며 분석 시작

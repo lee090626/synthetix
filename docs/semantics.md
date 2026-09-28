@@ -79,7 +79,7 @@ The frozen v4 surface contains:
 - `contract` declarations for synthesis, `fn` declarations for verified user
   implementations, and `extern fn` declarations for runtime adapters;
 - the `ContractCheck`, `SynthesisResult`, and `ProofResult` states in
-  `docs/roadmap.md`;
+  `docs/roadmap-v4-v7-record.md`;
 - AMI, reference evaluator, Z3, and WASM conformance for the supported scalar
   operators.
 

@@ -1,0 +1,27 @@
+{
+  "fixture_version": 1,
+  "description": "Declarative project graph and edit corpus for the v8.0 baseline harness.",
+  "graphs": {
+    "chain_control": {
+      "nodes": {"c0": [], "c1": ["c0"], "c2": ["c1"], "root": ["c2"]},
+      "roots": ["root"]
+    },
+    "fan_in": {
+      "nodes": {"left": [], "right": [], "root": ["left", "right"]},
+      "roots": ["root"]
+    },
+    "fan_out": {
+      "nodes": {"shared": [], "left": ["shared"], "right": ["shared"]},
+      "roots": ["left", "right"]
+    },
+    "shared_callee": {
+      "nodes": {"shared": [], "root_a": ["shared"], "root_b": ["shared"], "independent": []},
+      "roots": ["root_a", "root_b", "independent"]
+    },
+    "multiple_roots": {
+      "nodes": {"base": [], "root_a": ["base"], "root_b": ["base"]},
+      "roots": ["root_a", "root_b"]
+    }
+  },
+  "edit_classes": ["no_op", "unrelated", "leaf", "root", "import", "manifest"]
+}

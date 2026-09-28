@@ -1,0 +1,31 @@
+{
+  "alias_shared": {
+    "entry.ax": "import { first } from \"./shared.ax\";\nimport { second } from \"././shared.ax\";\nimport { left } from \"./left.ax\";\nimport { right } from \"./right.ax\";\ncontract root(x: u32) -> u32 {\n requires first(x) == x;\n requires second(x) == x;\n requires left(x) == x;\n requires right(x) == x;\n ensures result == x;\n}\n",
+    "left.ax": "import { first } from \"./shared.ax\";\nexport contract left(x: u32) -> u32 { requires first(x) == x; ensures result == x; }\n",
+    "right.ax": "import { second } from \"././shared.ax\";\nexport contract right(x: u32) -> u32 { requires second(x) == x; ensures result == x; }\n",
+    "shared.ax": "export contract first(x: u32) -> u32 { ensures result == x; }\nexport contract second(x: u32) -> u32 { ensures result == x; }\n"
+  },
+  "same_name": {
+    "entry.ax": "import { from_a } from \"./a.ax\";\nimport { from_b } from \"./b.ax\";\ncontract root(x: u32) -> u32 { requires from_a(x) == x; requires from_b(x) == x; ensures result == x; }\n",
+    "a.ax": "export contract same_name(x: u32) -> u32 { ensures result == x; }\nexport contract from_a(x: u32) -> u32 { ensures result == same_name(x); }\n",
+    "b.ax": "export contract same_name(x: u32) -> u32 { ensures result == x; }\nexport contract from_b(x: u32) -> u32 { ensures result == same_name(x); }\n"
+  },
+  "duplicate_binding": {
+    "entry.ax": "import { first } from \"./shared.ax\";\nimport { first } from \"././shared.ax\";\ncontract root(x: u32) -> u32 { ensures result == x; }\n",
+    "shared.ax": "export contract first(x: u32) -> u32 { ensures result == x; }\n"
+  },
+  "import_cycle": {
+    "entry.ax": "import { a } from \"./a.ax\";\ncontract root(x: u32) -> u32 { ensures result == x; }\n",
+    "a.ax": "import { b } from \"./b.ax\";\nexport contract a(x: u32) -> u32 { ensures result == x; }\n",
+    "b.ax": "import { a } from \"./a.ax\";\nexport contract b(x: u32) -> u32 { ensures result == x; }\n"
+  },
+  "rename": {
+    "entry.ax": "import { renamed } from \"./old.ax\";\ncontract root(x: u32) -> u32 { requires renamed(x) == x; ensures result == x; }\n",
+    "old.ax": "export contract renamed(x: u32) -> u32 { ensures result == x; }\n"
+  },
+  "deterministic": {
+    "entry.ax": "import { zeta } from \"./z.ax\";\nimport { alpha } from \"./a.ax\";\ncontract root(x: u32) -> u32 {\n requires alpha(x) == x;\n requires zeta(x) == x;\n ensures result == x;\n}\n",
+    "a.ax": "export contract alpha(x: u32) -> u32 { ensures result == x; }\n",
+    "z.ax": "export contract zeta(x: u32) -> u32 { ensures result == x; }\n"
+  }
+}

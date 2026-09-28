@@ -1,0 +1,8 @@
+{
+  "shared.ax": "export contract positive(value: u32) -> u32 {\n requires value > 0;\n ensures result == value;\n}\nexport contract liar(value: u32) -> u32 {\n ensures result == value +% 1;\n}\n",
+  "root_a.ax": "import { positive } from \"./shared.ax\";\nexport contract alpha(value: u32) -> u32 {\n requires value > 0;\n requires positive(value) == positive(value);\n ensures result == positive(value);\n}\n",
+  "root_b.ax": "import { positive } from \"./shared.ax\";\nexport contract beta(value: u32) -> u32 {\n requires value > 0;\n ensures result == positive(value);\n}\n",
+  "unsafe.ax": "import { positive } from \"./shared.ax\";\nexport contract unsafe_root(value: u32) -> u32 {\n ensures result == positive(value);\n}\n",
+  "failed.ax": "import { liar } from \"./shared.ax\";\nexport contract depends_on_failed(value: u32) -> u32 {\n ensures result == liar(value);\n}\n",
+  "entry.ax": "import { alpha } from \"./root_a.ax\";\nimport { beta } from \"./root_b.ax\";\nimport { unsafe_root } from \"./unsafe.ax\";\nimport { depends_on_failed } from \"./failed.ax\";\ncontract entry(value: u32) -> u32 {\n requires value > 0;\n ensures result == value;\n}\n"
+}
