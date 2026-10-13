@@ -139,7 +139,7 @@ The proof core supports pure `u32`, signed `i32`, and `bool` values with finite 
 v3.1 adds browser-side records, lists, text inputs, components, and explicit
 localStorage persistence around verified scalar reducers. See [the v2
 specification](docs/v2.md), [the v3 specification](docs/v3.md), and [the
-v4-v7 record](docs/roadmap-v4-v7-record.md) for the web build boundary.
+application boundary](docs/application-boundary.md) for the web build boundary.
 
 For the browser workflow:
 

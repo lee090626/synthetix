@@ -4,7 +4,7 @@ Synthetix는 **명세 → 합성 → 증명 → 실행**을 하나의 흐름으�
 
 이 문서는 **어디로 갈지**와 major·milestone만 추적한다. **무엇을 만들고 어떻게 PASS할지**는 해당 SPEC의 계약이다. Phase는 SPEC 내부 작업 단위, Milestone은 진행·결과 추적, Freeze는 최종 작업본 전체에 대한 SPEC 누적 검증이다. 구현 전에 Main이 해당 SPEC을 승인하고, 사용자가 명시한 더 좁은 범위는 언제나 우선한다.
 
-v4~v7 실행 기록은 [보존 기록](roadmap-v4-v7-record.md), v7 실행 근거와 v8~v10의 최초 상세 계획은 [계획 snapshot](roadmap-v7-v10-record.md)에 보존되어 있다. 이 기록은 과거 판단의 출처이며, 현재 구현·검증 계약은 아래 SPEC이 담당한다.
+v4~v7 실행 기록은 [보존 기록](history.md#history-roadmap-v4-v7-record), v7 실행 근거와 v8~v10의 최초 상세 계획은 [계획 snapshot](history.md#history-roadmap-v7-v10-record)에 보존되어 있다. 이 기록은 과거 판단의 출처이며, 현재 구현·검증 계약은 아래 SPEC이 담당한다.
 
 ## v8 — Incremental Project Engine
 
