@@ -3,10 +3,14 @@ dist/
 
 # Rust build output
 target/
+__pycache__/
 
 # Generated verification and WebAssembly output
 **/.z3-trace
 *.wasm
+
+# Generated VS Code package
+*.vsix
 
 # Local machine files
 .DS_Store

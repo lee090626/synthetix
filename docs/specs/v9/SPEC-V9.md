@@ -14,7 +14,7 @@ Source, dependency, semantics, candidate, proof outcome, WASM과 external assump
 
 ## Baseline
 
-- v8.9 PASS 및 v7.9 [Freeze 근거](../../v7.9-benchmark.md)를 선행한다. 실제 시작 시 checkout의 source commit/branch/dirty 범위와 CLI report, `app.proof.json`, WASM, semantics id, cache, extern producer/reader를 inventory한다.
+- v8.9 PASS 및 v7.9 [Freeze 근거](../../history.md#history-v7-9-benchmark)를 선행한다. 실제 시작 시 checkout의 source commit/branch/dirty 범위와 CLI report, `app.proof.json`, WASM, semantics id, cache, extern producer/reader를 inventory한다.
 - 기존 CLI `stable_hash`는 FNV-1a 64-bit fingerprint이며 cryptographic authenticity가 아니다. Web manifest schema `4`는 proof/effect 구분을 담지만 semantics/source/WASM/tool build identity가 빠져 있다. Extern implementation은 `UNVERIFIED`, audit metadata는 `NOT_PROVIDED`다. 이는 기존 계획의 조사 결과이며 실행 시 재확인한다.
 
 ## Invariants
