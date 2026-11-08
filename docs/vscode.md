@@ -42,11 +42,11 @@ code --install-extension /tmp/synthetix-vscode.vsix --force
 The web command starts `axiom dev` in an integrated terminal, opens the local
 browser page, and lets the CLI handle rebuilds and Live Reload.
 
-The extension uses the bundled CLI for the current platform first, then looks
-for `target/debug/axiom` and `target/release/axiom` in the workspace, and
-finally falls back to `axiom` on `PATH`. The current local artifact includes macOS Apple Silicon
-(`darwin-arm64`); other platforms need their matching binary in `bin/`.
-It writes the generated
+The extension checks the workspace for `target/debug/axiom` and
+`target/release/axiom` first, then uses the bundled platform CLI, and finally
+falls back to `axiom` on `PATH`. Release VSIX packages receive platform CLIs
+from the release build matrix. For a local VSIX package, copy the built CLI to
+the matching `bin/<platform>/` directory as shown above. It writes the generated
 WASM under `.synthetix/build/` while preserving the source's relative path,
 then executes its `run` export. For example,
 `examples/friendly/easy_mul8.ax` produces
