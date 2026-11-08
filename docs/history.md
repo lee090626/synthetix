@@ -1,5 +1,5 @@
 # Historical records
-Archived milestone plans, measurements, and implementation records. Each source document is preserved as a section; links to raw JSON evidence remain in place.
+Archived milestone plans, measurements, and implementation records. Generated raw JSON captures are local-only; summaries and checksums remain tracked in [the capture manifest](benchmark-captures.sha256). The v6 final and v7.9 reports remain tracked because later benchmark runners consume them.
 ## Contents
 - [roadmap v4 v7 record](#history-roadmap-v4-v7-record)
 - [roadmap v7 v10 record](#history-roadmap-v7-v10-record)
@@ -1596,7 +1596,7 @@ host-effect 경계이며 Rust `unsafe` FFI 구현이 아니다.
 
 #### v7.4 — Core Lowering and Project Code Boundaries
 
-**상태: PASS — runtime optimization NOT NEEDED.** `SpecExpr::For` 구현 lowering은 private `lower_bounded_loop`로 분리됐다. 다섯 쌍의 benchmark에서 직접 lowering 관련 timing ranges가 모두 겹쳤으며, 속도 향상은 주장하지 않는다. CLI report와 WASM 출력, scalar 경계 runtime 결과는 before/after 동일하다. 세부 결과와 원자료는 [v7.4 benchmark](history.md#history-v7-4-benchmark), [JSON](v7.4-benchmark.json)에 있다. `axiom-project`의 graph/order 및 expansion seam은 이미 있으므로 추가 분리는 NOT NEEDED였다.
+**상태: PASS — runtime optimization NOT NEEDED.** `SpecExpr::For` 구현 lowering은 private `lower_bounded_loop`로 분리됐다. 다섯 쌍의 benchmark에서 직접 lowering 관련 timing ranges가 모두 겹쳤으며, 속도 향상은 주장하지 않는다. CLI report와 WASM 출력, scalar 경계 runtime 결과는 before/after 동일하다. 세부 결과와 원자료는 [v7.4 benchmark](history.md#history-v7-4-benchmark), `v7.4-benchmark.json` (raw capture omitted from GitHub)에 있다. `axiom-project`의 graph/order 및 expansion seam은 이미 있으므로 추가 분리는 NOT NEEDED였다.
 
 - **목표·근거·작업:** parser AST에서 AMI/definedness/SMT와 project linking으로
   가는 현재 경계를 정리한다. `verify/lib.rs`의 implementation lowering 및
@@ -1612,7 +1612,7 @@ host-effect 경계이며 Rust `unsafe` FFI 구현이 아니다.
 
 #### v7.5 — Measured Memory and Allocation Work
 
-**상태: PASS — runtime memory optimization NOT NEEDED.** 동일 host/toolchain/profile/source snapshot/executable/fixtures의 두 process-RSS batch에서 네 workload를 각각 5회 측정했다. 결과는 RSS 감소 전후 비교가 아니며 runtime 개선을 주장하지 않는다. 기존 estimated-memory limit와 실행 결과를 보존했다. 상세 수치와 40개 raw run은 [v7.5 benchmark](history.md#history-v7-5-benchmark), [JSON](v7.5-benchmark.json)에 있다. v7.6–v7.9는 PASS다. v8–v10은 시작하지 않았다.
+**상태: PASS — runtime memory optimization NOT NEEDED.** 동일 host/toolchain/profile/source snapshot/executable/fixtures의 두 process-RSS batch에서 네 workload를 각각 5회 측정했다. 결과는 RSS 감소 전후 비교가 아니며 runtime 개선을 주장하지 않는다. 기존 estimated-memory limit와 실행 결과를 보존했다. 상세 수치와 40개 raw run은 [v7.5 benchmark](history.md#history-v7-5-benchmark), `v7.5-benchmark.json` (raw capture omitted from GitHub)에 있다. v7.6–v7.9는 PASS다. v8–v10은 시작하지 않았다.
 
 - **목표·근거·작업:** 현재 추정치가 실제 peak RSS와 다를 수 있으므로 우선 v7.0의
   candidate-heavy, array/loop/recursion workload에 대한 process peak 측정을 만든다.
@@ -2210,7 +2210,7 @@ Synthetix formally verifies Z3, the browser, host adapters or external services.
 
 Run `cargo run --release -p axiom-synth --example search_baseline` from the
 repository root to reproduce the JSON measurements in
-[`v4-performance-baseline.json`](v4-performance-baseline.json). Parsing time and
+`v4-performance-baseline.json` (raw capture omitted from GitHub). Parsing time and
 release compilation are excluded; each `elapsed_ms` measures one synthesis run.
 
 The recorded run uses release defaults: 50,000 candidates, 64 MiB, and no
@@ -2415,8 +2415,8 @@ The former nested-summary blocker is exercised at depths 1/2/4/8 with both depen
 This comparison keeps the original v6.0 baseline intact and links it to the
 nested-summary follow-up and the final working-tree run:
 
-- [v6.0 baseline JSON](v6-benchmark-baseline.json)
-- [Nested-summary follow-up JSON](v6-benchmark-compositional-after.json)
+- `v6-benchmark-baseline.json` (raw capture omitted from GitHub)
+- `v6-benchmark-compositional-after.json` (raw capture omitted from GitHub)
 - [Final measurements JSON](v6-benchmark-final.json)
 - [Final measurements Markdown](history.md#history-v6-benchmark-final)
 
@@ -3098,7 +3098,7 @@ All five required commands passed at source commit `2e355cb91c872963048fe6a6dd16
 - HEAD: `4f13d088ed0ab2c4c4249ef217b380a51de2a650` for both source states.
 - Host: macOS 26.5.1, Darwin 25.5.0, arm64 Apple Silicon; Rust/Cargo 1.98.1; Node v24.19.0.
 - Release benchmark harness; five independent captures per source state, 54 measurement rows per capture, three internal repeats for repeated cases. Duplicate `static_runtime_list_10_text_0` is retained as a separate row occurrence.
-- Per-case search bounds, outcomes, counters, phase times, environment data, fixture hashes, raw rows, and capture-file hashes are embedded in [`v7.1-benchmark.json`](v7.1-benchmark.json).
+- Per-case search bounds, outcomes, counters, phase times, environment data, fixture hashes, raw rows, and capture-file hashes are embedded in `v7.1-benchmark.json` (raw capture omitted from GitHub).
 - Before/after two-file source diff SHA-256: `9a067ab90c6c5dbf43ef71dc038de903cd3e69319a039f900a4932345dbb8eef` / `808a030a3665225144b80af9836950b625f62454b9c1258d0430958294a29635`.
 - Before/after release CLI SHA-256: `545229665d8ed88a4a7845a9ca5282b333d2fb20edc843c1c308a71cb82a7f58` / `864f6b560bbb2a6deee0d625d0758c270a23956c036a3bdbecb93b2dd4fb8e91`. The benchmark executable hashes are recorded in the JSON evidence and differ as well.
 - An earlier recheck set is excluded because its before/after CLI binary hashes were identical. Only the five `paired-before-*` and five `paired-after-*` captures are used here.
@@ -3174,7 +3174,7 @@ The cache adds a compact `Vec<bool>` scratch allocation that is not represented 
 - Before/after benchmark executable SHA-256: `91a8bc96aa9edb17552fb3af677c1f70ffc3c445f4c8cea93bae49e606b4f48f` / `c7565d62ac7c6f3ef577ab1a829124b17681c276a529a7653eb7a19520b830e1`.
 - All 70 benchmark fixture hashes match the manifest SHA-256 `693fc588cb06890aabbc31974be1c24b296c733555d285e628cdfb6c82b10cd2`.
 - The v7.1 CEGIS sample-requirement cache is present in both states and was held constant. The only runtime change for v7.2 is reuse of a successful contract-level precondition check; the after state also contains the focused regression test.
-- Full raw observations, per-capture identities, fixture hashes, and paired comparisons are embedded in [`v7.2-benchmark.json`](v7.2-benchmark.json).
+- Full raw observations, per-capture identities, fixture hashes, and paired comparisons are embedded in `v7.2-benchmark.json` (raw capture omitted from GitHub).
 
 ### Query and behavior results
 
@@ -3229,7 +3229,7 @@ Measurements cover this macOS arm64 host only. Peak resource estimates do not me
 
 The cache remains process-local. Its full key identity is ContractId, exact source bytes, semantics version, timeout, `max_candidates`, `max_memory`, and recursively keyed dependencies in sorted order. Entries are inserted only after a VERIFIED compositional proof. v7.3 added a regression test in `web.rs`; it did not change production code.
 
-Before and after measurements are five serial runs of `cargo test -p axiom-cli proof_cache_ -- --nocapture --test-threads=1`, on the same Darwin arm64 host with rustc 1.98.1 and the debug profile. The timer includes project load and parse, key creation and lookup, synthesis, and proof. It does not isolate key cost. Before and after ranges overlap for every case. Raw repeats, medians, ranges, and measurement identities are in [`v7.3-benchmark.json`](v7.3-benchmark.json).
+Before and after measurements are five serial runs of `cargo test -p axiom-cli proof_cache_ -- --nocapture --test-threads=1`, on the same Darwin arm64 host with rustc 1.98.1 and the debug profile. The timer includes project load and parse, key creation and lookup, synthesis, and proof. It does not isolate key cost. Before and after ranges overlap for every case. Raw repeats, medians, ranges, and measurement identities are in `v7.3-benchmark.json` (raw capture omitted from GitHub).
 
 ### Cache lifecycle and semantic evidence
 
@@ -3272,7 +3272,7 @@ All before/after ranges overlap. Unrelated edit counters are 4/1/1; the existing
 
 Five serial before captures and five serial after captures used the same dirty release benchmark source, host, toolchain, profile, fixtures, and three internal repeats. Each capture has 54 rows. The host was macOS arm64 with rustc/Cargo 1.98.1 and Node 24.19.0. Stable-field comparison found **0 mismatches**, and outcome counts matched in every paired capture.
 
-Before/after release CLI runs compared canonicalized complete JSON reports and WASM byte-for-byte. The bounded loop, zero-iteration loop, and scalar boundary inputs `0`, `4294967292`, and `4294967295` matched. Scalar outputs were `4`, `0`, and `3`. The bounded-loop candidate was VERIFIED; its Debug text was 3,058 bytes with SHA-256 `c9178b3932264f968d944a76661b2c6953e6c25ef792929ca2549b4c94ac501b`. Its WASM was 1,650 bytes with SHA-256 `69205701eb9b98e183278bd7f83863aefbf6dc2ea311a3569431dae4b5c8a365`. Zero-loop WASM was 46 bytes (`2484d761bc265c997b9a4559594186e45f314b8b517967ae4ec1c2419acf15be`); scalar-loop WASM was 173 bytes (`f9391190c69aa16585557fd99e8daa2bcee8a7e4491a2be39f3af2f8cb4a1a32`). Full raw samples and identities are in [v7.4-benchmark.json](v7.4-benchmark.json).
+Before/after release CLI runs compared canonicalized complete JSON reports and WASM byte-for-byte. The bounded loop, zero-iteration loop, and scalar boundary inputs `0`, `4294967292`, and `4294967295` matched. Scalar outputs were `4`, `0`, and `3`. The bounded-loop candidate was VERIFIED; its Debug text was 3,058 bytes with SHA-256 `c9178b3932264f968d944a76661b2c6953e6c25ef792929ca2549b4c94ac501b`. Its WASM was 1,650 bytes with SHA-256 `69205701eb9b98e183278bd7f83863aefbf6dc2ea311a3569431dae4b5c8a365`. Zero-loop WASM was 46 bytes (`2484d761bc265c997b9a4559594186e45f314b8b517967ae4ec1c2419acf15be`); scalar-loop WASM was 173 bytes (`f9391190c69aa16585557fd99e8daa2bcee8a7e4491a2be39f3af2f8cb4a1a32`). Full raw samples and identities are in `v7.4-benchmark.json` (raw capture omitted from GitHub).
 
 ### Timing observations
 
@@ -3318,7 +3318,7 @@ The combined build and runtime values are not attributable to the helper extract
 
 ### Method and identity
 
-Each batch ran five isolated release-example processes for each of four v7 workloads (20 runs per batch, 40 total). Peak resident set size came from macOS `/usr/bin/time -l`. Both batches had zero errors and used the same host, toolchain, release profile, executable SHA-256, source snapshot SHA-256, fixtures, and expected outcomes. The raw sanitized runs, including per-process stdout, resource report, exit code, and measured RSS, are in [v7.5-benchmark.json](v7.5-benchmark.json).
+Each batch ran five isolated release-example processes for each of four v7 workloads (20 runs per batch, 40 total). Peak resident set size came from macOS `/usr/bin/time -l`. Both batches had zero errors and used the same host, toolchain, release profile, executable SHA-256, source snapshot SHA-256, fixtures, and expected outcomes. The raw sanitized runs, including per-process stdout, resource report, exit code, and measured RSS, are in `v7.5-benchmark.json` (raw capture omitted from GitHub).
 
 | Workload | Batch 1 median (range), bytes | Batch 2 median (range), bytes | Combined median (range), bytes |
 | --- | ---: | ---: | ---: |
@@ -3344,7 +3344,7 @@ Runtime QA confirmed fixed-array and bounded-loop reference/WASM results of 10; 
 
 ### Method and identity
 
-Five fresh copies of `examples/v6-release` were built with the same release CLI procedure before and after. Each generated `dist/` passed `node scripts/v6-release-smoke.cjs`. The sanitized per-trial outcomes and timings are in [v7.6-benchmark.json](v7.6-benchmark.json).
+Five fresh copies of `examples/v6-release` were built with the same release CLI procedure before and after. Each generated `dist/` passed `node scripts/v6-release-smoke.cjs`. The sanitized per-trial outcomes and timings are in `v7.6-benchmark.json` (raw capture omitted from GitHub).
 
 | Measurement | Before median (range) | After median (range) | Change |
 | --- | ---: | ---: | ---: |
@@ -3380,7 +3380,7 @@ After the one-line test repair, the WASM browser conformance test passed (1 pass
 
 ### CLI latency
 
-Measurements are complete subprocess command latency, not pure startup. Each workload used one excluded warm-up and ten measured invocations. The final release CLI SHA-256 is identical to the pre-edit v7.6 executable; the same disposable fixtures, host, toolchain, and measurement method were used. Output digests and exit states match the pre-edit results. Raw timings and identities are in [v7.7-benchmark.json](v7.7-benchmark.json).
+Measurements are complete subprocess command latency, not pure startup. Each workload used one excluded warm-up and ten measured invocations. The final release CLI SHA-256 is identical to the pre-edit v7.6 executable; the same disposable fixtures, host, toolchain, and measurement method were used. Output digests and exit states match the pre-edit results. Raw timings and identities are in `v7.7-benchmark.json` (raw capture omitted from GitHub).
 
 | Workload | v7.6 pre-edit median (range), ms | Final median (range), ms | Median delta | Result |
 | --- | ---: | ---: | ---: | --- |
@@ -3539,7 +3539,7 @@ Timing ranges overlap; this repair makes **no new speedup claim**. The historica
 
 ## v8.0 Project Graph and Change Baseline
 
-**Gate: PASS (v8.0 only).** The [raw capture](v8.0-benchmark.json) contains five serial runs for each of five graph shapes and six edit classes: 25 cold builds, 25 warm rebuilds, and 30 edit trials. Every run returned its expected result class, and each observed proof recomputation set matched its fixture-derived expected set. This is a v7.9 baseline, not an incremental-engine result or a speedup claim.
+**Gate: PASS (v8.0 only).** The `v8.0-benchmark.json` (raw capture omitted from GitHub) contains five serial runs for each of five graph shapes and six edit classes: 25 cold builds, 25 warm rebuilds, and 30 edit trials. Every run returned its expected result class, and each observed proof recomputation set matched its fixture-derived expected set. This is a v7.9 baseline, not an incremental-engine result or a speedup claim.
 
 ### Source and method
 
@@ -3588,7 +3588,7 @@ No-op makes no file change: the dev version stayed unchanged over a median 410.0
 
 ## v8.1 Stable Module and Dependency Identity
 
-**Original gate: PASS (v8.1 only). B2 cumulative recheck: PASS.** The [raw identity evidence](v8.1-identity.json) now records the seven-case B2 recheck on the integrated v8.3 source. The original v8.1 milestone run preceded the v8.3 production changes; this current capture is not that original source snapshot. The cumulative B2 workspace regression and remaining gates are tracked in [v8.9 B2](v8.9-b2.md).
+**Original gate: PASS (v8.1 only). B2 cumulative recheck: PASS.** The `v8.1-identity.json` (raw capture omitted from GitHub) now records the seven-case B2 recheck on the integrated v8.3 source. The original v8.1 milestone run preceded the v8.3 production changes; this current capture is not that original source snapshot. The cumulative B2 workspace regression and remaining gates are tracked in [v8.9 B2](v8.9-b2.md).
 
 ### Contract and coverage
 
@@ -3621,7 +3621,7 @@ The raw JSON keeps expected and observed IDs/order/diagnostics for every case, i
 
 ## v8.2 DAG Compositional Proof
 
-**Original gate: PASS (v8.2 only). B2 cumulative recheck: PASS.** The [raw proof evidence](v8.2-proof.json) records eight passing direct-verifier cases and three CLI build cases on the integrated v8.3 source. The direct tests use the existing verified-summary API with fixed `Expr::Arg(0)` candidates; proof rules and search bounds remain unchanged. The cumulative B2 workspace regression and remaining gates are tracked in [v8.9 B2](v8.9-b2.md).
+**Original gate: PASS (v8.2 only). B2 cumulative recheck: PASS.** The `v8.2-proof.json` (raw capture omitted from GitHub) records eight passing direct-verifier cases and three CLI build cases on the integrated v8.3 source. The direct tests use the existing verified-summary API with fixed `Expr::Arg(0)` candidates; proof rules and search bounds remain unchanged. The cumulative B2 workspace regression and remaining gates are tracked in [v8.9 B2](v8.9-b2.md).
 
 ### Proof boundary and results
 
@@ -3656,9 +3656,9 @@ The actual CLI `axiom build` succeeds and writes a proof artifact for the verifi
 
 ## v8.3 Incremental Project Engine
 
-**Benchmark gate: PASS.** The raw [paired capture](v8.3-benchmark.json) contains 55 cases: 25 warm manifest edits across five graph shapes and 30 edit-class cases across six edits. All 55 pairs match generated artifact SHA-256 values and exact recomputed proof contract names; the report has `errors: []`.
+**Benchmark gate: PASS.** The raw `v8.3-benchmark.json` (raw capture omitted from GitHub) contains 55 cases: 25 warm manifest edits across five graph shapes and 30 edit-class cases across six edits. All 55 pairs match generated artifact SHA-256 values and exact recomputed proof contract names; the report has `errors: []`.
 
-The final-source B2 cumulative rerun is preserved separately in [v8.9 B2](v8.9-b2.md) and its [55-comparison raw capture](v8.9-b2/v8.3-incremental.json); it does not replace this original milestone capture.
+The final-source B2 cumulative rerun is preserved separately in [v8.9 B2](v8.9-b2.md) and its `v8.9-b2/v8.3-incremental.json` (raw capture omitted from GitHub); it does not replace this original milestone capture.
 
 ### Method and provenance
 
@@ -3704,7 +3704,7 @@ These paired end-to-end measurements do not demonstrate a reliable wall-clock sp
 ### Verification and capture history
 
 - The retained loader matches a cold project load for no-op, manifest, leaf, root, import, rename, and recovery cases. Focused tests also cover removed/re-added contracts, stale cache pruning, malformed or missing import recovery, failed-build last-good output preservation, and bounded watcher paths. The full workspace regression recorded 160 passing tests across 18 suites; Clippy, formatting, and `git diff --check` passed after the source implementation.
-- The first raw capture is preserved as [attempt 01](v8.3-benchmark-attempt-01.json). Its 20 gate errors came from comparing module-level relink counts directly to proof-level affected IDs (for example, 4 relinked contracts versus 2 affected proofs on the unrelated edit). Its artifact hashes and observed proof sets already matched. The corrected runner checks those two granularities independently; it does not modify source, fixtures, proof expectations, or timing values.
+- The first raw capture is preserved as `v8.3-benchmark-attempt-01.json` (raw capture omitted from GitHub). Its 20 gate errors came from comparing module-level relink counts directly to proof-level affected IDs (for example, 4 relinked contracts versus 2 affected proofs on the unrelated edit). Its artifact hashes and observed proof sets already matched. The corrected runner checks those two granularities independently; it does not modify source, fixtures, proof expectations, or timing values.
 - v8.3 acceptance: PASS. Main's `cargo test --workspace --locked` run passed 160 tests across 18 suites; Clippy, formatting, JSON/provenance audit, and `git diff --check` passed. Independent review of the source diff and all benchmark/documentation claims: PASS. With v8.0–v8.2 already PASS, SPEC-V8-A is cumulatively complete; SPEC-V8-B scale work remains a separate gate.
 
 ---
@@ -3714,9 +3714,9 @@ These paired end-to-end measurements do not demonstrate a reliable wall-clock sp
 
 **Capture status: PASS. Independent milestone review: PASS. B1 / v8.8 acceptance: PASS.** The full B1 run contains 145/145 cases and no runner errors.
 
-The B2 final-source scale rerun is preserved separately in [v8.9 B2](v8.9-b2.md) and its [raw capture](v8.9-b2/v8.8-full.json); B1 remains the original v8.8 milestone evidence.
+The B2 final-source scale rerun is preserved separately in [v8.9 B2](v8.9-b2.md) and its `v8.9-b2/v8.8-full.json` (raw capture omitted from GitHub); B1 remains the original v8.8 milestone evidence.
 
-Raw per-case evidence: [v8.8-benchmark.json](v8.8-benchmark.json) (SHA-256: `575fe74a6e519aa1c3409196c1ddccda2f03ca3510df7f0d8c18a6b6000b2f84`). It includes CLI output, normalized diagnostics, graph identities/order, counters, artifact hashes, per-process wall time and peak RSS, and source provenance.
+Raw per-case evidence: `v8.8-benchmark.json` (raw capture omitted from GitHub) (SHA-256: `575fe74a6e519aa1c3409196c1ddccda2f03ca3510df7f0d8c18a6b6000b2f84`). It includes CLI output, normalized diagnostics, graph identities/order, counters, artifact hashes, per-process wall time and peak RSS, and source provenance.
 
 ### Qualification boundary
 

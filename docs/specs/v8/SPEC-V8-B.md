@@ -2,6 +2,8 @@
 
 **범위:** v8.8~v8.9 · **상태:** APPROVED · **SPEC 버전:** 0.5. v0.3의 graph label/no-op 경계 정정에 더해, v0.4 independent review가 general invalid-edit의 cold/retained diagnostic 비교를 명시하라고 요청했다. v0.5는 SPEC-A의 error-location·diagnostic 불변조건이 모든 invalid edit에 적용됨을 분명히 한다. 전체 Reviewer review PASS 후 Main이 v8.8 구현 계약으로 승인했다. Graph topology/counts, scale envelope, repeats, edge budget, 30초·256 MiB 한도, proof bounds, milestone 범위와 gate order는 그대로다. v8.4~v8.7은 의도적 공백이다.
 
+Generated raw JSON captures are excluded from GitHub; checksums are listed in the [capture manifest](../../benchmark-captures.sha256).
+
 ## Goal
 
 SPEC-V8-A의 engine을 측정된 DAG scale envelope에서 qualification하고, v8 전체 결과를 최종 작업본 기준으로 누적 검증해 Freeze한다.
@@ -16,7 +18,7 @@ SPEC-V8-A의 engine을 측정된 DAG scale envelope에서 qualification하고, v
 
 - [SPEC-V8-A](SPEC-V8-A.md)의 PASS 증거와 [v7.9 Freeze](../../history.md#history-v7-9-benchmark)를 선행 기준으로 삼는다. 실행 시 final source commit, branch/HEAD, dirty 범위, graph fixture SHA, benchmark harness, toolchain·host·profile과 플랫폼 artifact identities를 새로 기록한다.
 - 기존 chain 결과는 DAG scale 성능 claim의 before 값이 아니다. Scale baseline은 같은 graph shape와 환경에서 측정한다.
-- v8.3 기준 작업본은 branch `release/v7.9.0`, HEAD `16eedfa0a7206bc3651f0cf308584f3ee2d8bf14`다. 승인 시점 project-loader SHA-256은 `c7165057588d5b2928363f02f3a5967c092afa8fd41a584f8768d568e17f5c40`, dev-loop SHA-256은 `8d67f1254be0322951c07409be6e77888da2ec070af810629fdfdcfa24acd97c`다. v7.9 comparator는 clean commit `ca47543e1407a94df89744b014d54ece761ea09b`와 CLI SHA-256 `f3321f55bbabb541529e192a458b8221ff30e0c646d6cbcb4bb382fb7cb85012`다. [v8.3 raw capture](../../v8.3-benchmark.json)는 fixture·harness·toolchain·host와 current dirty range를 기록한다.
+- v8.3 기준 작업본은 branch `release/v7.9.0`, HEAD `16eedfa0a7206bc3651f0cf308584f3ee2d8bf14`다. 승인 시점 project-loader SHA-256은 `c7165057588d5b2928363f02f3a5967c092afa8fd41a584f8768d568e17f5c40`, dev-loop SHA-256은 `8d67f1254be0322951c07409be6e77888da2ec070af810629fdfdcfa24acd97c`다. v7.9 comparator는 clean commit `ca47543e1407a94df89744b014d54ece761ea09b`와 CLI SHA-256 `f3321f55bbabb541529e192a458b8221ff30e0c646d6cbcb4bb382fb7cb85012`다. `v8.3-benchmark.json` (raw capture omitted from GitHub)는 fixture·harness·toolchain·host와 current dirty range를 기록한다.
 - 이전 planning note에는 8/32/128-node feasibility smoke의 0.774초·33,046,528-byte 최대값이 적혀 있었지만 raw capture, 정확한 fixture/harness/binary identities와 RSS 측정 절차가 보존되지 않았다. 따라서 이 값은 검증 불가로 취급하고 v8.8 baseline, resource 한도의 근거, acceptance/performance evidence에서 제외한다. v8.3 raw capture에는 scale RSS 자료가 없다. 재현 가능한 v8.8 harness가 아래 기준으로 baseline과 current를 새로 측정한다.
 
 ## Invariants

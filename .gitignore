@@ -11,6 +11,16 @@ __pycache__/
 
 # Generated VS Code package
 *.vsix
+editors/vscode/bin/
+
+# Generated benchmark captures; keep source inputs and Markdown summaries
+/docs/v4-performance-baseline.json
+/docs/v*-benchmark*.json
+!/docs/v6-benchmark-final.json
+!/docs/v7.9-benchmark.json
+/docs/v*-identity.json
+/docs/v*-proof.json
+/docs/v8.9-b2/*.json
 
 # Local machine files
 .DS_Store

@@ -19,9 +19,9 @@ single-file flow.
 The extension searches parent directories for `target/debug/axiom` and
 `target/release/axiom` first, then uses the bundled platform CLI, before
 falling back to `axiom` on `PATH`. This lets an open checkout run the current
-workspace build while installed projects still use the bundled fallback. The
-current local artifact includes macOS Apple Silicon (`darwin-arm64`); release
-VSIX packages include the platform CLI binaries built by the release matrix.
+workspace build while installed projects use the bundled fallback. Local VSIX
+packaging requires copying the built CLI into `bin/<platform>/`; release VSIX
+packages include the platform CLI binaries built by the release matrix.
 
 Saving an `.ax` file runs the project check when `synthetix.toml` is present
 and maps parser/type errors to the Problems panel. Typing opens completion
