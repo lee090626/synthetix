@@ -108,9 +108,12 @@ from proof results.
   - Function signature: parameters, parameter types, return type.
   - `requires`: Pre-conditions constraining the valid input domain.
   - `ensures`: Post-conditions that must hold for `result`.
-- **Current limitation**: grammar and semantic rules are intentionally limited to
-  pure scalar `u32`/`i32`/`bool` values with finite conditional expressions;
-  source errors now include line and column positions.
+- **Current scope**: in addition to scalar expressions, verified function
+  implementations support fixed `[u32; N]` inputs (`1 <= N <= 16`), statically
+  bounded accumulator loops (at most 16 iterations), and one structurally
+  decreasing self-call form with a fixed recursion bound. These extensions do
+  not change the v4.1 scalar semantics identifier. Source errors include line
+  and column positions when they carry source spans.
 
 ### `crates/axiom-project` — v2
 - **Role**: Project manifest loading and module linking.
@@ -130,12 +133,14 @@ from proof results.
   - Formulates the verification condition:
     $$\Phi(x) = \text{Requires}(x) \land (\text{Candidate}(x) \neq \text{Ensures}(x))$$
   - Submits $\Phi(x)$ to Z3 SMT Solver (bit-vector theory `QF_BV`).
-  - If UNSAT, the candidate satisfies the specification for all $2^{32}$ inputs.
-- **Current limitation**: supports the current pure scalar expression subset and
-  bundled Z3; it does not yet cover loops, memory, host effects, or external
-  provenance signatures. CLI reports carry verification state and artifact
-  integrity fingerprints, while correctness remains the `ProofResult` plus
-  backend conformance contract.
+  - If UNSAT, the candidate satisfies the specification for every input
+    satisfying `Requires` in the modeled scalar or flattened fixed-array domain.
+- **Current scope**: proves scalar and fixed-array expressions, including the
+  bounded loop and structural-recursion forms described above, with bundled
+  Z3. Loops and recursion are statically unrolled under their fixed limits;
+  heap memory and host effects remain outside the proof core. CLI reports carry
+  verification state and artifact integrity fingerprints, while correctness
+  remains the `ProofResult` plus backend conformance contract.
 
 ### `crates/axiom-synth` — bounded
 - **Role**: Enumerative program synthesizer with formal candidate verification.
@@ -157,8 +162,10 @@ from proof results.
 - **Runtime**: executes the exported `run` function through `wasmi` for `u32`
   inputs and result values.
 - **Design Rule**: Emits the binary directly without a WAT/text round-trip or an external WASM compiler dependency.
-- **Current limitation**: emits and executes only the supported `i32` AMI subset;
-  richer WASM types and host imports are not implemented.
+- **Current scope**: the `i32` WASM ABI carries scalar values and flattened
+  fixed-array elements. Bounded loops and recursion are lowered to finite
+  expressions before emission; dynamic memory collections and host imports are
+  not part of this verified execution path.
 
 ### `crates/axiom-cli` — usable MVP
 - **Role**: Validates contracts, builds WASM, and executes generated modules.

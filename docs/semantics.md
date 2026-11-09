@@ -1,10 +1,11 @@
 # Synthetix Target Semantics & Bit-Vector Specification
 
-This document defines the semantics that all pipeline components must share. The
-current repository slice implements the DSL lexer/parser, AMI evaluator, SMT
-translation, WASM emission, and embedded runtime for pure `u32`/`i32`/`bool`
-expressions, unsigned and signed comparisons, conditional values, and `let`
-bindings; broader semantics are still a target.
+This document defines the semantics that all pipeline components must share.
+The frozen v4.1 scalar baseline covers pure `u32`/`i32`/`bool` expressions,
+comparisons, conditional values, and `let` bindings. Implemented v6 extensions
+add fixed `[u32; N]` proof inputs, statically bounded loops in verified function
+bodies, and bounded structural recursion; these do not change the emitted
+`v4.1-scalar-baseline` identifier.
 
 ## v4.1 Semantic Baseline
 
@@ -77,8 +78,7 @@ The frozen v4 surface contains:
 - scalar `u32`, `i32`, and `bool` contracts and finite conditional values;
 - `contract` declarations for synthesis, `fn` declarations for verified user
   implementations, and `extern fn` declarations for runtime adapters;
-- the `ContractCheck`, `SynthesisResult`, and `ProofResult` states in
-  `docs/roadmap.md`;
+- the `ContractCheck`, `SynthesisResult`, and `ProofResult` states;
 - AMI, reference evaluator, Z3, and WASM conformance for the supported scalar
   operators.
 
@@ -110,10 +110,7 @@ prove these bounds is rejected; AMI/reference evaluation returns an error and
 WASM traps for an out-of-bounds access.
 
 This is a fixed-vector proof model, not heap memory, a runtime collection, or
-an application `List`. v6.0 measured the unsupported verified collection
-parameter as an expressiveness boundary; it did not show application list
-performance to be a bottleneck. The benchmark's priority recommendation for
-compositional summary depth and synthesis scaling remains unchanged.
+an application `List`.
 
 ## v6.2 Bounded Loops
 

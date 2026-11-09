@@ -1,0 +1,3 @@
+contract impossible_result(value: u32) -> u32 {
+ ensures result < 0;
+}

@@ -11,7 +11,7 @@ use axiom_ami::Expr;
 use axiom_parser::{
     BinaryOp, DeclarationKind, PageElement, Reducer, SpecExpr, Type, VERIFIED_SEMANTICS_VERSION,
 };
-use axiom_project::{ContractId, LinkedPage, Project};
+use axiom_project::{ContractId, LinkedPage, Project, RetainedProjectLoader};
 
 #[derive(Debug, Clone)]
 struct CompiledFunction {
@@ -37,7 +37,7 @@ pub struct VerificationCacheStats {
     pub elapsed_micros: u128,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct VerificationCache {
     entries: HashMap<ContractId, CachedVerifiedCandidate>,
     stats: VerificationCacheStats,
@@ -73,22 +73,24 @@ struct DevState {
 
 pub fn build(config_path: &Path, output_dir: &Path) -> Result<BuildResult, String> {
     let mut cache = VerificationCache::default();
-    build_with_cache(config_path, output_dir, &mut cache)
+    build_with_cache(config_path, output_dir, &mut cache, false)
 }
 
 fn build_with_cache(
     config_path: &Path,
     output_dir: &Path,
     cache: &mut VerificationCache,
+    dev_runtime: bool,
 ) -> Result<BuildResult, String> {
     let project = axiom_project::load(config_path)?;
-    build_project(&project, output_dir, cache)
+    build_project(&project, output_dir, cache, dev_runtime)
 }
 
 fn build_project(
     project: &Project,
     output_dir: &Path,
     cache: &mut VerificationCache,
+    dev_runtime: bool,
 ) -> Result<BuildResult, String> {
     let compiled = compile_contracts_with_cache(
         project,
@@ -126,7 +128,7 @@ fn build_project(
     )?;
     write_file(
         &output_dir.join("app.js"),
-        page_javascript(project).as_bytes(),
+        page_javascript(project, dev_runtime).as_bytes(),
     )?;
     write_file(&output_dir.join("app.css"), DEFAULT_CSS.as_bytes())?;
     write_file(
@@ -167,7 +169,9 @@ pub fn dev(config_path: &Path, port: u16, open_browser: bool, once: bool) -> Res
         .ok_or_else(|| "cannot determine project root".to_string())?;
     let output_dir = root.join(".synthetix").join("dev");
     let mut cache = VerificationCache::default();
-    let initial = build_with_cache(config_path, &output_dir, &mut cache)?;
+    let mut retained_loader = RetainedProjectLoader::default();
+    let (project, _) = retained_loader.load(config_path)?;
+    let initial = build_project(&project, &output_dir, &mut cache, true)?;
     if once {
         return Ok(());
     }
@@ -194,6 +198,7 @@ pub fn dev(config_path: &Path, port: u16, open_browser: bool, once: bool) -> Res
             watcher_state,
             watched_files,
             cache,
+            retained_loader,
         )
     });
 
@@ -472,7 +477,7 @@ fn page_html(project: &Project) -> String {
     )
 }
 
-fn page_javascript(project: &Project) -> String {
+fn page_javascript(project: &Project, dev_runtime: bool) -> String {
     let page = project
         .pages
         .first()
@@ -1126,9 +1131,14 @@ boot().catch((error) => {
   reportApplicationError(error);
 });
 
+"#
+    .to_string();
+    if dev_runtime {
+        script.push_str(
+            r#"
 // Local development uses polling instead of a WebSocket so the dev server stays dependency-free.
 let __devVersion = null;
-    setInterval(async () => {
+setInterval(async () => {
   try {
     const response = await fetch('/__synthetix/version', { cache: 'no-store' });
     if (!response.ok) return;
@@ -1142,8 +1152,9 @@ let __devVersion = null;
     errorNode.textContent = error;
   } catch (_) {}
 }, 500);
-"#
-    .to_string();
+"#,
+        );
+    }
     script = script
         .replace("__PAGE_JSON__", &page)
         .replace("__CONTRACTS__", &contracts)
@@ -1582,6 +1593,7 @@ fn watch_project(
     state: Arc<Mutex<DevState>>,
     mut watched_files: Vec<PathBuf>,
     mut cache: VerificationCache,
+    mut retained_loader: RetainedProjectLoader,
 ) {
     let mut snapshot = file_snapshot_for(&watched_files);
     loop {
@@ -1593,6 +1605,7 @@ fn watch_project(
             &mut watched_files,
             &mut snapshot,
             &mut cache,
+            &mut retained_loader,
         );
     }
 }
@@ -1604,15 +1617,24 @@ fn rebuild_if_changed(
     watched_files: &mut Vec<PathBuf>,
     snapshot: &mut HashMap<PathBuf, Option<Vec<u8>>>,
     cache: &mut VerificationCache,
+    retained_loader: &mut RetainedProjectLoader,
 ) -> bool {
     let current = file_snapshot_for(watched_files);
     if current == *snapshot {
         return false;
     }
     *snapshot = current;
-    let project = match axiom_project::load(config_path) {
-        Ok(project) => project,
+    let mut candidate_loader = retained_loader.clone();
+    let (project, load_stats) = match candidate_loader.load(config_path) {
+        Ok(loaded) => loaded,
         Err(error) => {
+            let mut attempted_paths = retained_loader.watch_paths().to_vec();
+            attempted_paths.extend(candidate_loader.watch_paths().iter().cloned());
+            attempted_paths.push(config_path.to_path_buf());
+            attempted_paths.sort();
+            attempted_paths.dedup();
+            *watched_files = attempted_paths;
+            *snapshot = file_snapshot_for(watched_files);
             let mut guard = state.lock().expect("dev state lock poisoned");
             guard.error = Some(error.clone());
             eprintln!("build error: {error}");
@@ -1621,12 +1643,38 @@ fn rebuild_if_changed(
     };
     *watched_files = project.files.clone();
     watched_files.push(config_path.to_path_buf());
+    let mut candidate_cache = cache.clone();
     let mut guard = state.lock().expect("dev state lock poisoned");
-    match build_project(&project, output_dir, cache) {
-        Ok(result) => {
+    match build_project(&project, output_dir, &mut candidate_cache, true) {
+        Ok(mut result) => {
+            let active_ids = project
+                .contracts
+                .iter()
+                .map(ContractId::from)
+                .collect::<std::collections::HashSet<_>>();
+            let stale_entries = candidate_cache
+                .entries
+                .keys()
+                .filter(|id| !active_ids.contains(*id))
+                .count();
+            candidate_cache
+                .entries
+                .retain(|id, _| active_ids.contains(id));
+            candidate_cache.stats.invalidations += stale_entries;
+            result.verification_cache = candidate_cache.stats;
+            *cache = candidate_cache;
+            *retained_loader = candidate_loader;
+            *snapshot = file_snapshot_for(watched_files);
             guard.version = guard.version.saturating_add(1);
             guard.error = None;
             println!("rebuilt successfully (version {})", guard.version);
+            println!(
+                "project cache: {} parsed, {} reused; {} contract(s) relinked, {} reused",
+                load_stats.modules_parsed,
+                load_stats.modules_reused,
+                load_stats.contracts_relinked,
+                load_stats.contracts_reused,
+            );
             println!(
                 "proof cache: {} hit(s), {} miss(es), {} invalidation(s), {}us",
                 result.verification_cache.hits,
@@ -1636,6 +1684,7 @@ fn rebuild_if_changed(
             );
         }
         Err(error) => {
+            *snapshot = file_snapshot_for(watched_files);
             guard.error = Some(error.clone());
             eprintln!("build error: {error}");
         }
@@ -1930,6 +1979,104 @@ mod tests {
     }
 
     #[test]
+    fn proof_cache_keeps_independent_entry_across_remove_readd_and_source_edit() {
+        fn wasm_bytes(compiled: &[CompiledFunction]) -> Vec<u8> {
+            let mut exports = Vec::with_capacity(compiled.len() * 2);
+            for function in compiled {
+                exports.push((function.name.as_str(), &function.candidate, function.params));
+                if let (Some(requires), Some(name)) =
+                    (&function.requires, &function.requires_export)
+                {
+                    exports.push((name.as_str(), requires, function.params));
+                }
+            }
+            axiom_wasm::emit_functions(&exports).unwrap()
+        }
+
+        fn assert_clean_equivalent(
+            config: &Path,
+            cached: &[CompiledFunction],
+            options: axiom_synth::SynthesisOptions,
+        ) {
+            let mut clean_cache = VerificationCache::default();
+            let clean = compile_cached(
+                config,
+                &mut clean_cache,
+                options,
+                VERIFIED_SEMANTICS_VERSION,
+            )
+            .unwrap();
+            assert_eq!(
+                cached
+                    .iter()
+                    .map(|function| (&function.name, &function.candidate))
+                    .collect::<Vec<_>>(),
+                clean
+                    .iter()
+                    .map(|function| (&function.name, &function.candidate))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(wasm_bytes(cached), wasm_bytes(&clean));
+        }
+
+        let root = temp_dir("proof-cache-remove-readd");
+        let config = write_import_graph(&root);
+        let entry = root.join("entry.ax");
+        let independent = root.join("independent.ax");
+        let independent_source =
+            "export contract independent(x: u32) -> u32 { ensures result == x; }\n";
+        let options = axiom_synth::SynthesisOptions::default();
+        let mut cache = VerificationCache::default();
+
+        compile_cached(&config, &mut cache, options, VERIFIED_SEMANTICS_VERSION).unwrap();
+        assert_eq!(cache.entries.len(), 5);
+
+        fs::write(
+            &entry,
+            "import { a } from \"./a.ax\";\ncontract root(x: u32) -> u32 { ensures result == a(x); }\n",
+        )
+        .unwrap();
+        fs::remove_file(&independent).unwrap();
+        let absent =
+            compile_cached(&config, &mut cache, options, VERIFIED_SEMANTICS_VERSION).unwrap();
+        assert_eq!(absent.len(), 4);
+        assert_eq!(cache.stats.hits, 3);
+        assert_eq!(cache.stats.misses, 1);
+        assert_eq!(cache.stats.invalidations, 1);
+        assert_eq!(cache.entries.len(), 5);
+        assert_clean_equivalent(&config, &absent, options);
+
+        fs::write(&independent, independent_source).unwrap();
+        fs::write(
+            &entry,
+            "import { a } from \"./a.ax\";\nimport { independent } from \"./independent.ax\";\ncontract root(x: u32) -> u32 { ensures result == a(x); }\n",
+        )
+        .unwrap();
+        let readded =
+            compile_cached(&config, &mut cache, options, VERIFIED_SEMANTICS_VERSION).unwrap();
+        assert_eq!(cache.stats.hits, 4);
+        assert_eq!(cache.stats.misses, 1);
+        assert_eq!(cache.stats.invalidations, 1);
+        assert_eq!(cache.entries.len(), 5);
+        assert_clean_equivalent(&config, &readded, options);
+
+        fs::write(
+            &independent,
+            "export contract independent(x: u32) -> u32 { ensures result == x +% 3; }\n",
+        )
+        .unwrap();
+        let edited =
+            compile_cached(&config, &mut cache, options, VERIFIED_SEMANTICS_VERSION).unwrap();
+        assert_eq!(cache.stats.hits, 4);
+        assert_eq!(cache.stats.misses, 1);
+        assert_eq!(cache.stats.invalidations, 1);
+        assert_eq!(cache.entries.len(), 5);
+        assert_clean_equivalent(&config, &edited, options);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn proof_cache_does_not_store_failed_or_partial_verification() {
         let root = temp_dir("proof-cache-failure");
         fs::create_dir_all(&root).unwrap();
@@ -2052,11 +2199,14 @@ mod tests {
             files: Vec::new(),
         };
 
-        let javascript = page_javascript(&project);
+        let javascript = page_javascript(&project, false);
         assert!(javascript.contains("WebAssembly.instantiate(bytes, {})"));
         assert!(javascript.contains("callContract(element.function"));
         assert!(javascript.contains("requestEffect(request, targetState"));
         assert!(javascript.contains("fetch('./app.wasm')"));
+        assert!(!javascript.contains("/__synthetix/version"));
+        assert!(!javascript.contains("/__synthetix/error"));
+        assert!(!javascript.contains("setInterval("));
     }
 
     #[test]
@@ -2177,11 +2327,17 @@ mod tests {
         )
         .unwrap();
         let mut cache = VerificationCache::default();
-        build_with_cache(&config, &output_dir, &mut cache).unwrap();
+        build_with_cache(&config, &output_dir, &mut cache, true).unwrap();
+        let dev_javascript = std::fs::read_to_string(output_dir.join("app.js")).unwrap();
+        assert!(dev_javascript.contains("/__synthetix/version"));
+        assert!(dev_javascript.contains("/__synthetix/error"));
+        assert!(dev_javascript.contains("}, 500);"));
         let project = axiom_project::load(&config).unwrap();
         let mut watched_files = project.files;
         watched_files.push(config.clone());
         let mut snapshot = file_snapshot_for(&watched_files);
+        let mut retained_loader = RetainedProjectLoader::default();
+        retained_loader.load(&config).unwrap();
         assert_eq!(cache.stats.misses, 1);
         let state = Arc::new(Mutex::new(DevState {
             version: 1,
@@ -2194,6 +2350,7 @@ mod tests {
             &mut watched_files,
             &mut snapshot,
             &mut cache,
+            &mut retained_loader,
         ));
 
         std::fs::write(
@@ -2208,12 +2365,30 @@ mod tests {
             &mut watched_files,
             &mut snapshot,
             &mut cache,
+            &mut retained_loader,
         ));
         assert_eq!(state.lock().unwrap().version, 2);
         assert_eq!(cache.stats.misses, 1);
         assert_eq!(cache.stats.invalidations, 1);
 
         std::fs::write(&source, "contract value(x: u32) -> u32 {\n").unwrap();
+        let last_good_output = || {
+            let mut files = std::fs::read_dir(&output_dir)
+                .unwrap()
+                .map(|entry| {
+                    let path = entry.unwrap().path();
+                    (
+                        path.file_name().unwrap().to_owned(),
+                        std::fs::read(path).unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            files.sort_by(|left, right| left.0.cmp(&right.0));
+            files
+        };
+        let output_before_syntax_error = last_good_output();
+        let last_good_cache_stats = cache.stats;
+        let last_good_cache_len = cache.entries.len();
         assert!(rebuild_if_changed(
             &config,
             &output_dir,
@@ -2221,8 +2396,12 @@ mod tests {
             &mut watched_files,
             &mut snapshot,
             &mut cache,
+            &mut retained_loader,
         ));
         assert_eq!(state.lock().unwrap().version, 2);
+        assert_eq!(cache.stats, last_good_cache_stats);
+        assert_eq!(cache.entries.len(), last_good_cache_len);
+        assert_eq!(last_good_output(), output_before_syntax_error);
         assert!(
             state
                 .lock()
@@ -2261,6 +2440,7 @@ mod tests {
             &mut watched_files,
             &mut snapshot,
             &mut cache,
+            &mut retained_loader,
         ));
         assert_eq!(state.lock().unwrap().version, 3);
         assert!(state.lock().unwrap().error.is_none());
@@ -2276,6 +2456,188 @@ mod tests {
         let proof_map = get(address, "/app.proof.json");
         assert!(proof_map.contains("\"source\":\"main.ax\""));
         server.join().unwrap();
+
+        let generated = root.join("generated.ax");
+        std::fs::write(
+            &source,
+            "import { helper } from \"./generated.ax\";\ncontract value(x: u32) -> u32 { ensures result == x; }\n",
+        )
+        .unwrap();
+        let cache_stats_before_missing_import = cache.stats;
+        assert!(rebuild_if_changed(
+            &config,
+            &output_dir,
+            &state,
+            &mut watched_files,
+            &mut snapshot,
+            &mut cache,
+            &mut retained_loader,
+        ));
+        assert_eq!(state.lock().unwrap().version, 3);
+        assert_eq!(cache.stats, cache_stats_before_missing_import);
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("generated.ax")
+        );
+        assert!(
+            watched_files
+                .iter()
+                .any(|path| path.ends_with("generated.ax"))
+        );
+
+        std::fs::write(
+            &generated,
+            "export contract helper(x: u32) -> u32 { ensures result == x; }\n",
+        )
+        .unwrap();
+        assert!(rebuild_if_changed(
+            &config,
+            &output_dir,
+            &state,
+            &mut watched_files,
+            &mut snapshot,
+            &mut cache,
+            &mut retained_loader,
+        ));
+        assert_eq!(state.lock().unwrap().version, 4);
+        assert!(state.lock().unwrap().error.is_none());
+        assert!(cache.entries.keys().any(|id| id.name == "helper"));
+
+        std::fs::write(
+            &source,
+            "contract value(x: u32) -> u32 { ensures result == x; }\n",
+        )
+        .unwrap();
+        assert!(rebuild_if_changed(
+            &config,
+            &output_dir,
+            &state,
+            &mut watched_files,
+            &mut snapshot,
+            &mut cache,
+            &mut retained_loader,
+        ));
+        assert_eq!(state.lock().unwrap().version, 5);
+        assert!(!cache.entries.keys().any(|id| id.name == "helper"));
+        assert!(cache.stats.invalidations >= 1);
+
+        std::fs::write(&generated, "export contract helper(x: u32) -> u32 {\n").unwrap();
+        std::fs::write(
+            &source,
+            "import { helper } from \"./generated.ax\";\ncontract value(x: u32) -> u32 { ensures result == x; }\n",
+        )
+        .unwrap();
+        let output_before_malformed_import = last_good_output();
+        let cache_before_malformed_import = cache.stats;
+        assert!(rebuild_if_changed(
+            &config,
+            &output_dir,
+            &state,
+            &mut watched_files,
+            &mut snapshot,
+            &mut cache,
+            &mut retained_loader,
+        ));
+        assert_eq!(state.lock().unwrap().version, 5);
+        assert_eq!(cache.stats, cache_before_malformed_import);
+        assert_eq!(last_good_output(), output_before_malformed_import);
+        assert!(
+            watched_files
+                .iter()
+                .any(|path| path.ends_with("generated.ax"))
+        );
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("generated.ax")
+        );
+
+        std::fs::write(
+            &generated,
+            "export contract helper(x: u32) -> u32 { ensures result == x; }\n",
+        )
+        .unwrap();
+        assert!(rebuild_if_changed(
+            &config,
+            &output_dir,
+            &state,
+            &mut watched_files,
+            &mut snapshot,
+            &mut cache,
+            &mut retained_loader,
+        ));
+        assert_eq!(state.lock().unwrap().version, 6);
+        assert!(state.lock().unwrap().error.is_none());
+        assert!(cache.entries.keys().any(|id| id.name == "helper"));
+
+        let last_good_watch_paths = retained_loader.watch_paths().to_vec();
+        std::fs::write(
+            &source,
+            "import { helper } from \"missing-one.ax\";\ncontract value(x: u32) -> u32 { ensures result == x; }\n",
+        )
+        .unwrap();
+        assert!(rebuild_if_changed(
+            &config,
+            &output_dir,
+            &state,
+            &mut watched_files,
+            &mut snapshot,
+            &mut cache,
+            &mut retained_loader,
+        ));
+        assert!(
+            watched_files
+                .iter()
+                .any(|path| path.ends_with("missing-one.ax"))
+        );
+        assert!(
+            last_good_watch_paths
+                .iter()
+                .all(|path| watched_files.contains(path))
+        );
+
+        let malformed = root.join("malformed-two.ax");
+        std::fs::write(&malformed, "export contract helper(x: u32) -> u32 {\n").unwrap();
+        std::fs::write(
+            &source,
+            "import { helper } from \"malformed-two.ax\";\ncontract value(x: u32) -> u32 { ensures result == x; }\n",
+        )
+        .unwrap();
+        assert!(rebuild_if_changed(
+            &config,
+            &output_dir,
+            &state,
+            &mut watched_files,
+            &mut snapshot,
+            &mut cache,
+            &mut retained_loader,
+        ));
+        assert_eq!(state.lock().unwrap().version, 6);
+        assert!(
+            !watched_files
+                .iter()
+                .any(|path| path.ends_with("missing-one.ax"))
+        );
+        assert!(
+            watched_files
+                .iter()
+                .any(|path| path.ends_with("malformed-two.ax"))
+        );
+        assert!(
+            last_good_watch_paths
+                .iter()
+                .all(|path| watched_files.contains(path))
+        );
+        assert_eq!(watched_files.len(), last_good_watch_paths.len() + 1);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2547,7 +2909,7 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
             }],
             files: Vec::new(),
         };
-        let javascript = page_javascript(&project);
+        let javascript = page_javascript(&project, true);
         let wasm = axiom_wasm::emit_functions(&exports).unwrap();
         let cases = [
             ("mul8", [5, 0]),

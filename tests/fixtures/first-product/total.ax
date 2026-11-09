@@ -1,0 +1,4 @@
+contract total(price: u32, quantity: u32) -> u32 {
+ requires price <= 10000; requires quantity <= 100;
+ ensures result == price *% quantity;
+}

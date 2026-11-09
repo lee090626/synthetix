@@ -30,6 +30,7 @@ fn main() -> ExitCode {
             eprintln!("usage:");
             eprintln!("  axiom dev [--port N] [--no-open] [--once]");
             eprintln!("  axiom check <contract.ax>");
+            eprintln!("  axiom analyze <contract.ax> [--timeout-ms N] [--report report.json]");
             eprintln!("  axiom check");
             eprintln!(
                 "  axiom build <contract.ax> [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N] [--max-memory-bytes N]"
@@ -49,6 +50,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
     match args.first().map(String::as_str) {
         Some("dev") => dev_command(&args[1..]),
         Some("check") => check_command(&args[1..]),
+        Some("analyze") => analyze_command(&args[1..]),
         Some("build") => build_command(&args[1..]),
         Some("run") => run_command(&args[1..]),
         Some("app-run") => application_run_command(&args[1..]),
@@ -72,6 +74,65 @@ fn check_command(args: &[String]) -> Result<(), String> {
     println!("contract: {}", contract.name);
     println!("contract_check: {}", contract_check.status_name());
     println!("status: valid");
+    Ok(())
+}
+
+fn analyze_command(args: &[String]) -> Result<(), String> {
+    use axiom_verify::uniqueness::{ResultUniqueness, analyze_result_uniqueness};
+
+    let input = args.first().ok_or("missing input file for analyze")?;
+    let mut timeout_ms = 10_000_u32;
+    let mut report = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--timeout-ms" => {
+                timeout_ms = required_value(args, &mut index, "timeout in milliseconds")?
+                    .parse()
+                    .map_err(|_| "analysis timeout must be a u32 millisecond value")?;
+            }
+            "--report" => report = Some(required_value(args, &mut index, "report path")?),
+            flag => return Err(format!("unknown analyze option: {flag}")),
+        }
+        index += 1;
+    }
+    let contract = read_contract(input)?;
+    let (status, witness, reason) = match analyze_result_uniqueness(&contract, timeout_ms)? {
+        ResultUniqueness::AtMostOne => ("AT_MOST_ONE", serde_json::Value::Null, None),
+        ResultUniqueness::NonUnique {
+            inputs,
+            first,
+            second,
+        } => (
+            "NON_UNIQUE",
+            serde_json::json!({"inputs": inputs, "results": [first, second]}),
+            None,
+        ),
+        ResultUniqueness::EmptyDomain => {
+            ("UNSATISFIABLE_PRECONDITION", serde_json::Value::Null, None)
+        }
+        ResultUniqueness::Unknown { reason } => ("UNKNOWN", serde_json::Value::Null, Some(reason)),
+    };
+    let artifact = serde_json::json!({
+        "version": 1, "command": "analyze", "source": input, "contract": contract.name,
+        "analysis": "RESULT_UNIQUENESS", "status": status, "reason": reason,
+        "witness": witness, "result_existence": "NOT_CHECKED", "exactly_one": null,
+        "timeout_ms": timeout_ms, "semantics_version": axiom_parser::VERIFIED_SEMANTICS_VERSION,
+        "input_layout": contract.params.iter().map(|param| serde_json::json!({
+            "name": param.name, "type": format!("{:?}", param.ty),
+        })).collect::<Vec<_>>(),
+        "witness_input_order": "declaration order; fixed arrays flattened in element order",
+    });
+    let serialized = serde_json::to_string_pretty(&artifact).map_err(|error| error.to_string())?;
+    if let Some(path) = report {
+        let source_path = fs::canonicalize(input).map_err(|error| error.to_string())?;
+        if fs::canonicalize(path).ok().as_ref() == Some(&source_path) {
+            return Err("analysis report must not overwrite the source file".into());
+        }
+        fs::write(path, format!("{serialized}\n"))
+            .map_err(|error| format!("cannot write analysis report {path}: {error}"))?;
+    }
+    println!("{serialized}");
     Ok(())
 }
 

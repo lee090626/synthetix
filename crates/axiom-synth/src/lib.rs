@@ -7,9 +7,9 @@ use std::{
 
 use axiom_ami::Expr;
 use axiom_parser::{BinaryOp, Contract, DeclarationKind, SpecExpr, Type};
-use axiom_verify::{
-    ContractCheck, PreconditionResult, ProofResult, check_contract, check_preconditions, verify,
-};
+use axiom_verify::{ContractCheck, ProofResult, check_contract, verify};
+
+struct PreconditionsSatisfiable;
 
 #[derive(Debug, Clone, Copy)]
 pub struct SynthesisOptions {
@@ -88,6 +88,14 @@ pub struct SynthesisMetrics {
     pub peak_sample_count: usize,
     pub candidate_generation_time_ns: u128,
     pub sample_generation_time_ns: u128,
+    pub typed_filter_time_ns: u128,
+    pub resource_estimation_time_ns: u128,
+    pub candidate_sort_time_ns: u128,
+    pub sample_evaluation_time_ns: u128,
+    pub total_synthesis_time_ns: u128,
+    pub other_search_residual_time_ns: u128,
+    pub precondition_check_invocations: usize,
+    pub precondition_translation_time_ns: u128,
     pub solver_invocations: usize,
     pub solver_time_ns: u128,
     pub peak_resource_estimate_bytes: usize,
@@ -95,6 +103,8 @@ pub struct SynthesisMetrics {
 
 impl SynthesisMetrics {
     fn merge_verification(&mut self, metrics: axiom_verify::VerificationMetrics) {
+        self.precondition_check_invocations += metrics.precondition_check_invocations;
+        self.precondition_translation_time_ns += metrics.precondition_translation_time_ns;
         self.solver_invocations += metrics.solver_invocations;
         self.solver_time_ns += metrics.solver_time_ns;
     }
@@ -120,7 +130,21 @@ pub fn synthesize_result_with_metrics(
     options: SynthesisOptions,
 ) -> Result<(SynthesisResult, SynthesisMetrics), String> {
     let mut metrics = SynthesisMetrics::default();
+    let started = Instant::now();
     let result = synthesize_result_inner(contract, options, &mut Some(&mut metrics))?;
+    metrics.total_synthesis_time_ns = started.elapsed().as_nanos();
+    let measured_phases = metrics
+        .sample_generation_time_ns
+        .saturating_add(metrics.candidate_generation_time_ns)
+        .saturating_add(metrics.typed_filter_time_ns)
+        .saturating_add(metrics.resource_estimation_time_ns)
+        .saturating_add(metrics.candidate_sort_time_ns)
+        .saturating_add(metrics.sample_evaluation_time_ns)
+        .saturating_add(metrics.solver_time_ns);
+    metrics.other_search_residual_time_ns = metrics
+        .total_synthesis_time_ns
+        .checked_sub(measured_phases)
+        .ok_or_else(|| "synthesis phase timings overlap or exceed total time".to_string())?;
     metrics.candidate_count = metrics.synthesis_iterations;
     Ok((result, metrics))
 }
@@ -166,7 +190,7 @@ fn synthesize_result_inner(
             candidates_checked: 0,
         });
     }
-    search_with_options(contract, options, metrics)
+    search_with_options(contract, options, metrics, PreconditionsSatisfiable)
 }
 
 /// Finds the cheapest verified candidate within the configured bounded search.
@@ -184,30 +208,12 @@ fn search_with_options(
     contract: &Contract,
     options: SynthesisOptions,
     metrics: &mut Option<&mut SynthesisMetrics>,
+    _preconditions_satisfiable: PreconditionsSatisfiable,
 ) -> Result<SynthesisResult, String> {
-    let (_, argument_count) = axiom_parser::verified_abi_layout(&contract.params)?;
+    let (argument_offsets, argument_count) = axiom_parser::verified_abi_layout(&contract.params)?;
     if argument_count > usize::from(u8::MAX) + 1 {
         return Err("verified ABI exceeds 256 flattened inputs".to_string());
     }
-    let preconditions = if let Some(metrics) = metrics.as_deref_mut() {
-        let (result, solver_metrics) = axiom_verify::check_preconditions_with_metrics(contract)?;
-        metrics.merge_verification(solver_metrics);
-        result
-    } else {
-        check_preconditions(contract)?
-    };
-    match preconditions {
-        PreconditionResult::Satisfiable => {}
-        PreconditionResult::UnsatisfiablePrecondition => {
-            return Err(
-                "UNSATISFIABLE_PRECONDITION: requires clauses are contradictory".to_string(),
-            );
-        }
-        PreconditionResult::SolverUnknown => {
-            return Err("SOLVER_UNKNOWN: precondition satisfiability is unknown".to_string());
-        }
-    }
-
     let started = Instant::now();
     let mut checked = 0;
     let bytes_per_sample = std::mem::size_of::<Vec<u32>>()
@@ -262,6 +268,22 @@ fn search_with_options(
         metrics.peak_sample_count = cegis.samples.len();
         metrics.peak_resource_estimate_bytes = cegis.samples.len().saturating_mul(bytes_per_sample);
     }
+    let reusable_offsets = options
+        .timeout
+        .is_none()
+        .then_some(argument_offsets.as_slice());
+    let sample_evaluation_started = metrics.as_ref().is_some().then(Instant::now);
+    let cache_result = if should_cache_requirements(contract, options.timeout) {
+        cegis.cache_requirements(contract, reusable_offsets, started, options.timeout)
+    } else {
+        Ok(())
+    };
+    if let (Some(metrics), Some(started)) = (metrics.as_deref_mut(), sample_evaluation_started) {
+        metrics.sample_evaluation_time_ns += started.elapsed().as_nanos();
+    }
+    if let Err(error) = cache_result {
+        return Ok(sample_error_result(error, checked));
+    }
     let mut first_verified = None;
     let generation_limit = options
         .max_candidates
@@ -274,7 +296,12 @@ fn search_with_options(
         if let Some(metrics) = metrics.as_deref_mut() {
             metrics.generated_candidate_count += 1;
         }
-        if cegis.matches(contract, &candidate) {
+        let sample_eval_started = metrics.as_ref().is_some().then(Instant::now);
+        let matches_samples = cegis.matches(contract, &candidate, reusable_offsets);
+        if let (Some(metrics), Some(started)) = (metrics.as_deref_mut(), sample_eval_started) {
+            metrics.sample_evaluation_time_ns += started.elapsed().as_nanos();
+        }
+        if matches_samples {
             if let Some(metrics) = metrics.as_deref_mut() {
                 metrics.synthesis_iterations += 1;
             }
@@ -287,11 +314,23 @@ fn search_with_options(
                         metrics.peak_sample_count =
                             metrics.peak_sample_count.max(cegis.samples.len() + 1);
                     }
-                    if !cegis.observe(values) {
-                        return Ok(SynthesisResult::ResourceLimit {
-                            candidates_checked: checked,
-                            limit: sample_limit,
-                        });
+                    let sample_eval_started = metrics.as_ref().is_some().then(Instant::now);
+                    let observe =
+                        cegis.observe(contract, values, reusable_offsets, started, options.timeout);
+                    if let (Some(metrics), Some(started)) =
+                        (metrics.as_deref_mut(), sample_eval_started)
+                    {
+                        metrics.sample_evaluation_time_ns += started.elapsed().as_nanos();
+                    }
+                    match observe {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            return Ok(SynthesisResult::ResourceLimit {
+                                candidates_checked: checked,
+                                limit: sample_limit,
+                            });
+                        }
+                        Err(error) => return Ok(sample_error_result(error, checked)),
                     }
                 }
                 ProofResult::SolverUnknown => {
@@ -365,15 +404,23 @@ fn search_with_options(
             });
         }
         let generated_count = candidates.len();
+        let typed_started = metrics.as_ref().is_some().then(Instant::now);
         let mut candidates = typed_candidates(candidates, contract);
+        if let (Some(metrics), Some(started)) = (metrics.as_deref_mut(), typed_started) {
+            metrics.typed_filter_time_ns += started.elapsed().as_nanos();
+        }
         if let Some(metrics) = metrics.as_deref_mut() {
             metrics.rejected_candidate_count += generated_count - candidates.len();
         }
+        let estimate_started = metrics.as_ref().is_some().then(Instant::now);
         let estimated_memory = candidates
             .iter()
             .map(estimated_candidate_bytes)
             .sum::<usize>();
         if let Some(metrics) = metrics.as_deref_mut() {
+            if let Some(started) = estimate_started {
+                metrics.resource_estimation_time_ns += started.elapsed().as_nanos();
+            }
             let sample_bytes = cegis.samples.len().saturating_mul(bytes_per_sample);
             metrics.peak_resource_estimate_bytes = metrics
                 .peak_resource_estimate_bytes
@@ -387,7 +434,11 @@ fn search_with_options(
         }
         // Stable generation order is deterministic and preserves the existing
         // preference for cheaper source-shaped candidates on equal-cost ties.
+        let sort_started = metrics.as_ref().is_some().then(Instant::now);
         candidates.sort_by_key(axiom_wasm::instruction_cost);
+        if let (Some(metrics), Some(started)) = (metrics.as_deref_mut(), sort_started) {
+            metrics.candidate_sort_time_ns += started.elapsed().as_nanos();
+        }
         for candidate in candidates {
             if timed_out(started, options.timeout) {
                 if let Some(candidate) = &first_verified {
@@ -414,7 +465,12 @@ fn search_with_options(
                     limit: options.max_candidates,
                 });
             }
-            if !cegis.matches(contract, &candidate) {
+            let sample_eval_started = metrics.as_ref().is_some().then(Instant::now);
+            let matches_samples = cegis.matches(contract, &candidate, reusable_offsets);
+            if let (Some(metrics), Some(started)) = (metrics.as_deref_mut(), sample_eval_started) {
+                metrics.sample_evaluation_time_ns += started.elapsed().as_nanos();
+            }
+            if !matches_samples {
                 if let Some(metrics) = metrics.as_deref_mut() {
                     metrics.rejected_candidate_count += 1;
                 }
@@ -445,11 +501,23 @@ fn search_with_options(
                         metrics.peak_sample_count =
                             metrics.peak_sample_count.max(cegis.samples.len() + 1);
                     }
-                    if !cegis.observe(values) {
-                        return Ok(SynthesisResult::ResourceLimit {
-                            candidates_checked: checked,
-                            limit: sample_limit,
-                        });
+                    let sample_eval_started = metrics.as_ref().is_some().then(Instant::now);
+                    let observe =
+                        cegis.observe(contract, values, reusable_offsets, started, options.timeout);
+                    if let (Some(metrics), Some(started)) =
+                        (metrics.as_deref_mut(), sample_eval_started)
+                    {
+                        metrics.sample_evaluation_time_ns += started.elapsed().as_nanos();
+                    }
+                    match observe {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            return Ok(SynthesisResult::ResourceLimit {
+                                candidates_checked: checked,
+                                limit: sample_limit,
+                            });
+                        }
+                        Err(error) => return Ok(sample_error_result(error, checked)),
                     }
                 }
                 ProofResult::SolverUnknown => {
@@ -644,6 +712,7 @@ fn format_synthesis_result(result: &SynthesisResult) -> String {
 
 struct CegisState {
     samples: Vec<Vec<u32>>,
+    required_samples: Option<Vec<bool>>,
     last_counterexample: Option<Vec<u32>>,
     max_samples: usize,
 }
@@ -657,24 +726,66 @@ impl CegisState {
     ) -> Result<Self, SampleError> {
         Ok(Self {
             samples: sample_inputs(contract, max_samples, started, timeout)?,
+            required_samples: None,
             last_counterexample: None,
             max_samples,
         })
     }
 
-    fn matches(&self, contract: &Contract, candidate: &Expr) -> bool {
-        matches_samples(contract, candidate, &self.samples)
+    fn cache_requirements(
+        &mut self,
+        contract: &Contract,
+        offsets: Option<&[usize]>,
+        started: Instant,
+        timeout: Option<Duration>,
+    ) -> Result<(), SampleError> {
+        let mut required_samples = Vec::with_capacity(self.samples.len());
+        for args in &self.samples {
+            required_samples.push(sample_satisfies_requirements(
+                contract, args, 0, offsets, started, timeout,
+            )?);
+        }
+        self.required_samples = Some(required_samples);
+        Ok(())
     }
 
-    fn observe(&mut self, counterexample: Vec<u32>) -> bool {
+    fn matches(&self, contract: &Contract, candidate: &Expr, offsets: Option<&[usize]>) -> bool {
+        matches_samples(
+            contract,
+            candidate,
+            &self.samples,
+            self.required_samples.as_deref(),
+            offsets,
+        )
+    }
+
+    fn observe(
+        &mut self,
+        contract: &Contract,
+        counterexample: Vec<u32>,
+        offsets: Option<&[usize]>,
+        started: Instant,
+        timeout: Option<Duration>,
+    ) -> Result<bool, SampleError> {
         self.last_counterexample = Some(counterexample.clone());
         if !self.samples.contains(&counterexample) {
             if self.samples.len() >= self.max_samples {
-                return false;
+                return Ok(false);
+            }
+            if let Some(required_samples) = &mut self.required_samples {
+                let required = sample_satisfies_requirements(
+                    contract,
+                    &counterexample,
+                    0,
+                    offsets,
+                    started,
+                    timeout,
+                )?;
+                required_samples.push(required);
             }
             self.samples.push(counterexample);
         }
-        true
+        Ok(true)
     }
 }
 
@@ -682,6 +793,20 @@ impl CegisState {
 enum SampleError {
     Timeout,
     ResourceLimit(usize),
+}
+
+fn sample_error_result(error: SampleError, candidates_checked: usize) -> SynthesisResult {
+    match error {
+        SampleError::Timeout => SynthesisResult::Timeout { candidates_checked },
+        SampleError::ResourceLimit(limit) => SynthesisResult::ResourceLimit {
+            candidates_checked,
+            limit,
+        },
+    }
+}
+
+fn should_cache_requirements(contract: &Contract, timeout: Option<Duration>) -> bool {
+    timeout.is_none() && requirements_are_candidate_independent(contract)
 }
 
 /// Synthesizes a candidate and lowers the verified result to WebAssembly.
@@ -752,7 +877,7 @@ pub fn check_requires(contract: &Contract, args: &[u32]) -> Result<(), String> {
     }
 
     for expr in &contract.requires {
-        match eval_spec(expr, contract, args, 0, &HashMap::new())? {
+        match eval_spec(expr, contract, args, 0, &HashMap::new(), None)? {
             Value::Bool(true) => {}
             Value::Bool(false) => return Err("input violates a requires clause".to_string()),
             Value::U32(_) | Value::I32(_) | Value::Array(_) => {
@@ -1338,25 +1463,126 @@ fn sample_inputs(
     Ok(samples)
 }
 
-fn matches_samples(contract: &Contract, candidate: &Expr, samples: &[Vec<u32>]) -> bool {
-    samples.iter().all(|args| {
-        let Ok(result) = candidate.try_eval(args) else {
-            return false;
-        };
-        let requires = contract.requires.iter().all(|expr| {
-            matches!(
-                eval_spec(expr, contract, args, result, &HashMap::new()),
-                Ok(Value::Bool(true))
-            )
-        });
-        !requires
-            || contract.ensures.iter().all(|expr| {
+fn sample_satisfies_requirements(
+    contract: &Contract,
+    args: &[u32],
+    result: u32,
+    offsets: Option<&[usize]>,
+    started: Instant,
+    timeout: Option<Duration>,
+) -> Result<bool, SampleError> {
+    for expr in &contract.requires {
+        if timed_out(started, timeout) {
+            return Err(SampleError::Timeout);
+        }
+        let satisfied = matches!(
+            eval_spec(expr, contract, args, result, &HashMap::new(), offsets),
+            Ok(Value::Bool(true))
+        );
+        if timed_out(started, timeout) {
+            return Err(SampleError::Timeout);
+        }
+        if !satisfied {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn matches_samples(
+    contract: &Contract,
+    candidate: &Expr,
+    samples: &[Vec<u32>],
+    required_samples: Option<&[bool]>,
+    offsets: Option<&[usize]>,
+) -> bool {
+    if let Some(required_samples) = required_samples.filter(|cache| cache.len() == samples.len()) {
+        samples
+            .iter()
+            .zip(required_samples)
+            .all(|(args, required)| {
+                let Ok(result) = candidate.try_eval(args) else {
+                    return false;
+                };
+                !required
+                    || contract.ensures.iter().all(|expr| {
+                        matches!(
+                            eval_spec(expr, contract, args, result, &HashMap::new(), offsets),
+                            Ok(Value::Bool(true))
+                        )
+                    })
+            })
+    } else {
+        samples.iter().all(|args| {
+            let Ok(result) = candidate.try_eval(args) else {
+                return false;
+            };
+            let requires = contract.requires.iter().all(|expr| {
                 matches!(
-                    eval_spec(expr, contract, args, result, &HashMap::new()),
+                    eval_spec(expr, contract, args, result, &HashMap::new(), offsets),
                     Ok(Value::Bool(true))
                 )
-            })
-    })
+            });
+            !requires
+                || contract.ensures.iter().all(|expr| {
+                    matches!(
+                        eval_spec(expr, contract, args, result, &HashMap::new(), offsets),
+                        Ok(Value::Bool(true))
+                    )
+                })
+        })
+    }
+}
+
+fn contains_result_identifier(expr: &SpecExpr) -> bool {
+    match expr {
+        SpecExpr::Ident(name) => name == "result",
+        SpecExpr::List(values) | SpecExpr::Call(_, values) => {
+            values.iter().any(contains_result_identifier)
+        }
+        SpecExpr::Record { fields, .. } => fields
+            .iter()
+            .any(|(_, value)| contains_result_identifier(value)),
+        SpecExpr::Field(value, _) => contains_result_identifier(value),
+        SpecExpr::Index(array, index) => {
+            contains_result_identifier(array) || contains_result_identifier(index)
+        }
+        SpecExpr::ArrayUpdate(array, index, value) => {
+            contains_result_identifier(array)
+                || contains_result_identifier(index)
+                || contains_result_identifier(value)
+        }
+        SpecExpr::For {
+            initial,
+            invariant,
+            body,
+            ..
+        } => {
+            contains_result_identifier(initial)
+                || contains_result_identifier(invariant)
+                || contains_result_identifier(body)
+        }
+        SpecExpr::Binary(_, lhs, rhs) => {
+            contains_result_identifier(lhs) || contains_result_identifier(rhs)
+        }
+        SpecExpr::Let(_, value, body) => {
+            contains_result_identifier(value) || contains_result_identifier(body)
+        }
+        SpecExpr::If(condition, then_branch, else_branch) => {
+            contains_result_identifier(condition)
+                || contains_result_identifier(then_branch)
+                || contains_result_identifier(else_branch)
+        }
+        SpecExpr::Number(_) | SpecExpr::Bool(_) | SpecExpr::Text(_) => false,
+    }
+}
+
+fn requirements_are_candidate_independent(contract: &Contract) -> bool {
+    !contract.requires.is_empty()
+        && contract
+            .requires
+            .iter()
+            .all(|expr| !contains_result_identifier(expr))
 }
 
 #[derive(Clone)]
@@ -1386,6 +1612,7 @@ fn eval_spec(
     args: &[u32],
     result: u32,
     locals: &HashMap<String, Value>,
+    offsets: Option<&[usize]>,
 ) -> Result<Value, String> {
     match expr {
         SpecExpr::Ident(name) if name == "result" => {
@@ -1404,8 +1631,10 @@ fn eval_spec(
                 .iter()
                 .position(|param| param.name == *name)
                 .ok_or_else(|| format!("unknown identifier: {name}"))?;
-            let (offsets, _) = axiom_parser::verified_abi_layout(&contract.params)?;
-            let offset = offsets[index];
+            let offset = match offsets {
+                Some(offsets) => offsets[index],
+                None => axiom_parser::verified_abi_layout(&contract.params)?.0[index],
+            };
             let value = args
                 .get(offset)
                 .copied()
@@ -1421,26 +1650,33 @@ fn eval_spec(
         }
         SpecExpr::Number(value) => Ok(Value::U32(*value)),
         SpecExpr::Bool(value) => Ok(Value::Bool(*value)),
-        SpecExpr::Field(value, field) => match eval_spec(value, contract, args, result, locals)? {
-            Value::Array(elements) if field == "length" => Ok(Value::U32(elements.len() as u32)),
-            _ => Err("field access is only supported for fixed array length".to_string()),
-        },
+        SpecExpr::Field(value, field) => {
+            match eval_spec(value, contract, args, result, locals, offsets)? {
+                Value::Array(elements) if field == "length" => {
+                    Ok(Value::U32(elements.len() as u32))
+                }
+                _ => Err("field access is only supported for fixed array length".to_string()),
+            }
+        }
         SpecExpr::Index(array, index) => {
-            let Value::Array(elements) = eval_spec(array, contract, args, result, locals)? else {
+            let Value::Array(elements) = eval_spec(array, contract, args, result, locals, offsets)?
+            else {
                 return Err("indexed reads require a fixed verified array".to_string());
             };
-            let index = eval_spec(index, contract, args, result, locals)?;
+            let index = eval_spec(index, contract, args, result, locals, offsets)?;
             let index = checked_sample_index(index, elements.len())?;
             Ok(Value::U32(elements[index]))
         }
         SpecExpr::ArrayUpdate(array, index, value) => {
-            let Value::Array(mut elements) = eval_spec(array, contract, args, result, locals)?
+            let Value::Array(mut elements) =
+                eval_spec(array, contract, args, result, locals, offsets)?
             else {
                 return Err("array_update requires a fixed verified array".to_string());
             };
-            let index = eval_spec(index, contract, args, result, locals)?;
+            let index = eval_spec(index, contract, args, result, locals, offsets)?;
             let index = checked_sample_index(index, elements.len())?;
-            let Value::U32(value) = eval_spec(value, contract, args, result, locals)? else {
+            let Value::U32(value) = eval_spec(value, contract, args, result, locals, offsets)?
+            else {
                 return Err("array update value must be u32".to_string());
             };
             elements[index] = value;
@@ -1453,30 +1689,30 @@ fn eval_spec(
             Err("non-scalar expressions cannot be synthesized".to_string())
         }
         SpecExpr::Let(name, value, body) => {
-            let value = eval_spec(value, contract, args, result, locals)?;
+            let value = eval_spec(value, contract, args, result, locals, offsets)?;
             let mut nested = locals.clone();
             nested.insert(name.clone(), value);
-            eval_spec(body, contract, args, result, &nested)
+            eval_spec(body, contract, args, result, &nested, offsets)
         }
         SpecExpr::If(condition, then_branch, else_branch) => {
-            let condition = match eval_spec(condition, contract, args, result, locals)? {
+            let condition = match eval_spec(condition, contract, args, result, locals, offsets)? {
                 Value::Bool(value) => value,
                 Value::U32(_) | Value::I32(_) | Value::Array(_) => {
                     return Err("if condition must be boolean".to_string());
                 }
             };
             if condition {
-                eval_spec(then_branch, contract, args, result, locals)
+                eval_spec(then_branch, contract, args, result, locals, offsets)
             } else {
-                eval_spec(else_branch, contract, args, result, locals)
+                eval_spec(else_branch, contract, args, result, locals, offsets)
             }
         }
         SpecExpr::Call(name, _) => Err(format!(
             "unresolved contract call: {name}; link the project before synthesis"
         )),
         SpecExpr::Binary(op, lhs, rhs) => {
-            let lhs = eval_spec(lhs, contract, args, result, locals)?;
-            let rhs = eval_spec(rhs, contract, args, result, locals)?;
+            let lhs = eval_spec(lhs, contract, args, result, locals, offsets)?;
+            let rhs = eval_spec(rhs, contract, args, result, locals, offsets)?;
             match (op, lhs, rhs) {
                 (BinaryOp::AddWrap, Value::U32(lhs), Value::U32(rhs)) => {
                     Ok(Value::U32(lhs.wrapping_add(rhs)))
@@ -1851,6 +2087,21 @@ mod tests {
     }
 
     #[test]
+    fn metrics_keep_candidate_precondition_proofs_after_preflight_reuse() {
+        let contract = parse("contract identity(x: u32) -> u32 { ensures result == x; }").unwrap();
+
+        let (result, metrics) =
+            synthesize_result_with_metrics(&contract, SynthesisOptions::default()).unwrap();
+
+        assert!(matches!(result, SynthesisResult::Found { .. }));
+        assert!(metrics.synthesis_iterations > 0);
+        assert_eq!(
+            metrics.precondition_check_invocations,
+            1 + metrics.synthesis_iterations
+        );
+    }
+
+    #[test]
     fn synthesizes_static_fixed_array_reads_deterministically() {
         let contract =
             parse("contract first(values: [u32; 3]) -> u32 { ensures result == values[0]; }")
@@ -1877,7 +2128,7 @@ mod tests {
     fn resource_limited_search_fallbacks_are_proved_and_run_in_wasm() {
         let cases = [
             (
-                include_str!("../../../benchmarks/v6/synthesis/maximum_3.ax"),
+                include_str!("../../../tests/fixtures/synthesis/maximum_3.ax"),
                 vec![
                     (vec![0, u32::MAX, 2], u32::MAX),
                     (vec![4, 4, 1], 4),
@@ -1885,14 +2136,14 @@ mod tests {
                 ],
             ),
             (
-                include_str!("../../../benchmarks/v6/synthesis/bitwise_combo.ax"),
+                include_str!("../../../tests/fixtures/synthesis/bitwise_combo.ax"),
                 [0, 1, 15, 16, u32::MAX]
                     .into_iter()
                     .map(|value| (vec![value], (value & 15) ^ value.wrapping_add(1)))
                     .collect(),
             ),
             (
-                include_str!("../../../benchmarks/v6/synthesis/sum_8.ax"),
+                include_str!("../../../tests/fixtures/synthesis/sum_8.ax"),
                 vec![
                     (vec![u32::MAX, 1, 2, 3, 4, 5, 6, 7], 27),
                     (vec![1, 2, 3, 4, 5, 6, 7, 8], 36),
@@ -2013,26 +2264,39 @@ mod tests {
     fn exposes_timeout_and_resource_limit_as_search_states() {
         let contract = parse(include_str!("../../../examples/basics/mul8.ax")).unwrap();
 
+        let timed_out = synthesize_result_with_options(
+            &contract,
+            SynthesisOptions {
+                timeout: Some(Duration::ZERO),
+                ..SynthesisOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(timed_out.status_name(), "TIMEOUT");
+        assert!(matches!(timed_out, SynthesisResult::Timeout { .. }));
+
+        let finite_timeout = synthesize_result_with_options(
+            &contract,
+            SynthesisOptions {
+                timeout: Some(Duration::from_nanos(1)),
+                ..SynthesisOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(finite_timeout.status_name(), "TIMEOUT");
+        assert!(matches!(finite_timeout, SynthesisResult::Timeout { .. }));
+
+        let resource_limited = synthesize_result_with_options(
+            &contract,
+            SynthesisOptions {
+                max_candidates: 0,
+                ..SynthesisOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(resource_limited.status_name(), "RESOURCE_LIMIT");
         assert!(matches!(
-            synthesize_result_with_options(
-                &contract,
-                SynthesisOptions {
-                    timeout: Some(Duration::ZERO),
-                    ..SynthesisOptions::default()
-                }
-            )
-            .unwrap(),
-            SynthesisResult::Timeout { .. }
-        ));
-        assert!(matches!(
-            synthesize_result_with_options(
-                &contract,
-                SynthesisOptions {
-                    max_candidates: 0,
-                    ..SynthesisOptions::default()
-                }
-            )
-            .unwrap(),
+            resource_limited,
             SynthesisResult::ResourceLimit { .. }
         ));
         assert!(matches!(
@@ -2046,10 +2310,9 @@ mod tests {
             .unwrap(),
             SynthesisResult::ResourceLimit { .. }
         ));
-        assert!(matches!(
-            synthesize_result_with_options(&contract, SynthesisOptions::default()).unwrap(),
-            SynthesisResult::Found { .. }
-        ));
+        let found = synthesize_result_with_options(&contract, SynthesisOptions::default()).unwrap();
+        assert_eq!(found.status_name(), "FOUND");
+        assert!(matches!(found, SynthesisResult::Found { .. }));
     }
 
     #[test]
@@ -2098,9 +2361,134 @@ mod tests {
     }
 
     #[test]
+    fn sample_requirement_cache_tracks_added_and_duplicate_counterexamples() {
+        let contract =
+            parse("contract positive(x: u32) -> u32 { requires x > 0; ensures result == x; }")
+                .unwrap();
+        let offsets = axiom_parser::verified_abi_layout(&contract.params)
+            .unwrap()
+            .0;
+        let mut cegis = CegisState {
+            samples: vec![vec![1]],
+            required_samples: Some(vec![true]),
+            last_counterexample: None,
+            max_samples: 3,
+        };
+
+        assert!(
+            cegis
+                .observe(&contract, vec![0], Some(&offsets), Instant::now(), None)
+                .unwrap()
+        );
+        assert_eq!(cegis.samples, vec![vec![1], vec![0]]);
+        assert_eq!(cegis.required_samples, Some(vec![true, false]));
+        assert!(
+            cegis
+                .observe(&contract, vec![0], Some(&offsets), Instant::now(), None)
+                .unwrap()
+        );
+        assert_eq!(
+            cegis.samples.len(),
+            cegis.required_samples.as_ref().unwrap().len()
+        );
+        assert_eq!(cegis.samples.len(), 2);
+    }
+
+    #[test]
+    fn result_dependent_requirements_keep_candidate_specific_evaluation() {
+        let mut contract =
+            parse("contract result_guard(x: u32) -> u32 { ensures result == x; }").unwrap();
+        contract.requires.push(SpecExpr::Binary(
+            BinaryOp::Eq,
+            Box::new(SpecExpr::Ident("result".to_string())),
+            Box::new(SpecExpr::Ident("x".to_string())),
+        ));
+        let samples = vec![vec![0]];
+        let candidate = Expr::Const(1);
+        let offsets = axiom_parser::verified_abi_layout(&contract.params)
+            .unwrap()
+            .0;
+
+        assert!(!requirements_are_candidate_independent(&contract));
+        assert!(matches_samples(
+            &contract,
+            &candidate,
+            &samples,
+            None,
+            Some(&offsets)
+        ));
+        assert!(!matches_samples(
+            &contract,
+            &candidate,
+            &samples,
+            Some(&[true]),
+            Some(&offsets)
+        ));
+    }
+
+    #[test]
+    fn mismatched_requirement_cache_falls_back_to_uncached_matching() {
+        let contract =
+            parse("contract positive(x: u32) -> u32 { requires x > 0; ensures result == 1; }")
+                .unwrap();
+        let samples = vec![vec![1], vec![0]];
+        let candidate = Expr::Const(0);
+        let offsets = axiom_parser::verified_abi_layout(&contract.params)
+            .unwrap()
+            .0;
+        let uncached = matches_samples(&contract, &candidate, &samples, None, Some(&offsets));
+
+        assert!(!uncached);
+        assert_eq!(
+            matches_samples(
+                &contract,
+                &candidate,
+                &samples,
+                Some(&[false]),
+                Some(&offsets)
+            ),
+            uncached
+        );
+    }
+
+    #[test]
+    fn expired_observation_preserves_sample_limit_classification() {
+        let contract =
+            parse("contract positive(x: u32) -> u32 { requires x > 0; ensures result == x; }")
+                .unwrap();
+        let mut cegis = CegisState {
+            samples: vec![vec![1]],
+            required_samples: None,
+            last_counterexample: None,
+            max_samples: 1,
+        };
+        let timeout = Duration::from_millis(1);
+        let expired = Instant::now() - timeout - Duration::from_millis(1);
+
+        let observe = cegis.observe(&contract, vec![0], None, expired, Some(timeout));
+        assert!(matches!(observe, Ok(false)));
+        assert_eq!(cegis.samples, vec![vec![1]]);
+        assert_eq!(cegis.required_samples, None);
+    }
+
+    #[test]
+    fn no_timeout_cache_is_retained_and_finite_timeout_bypasses_it() {
+        let contract =
+            parse("contract positive(x: u32) -> u32 { requires x > 0; ensures result == x; }")
+                .unwrap();
+        let timeout = Duration::from_millis(1);
+
+        assert!(should_cache_requirements(&contract, None));
+        assert!(!should_cache_requirements(&contract, Some(timeout)));
+    }
+
+    #[test]
     fn reuses_a_counterexample_in_the_next_candidate_filter() {
         let contract =
             parse("contract identity(value: u32) -> u32 { ensures result == value; }").unwrap();
+        let offsets = axiom_parser::verified_abi_layout(&contract.params)
+            .unwrap()
+            .0;
         let mut cegis = CegisState::new(&contract, 100, Instant::now(), None).unwrap();
         let candidate = Expr::Select {
             condition: Box::new(Expr::Eq(Box::new(Expr::Arg(0)), Box::new(Expr::Const(123)))),
@@ -2108,9 +2496,13 @@ mod tests {
             else_branch: Box::new(Expr::Arg(0)),
         };
 
-        assert!(cegis.matches(&contract, &candidate));
-        assert!(cegis.observe(vec![123]));
-        assert!(!cegis.matches(&contract, &candidate));
+        assert!(cegis.matches(&contract, &candidate, Some(&offsets)));
+        assert!(
+            cegis
+                .observe(&contract, vec![123], Some(&offsets), Instant::now(), None)
+                .unwrap()
+        );
+        assert!(!cegis.matches(&contract, &candidate, Some(&offsets)));
     }
 
     #[test]

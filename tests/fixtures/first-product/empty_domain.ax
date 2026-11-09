@@ -1,0 +1,3 @@
+contract empty_domain(value: u32) -> u32 {
+ requires value > 0; requires value == 0; ensures result == value;
+}

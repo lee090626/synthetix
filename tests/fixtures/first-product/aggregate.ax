@@ -1,0 +1,5 @@
+contract aggregate(values: [u32; 4]) -> u32 {
+ requires values[0] <= 250000; requires values[1] <= 250000;
+ requires values[2] <= 250000; requires values[3] <= 250000;
+ ensures result == values[0] +% values[1] +% values[2] +% values[3];
+}

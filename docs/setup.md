@@ -36,9 +36,9 @@ node ./check-vsix.js /tmp/synthetix-vscode.vsix
 code --install-extension /tmp/synthetix-vscode.vsix --force
 ```
 
-For the v2 browser workflow, create `synthetix.toml` with an `entry` file and
-run `axiom dev`. This starts the local web development server and watches the
-imported `.ax` files. See [the v2 specification](v2.md).
+For the browser workflow, create `synthetix.toml` with an `entry` file and run
+`axiom dev`. This starts the local web development server and watches the
+imported `.ax` files.
 
 Use the checked-in web counter as a starter project:
 
