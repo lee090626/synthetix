@@ -110,10 +110,7 @@ prove these bounds is rejected; AMI/reference evaluation returns an error and
 WASM traps for an out-of-bounds access.
 
 This is a fixed-vector proof model, not heap memory, a runtime collection, or
-an application `List`. v6.0 measured the unsupported verified collection
-parameter as an expressiveness boundary; it did not show application list
-performance to be a bottleneck. The benchmark's priority recommendation for
-compositional summary depth and synthesis scaling remains unchanged.
+an application `List`.
 
 ## v6.2 Bounded Loops
 

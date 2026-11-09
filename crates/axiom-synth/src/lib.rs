@@ -2128,7 +2128,7 @@ mod tests {
     fn resource_limited_search_fallbacks_are_proved_and_run_in_wasm() {
         let cases = [
             (
-                include_str!("../../../benchmarks/v6/synthesis/maximum_3.ax"),
+                include_str!("../../../tests/fixtures/synthesis/maximum_3.ax"),
                 vec![
                     (vec![0, u32::MAX, 2], u32::MAX),
                     (vec![4, 4, 1], 4),
@@ -2136,14 +2136,14 @@ mod tests {
                 ],
             ),
             (
-                include_str!("../../../benchmarks/v6/synthesis/bitwise_combo.ax"),
+                include_str!("../../../tests/fixtures/synthesis/bitwise_combo.ax"),
                 [0, 1, 15, 16, u32::MAX]
                     .into_iter()
                     .map(|value| (vec![value], (value & 15) ^ value.wrapping_add(1)))
                     .collect(),
             ),
             (
-                include_str!("../../../benchmarks/v6/synthesis/sum_8.ax"),
+                include_str!("../../../tests/fixtures/synthesis/sum_8.ax"),
                 vec![
                     (vec![u32::MAX, 1, 2, 3, 4, 5, 6, 7], 27),
                     (vec![1, 2, 3, 4, 5, 6, 7, 8], 36),
