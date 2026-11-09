@@ -15,9 +15,9 @@
 
 ## Baseline
 
-- v7.9 Freeze의 [결과](../../history.md#history-v7-9-benchmark)와 [raw evidence](../../v7.9-benchmark.json)를 출발점으로 삼는다. 실제 실행 시작 시 clean v7.9 source commit/HEAD, branch, dirty 범위, toolchain, host, profile과 fixture SHA를 다시 기록한다. 현재 문서 편집 작업본을 clean baseline으로 가정하지 않는다.
+- v7.9 [benchmark evidence](../../v7.9-benchmark.json)를 출발점으로 삼는다. 실제 실행 시작 시 clean v7.9 source commit/HEAD, branch, dirty 범위, toolchain, host, profile과 fixture SHA를 다시 기록한다. 현재 문서 편집 작업본을 clean baseline으로 가정하지 않는다.
 - 승인 시점 `release/v7.9.0` HEAD는 `16eedfa0a7206bc3651f0cf308584f3ee2d8bf14`이며 v7.9 검증 source `ca47543e1407a94df89744b014d54ece761ea09b`와 source 차이가 없다. 수정 전 `cargo test --workspace --locked`는 155개 PASS다. 문서 변경과 기존 `scripts/__pycache__/`는 clean benchmark snapshot에서 제외한다.
-- v7.3 cache는 process-local이며 verified-only insertion과 clean-cache equality를 [기록](../../history.md#history-v7-3-benchmark)했다. 기존 v6 depth-8 call-chain 및 32-module caller-chain 수치는 DAG scale이나 parallel proof의 근거가 아니다.
+- v7.3 cache는 process-local이며 verified-only insertion과 clean-cache equality를 기준으로 삼았다. 기존 v6 depth-8 call-chain 및 32-module caller-chain 수치는 DAG scale이나 parallel proof의 근거가 아니다.
 - 현재 DAG shape별 parse/link 비용, invalidation closure, scale 및 parallel-verification benchmark는 없다. 이는 측정 공백이다.
 - 현재 `axiom_project::load`와 `axiom dev`는 변경 때마다 전체 parse/link를 다시 수행하고 proof candidate만 process-local cache에서 재사용한다. Cache counters는 합계이며 affected `ContractId` 집합을 직접 제공하지 않는다. 현재 `ContractId`는 canonical source path와 contract name의 쌍이다.
 

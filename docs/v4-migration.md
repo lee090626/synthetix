@@ -27,7 +27,7 @@ are not replacements for a synthesis or proof state.
 The report semantics identifier is `v4.1-scalar-baseline`. A
 `verification_artifact_hash` or `wasm_hash` identifies artifact integrity only;
 neither value is a correctness proof. Correctness requires `ProofResult.VERIFIED`
-and the backend conformance checks documented in [the v4 record](history.md#history-roadmap-v4-v7-record).
+and the [backend conformance test](../crates/axiom-synth/src/lib.rs).
 
 ## Not part of the v4 migration
 

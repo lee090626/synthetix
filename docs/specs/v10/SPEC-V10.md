@@ -14,7 +14,7 @@ Source edition, semantics profile, proof artifact, CLI/VSCode, application/stora
 
 ## Baseline
 
-- v9.9 PASS와 v7.9 [Freeze 근거](../../history.md#history-v7-9-benchmark)를 선행한다. 실제 시작 시 source commit/branch/dirty 상태, external consumer, `.ax`·manifest, semantics ids, proof/CLI schema, storage schema, CLI/VSIX/tag/Cargo version mapping을 다시 inventory한다.
+- v9.9 PASS와 v7.9 [benchmark](../../v7.9-benchmark.json)를 선행 기준으로 삼는다. 실제 시작 시 source commit/branch/dirty 상태, external consumer, `.ax`·manifest, semantics ids, proof/CLI schema, storage schema, CLI/VSIX/tag/Cargo version mapping을 다시 inventory한다.
 - 기존 계획에는 `v4.1-scalar-baseline`, `v6.3-bounded-program-model`, report/manifest format `4`, 별도 storage schema, Cargo crate `0.1.0`, VSIX `0.14.1`, tag `v0.14.0`이 서로 다른 축으로 기록돼 있다. 현재 값이라고 가정하지 말고 실행 때 재확인한다.
 
 ## Invariants

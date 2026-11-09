@@ -25,6 +25,9 @@ editors/vscode/bin/
 # Local machine files
 .DS_Store
 
+# Local archive of historical project records
+/docs/history.md
+
 # Scratch files from the old editor demo
 /editors/.ax
 /editors/test.ax
