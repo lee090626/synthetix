@@ -78,8 +78,7 @@ The frozen v4 surface contains:
 - scalar `u32`, `i32`, and `bool` contracts and finite conditional values;
 - `contract` declarations for synthesis, `fn` declarations for verified user
   implementations, and `extern fn` declarations for runtime adapters;
-- the `ContractCheck`, `SynthesisResult`, and `ProofResult` states in
-  [v4–v7 historical record](history.md#history-roadmap-v4-v7-record);
+- the `ContractCheck`, `SynthesisResult`, and `ProofResult` states;
 - AMI, reference evaluator, Z3, and WASM conformance for the supported scalar
   operators.
 
