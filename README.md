@@ -75,12 +75,13 @@ contract mul8(x: u32) -> u32 {
 synthetix/
 ├── Cargo.toml
 ├── docs/
-│   ├── architecture.md    # Component responsibilities & design principles
-│   ├── semantics.md       # Bit-vector modulo 2^32 semantics
-│   ├── roadmap.md         # Major direction and milestone summary
-│   ├── specs/             # Implementation and verification contracts
-│   ├── v4-migration.md    # v4 frozen boundary and migration notes
-│   └── setup.md           # Fresh-checkout setup and smoke test
+│   ├── application-boundary.md
+│   ├── architecture.md
+│   ├── first-product/     # Product assumptions and CLI analysis guide
+│   ├── roadmap.md
+│   ├── semantics.md
+│   ├── setup.md
+│   └── vscode.md
 ├── crates/
 │   ├── axiom-ami/         # Implemented: AMI definition and interpreter
 │   ├── axiom-parser/      # Implemented: Axiom DSL lexer, parser, AST
@@ -109,7 +110,7 @@ synthetix/
 Ensure Rust is installed via `rustup`:
 
 ```bash
-cd /Users/ihyeongseog/Developer/synthetix
+# Run these commands from the repository root.
 
 # Run the workspace tests
 cargo test --workspace
@@ -130,16 +131,20 @@ cargo run -p axiom-cli -- run examples/basics/mul8.ax -- 5
 cargo run -p axiom-cli -- run examples/basics/mul8.ax -- 5 --report /tmp/mul8.json --timeout-ms 10000
 ```
 
+To check whether a declarative contract permits different outputs at the same input,
+use `axiom analyze <contract.ax>`. `AT_MOST_ONE` does not prove an output exists
+for every valid input. See [result analysis](docs/first-product/result-analysis.md)
+for witnesses, supported types, and inconclusive outcomes.
+
 For VSCode development, open `editors` as an extension project and start the
 Extension Development Host. In the host, open an `.ax` file and click the play
 button. The command asks for a `u32` input, runs the generated WASM, and shows
 the result in `Output → Synthetix`. See [the VSCode guide](docs/vscode.md).
 
 The proof core supports pure `u32`, signed `i32`, and `bool` values with finite conditional values.
-v3.1 adds browser-side records, lists, text inputs, components, and explicit
-localStorage persistence around verified scalar reducers. See [the v2
-specification](docs/v2.md), [the v3 specification](docs/v3.md), and [the
-application boundary](docs/application-boundary.md) for the web build boundary.
+The browser app layer adds records, lists, text inputs, components, and explicit
+localStorage persistence around verified scalar reducers. See the
+[application boundary](docs/application-boundary.md) for the web build boundary.
 
 For the browser workflow:
 
