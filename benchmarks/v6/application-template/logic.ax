@@ -1,3 +1,0 @@
-export contract increment(value: u32) -> u32 {
-    ensures result == value +% 1;
-}

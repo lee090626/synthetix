@@ -13,7 +13,7 @@ use axiom_project::{ContractId, LinkedContract, Project, load};
 use serde_json::{Value, json};
 
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
-const FIXTURE: &str = include_str!("../../../benchmarks/v8/proof-dag-fixtures.json");
+const FIXTURE: &str = include_str!("../../../tests/fixtures/proofs/proof-dag.json");
 
 struct TempProject(PathBuf);
 
@@ -25,7 +25,7 @@ impl TempProject {
             .as_nanos();
         let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
-            "synthetix-v8-proof-dag-{}-{nonce}-{sequence}",
+            "synthetix-compositional-proof-{}-{nonce}-{sequence}",
             std::process::id()
         ));
         let fixture: Value = serde_json::from_str(FIXTURE).unwrap();
@@ -226,29 +226,21 @@ fn oracle_sample(project: &Project, contract_id: &ContractId, input: u32) -> Res
     }))
 }
 
-fn emit(rows: &mut Vec<Value>, case: &str, expected: Value, observed: Value) {
-    let status = if expected == observed { "PASS" } else { "FAIL" };
-    rows.push(json!({"case": case, "status": status, "expected": expected, "observed": observed}));
-    assert_eq!(
-        rows.last().unwrap()["expected"],
-        rows.last().unwrap()["observed"],
-        "{case}"
-    );
+fn assert_case(case: &str, expected: Value, observed: Value) {
+    assert_eq!(expected, observed, "{case}");
 }
 
 #[test]
-fn v8_2_shared_callee_proof_evidence() {
+fn shared_callee_proofs_preserve_the_verification_boundary() {
     let root = TempProject::new();
     let project = load(root.0.join("synthetix.toml")).unwrap();
-    let mut rows = Vec::new();
     let ids = project.contracts.iter().map(id).collect::<Vec<_>>();
     let edge_count = project
         .contracts
         .iter()
         .map(|item| project.verification_dependencies(item).unwrap().len())
         .sum::<usize>();
-    emit(
-        &mut rows,
+    assert_case(
         "shared_callee_graph_shape",
         json!({"contracts": 7, "shared_positive_callers": 3, "dependency_edges": 4}),
         json!({
@@ -276,15 +268,12 @@ fn v8_2_shared_callee_proof_evidence() {
             .unwrap_or("NO_PROOF")
             .to_string(),
     );
-    emit(
-        &mut rows,
+    assert_case(
         "shared_callee_proof_and_metrics",
         json!({"proof": "VERIFIED", "solver_invocations_positive": true, "solver_invocations": positive_metrics.solver_invocations}),
         json!({"proof": positive_proof.proof.as_ref().map(|proof| proof.status_name()), "solver_invocations_positive": positive_metrics.solver_invocations > 0, "solver_invocations": positive_metrics.solver_invocations}),
     );
     let mut verified = HashMap::from([(id(positive), positive.contract.clone())]);
-    let mut alpha_metrics = 0;
-    let mut beta_metrics = 0;
 
     for name in ["alpha", "beta"] {
         let caller = linked(&project, name);
@@ -308,11 +297,6 @@ fn v8_2_shared_callee_proof_evidence() {
                 "alpha must retain both imported call sites in requires"
             );
         }
-        if name == "alpha" {
-            alpha_metrics = metrics.solver_invocations;
-        } else {
-            beta_metrics = metrics.solver_invocations;
-        }
         z3_classes.insert(
             name.to_string(),
             proof
@@ -322,8 +306,7 @@ fn v8_2_shared_callee_proof_evidence() {
                 .unwrap_or("NO_PROOF")
                 .to_string(),
         );
-        emit(
-            &mut rows,
+        assert_case(
             &format!("sibling_{name}_compositional_proof"),
             json!({"proof": "VERIFIED", "solver_invocations_positive": true, "nested_requires_call_count": if name == "alpha" { nested_requires_call_count } else { 0 }}),
             json!({
@@ -366,8 +349,7 @@ fn v8_2_shared_callee_proof_evidence() {
             })
             .to_string(),
     );
-    emit(
-        &mut rows,
+    assert_case(
         "unsatisfied_call_site_precondition_source_location",
         json!({"proof": null, "diagnostic": {"kind": "CALL_PRECONDITION_VIOLATION", "callee": "positive", "line": 3}, "solver_invocations_positive": true}),
         json!({"proof": unsafe_proof.proof.as_ref().map(|proof| proof.status_name()), "diagnostic": diagnostic, "solver_invocations_positive": unsafe_metrics.solver_invocations > 0}),
@@ -390,8 +372,7 @@ fn v8_2_shared_callee_proof_evidence() {
             .unwrap_or("NO_PROOF")
             .to_string(),
     );
-    emit(
-        &mut rows,
+    assert_case(
         "failed_callee_counterexample",
         json!({"proof": "COUNTEREXAMPLE", "solver_invocations_positive": true}),
         json!({"proof": liar_proof.proof.as_ref().map(|proof| proof.status_name()), "solver_invocations_positive": liar_metrics.solver_invocations > 0}),
@@ -404,14 +385,12 @@ fn v8_2_shared_callee_proof_evidence() {
             &verified,
         )
         .unwrap_err();
-    emit(
-        &mut rows,
+    assert_case(
         "failed_summary_not_forwarded",
         json!({"error": "unverified callee summary `liar` required by `depends_on_failed`"}),
         json!({"error": forwarding_error}),
     );
 
-    let mut reference_samples = BTreeMap::new();
     let mut reference_classes = BTreeMap::new();
     for name in ["positive", "alpha", "beta", "unsafe_root", "liar"] {
         let contract_id = id(linked(&project, name));
@@ -435,30 +414,16 @@ fn v8_2_shared_callee_proof_evidence() {
             "VERIFIED"
         };
         reference_classes.insert(name.to_string(), reference_class.to_string());
-        reference_samples.insert(name.to_string(), samples);
     }
-    emit(
-        &mut rows,
+    assert_case(
         "reference_oracle_matches_z3_classes_on_fixture_samples",
         json!({"classification_by_contract": reference_classes}),
         json!({"classification_by_contract": z3_classes}),
     );
-
-    println!(
-        "V8_PROOF_EVIDENCE={}",
-        json!({"graph": {"contracts": ids.len(), "dependency_edges": edge_count}, "reference_samples": reference_samples, "reference_oracle_scope": "finite concrete samples over loaded verification_summaries; calls resolved using the fixed identity candidate and independently checked callee requires/ensures with reference evaluator; not exhaustive", "solver_metrics": {
-            "positive": positive_metrics.solver_invocations,
-            "alpha": alpha_metrics,
-            "beta": beta_metrics,
-            "unsafe_root": unsafe_metrics.solver_invocations,
-            "liar": liar_metrics.solver_invocations,
-        }, "rows": rows})
-    );
 }
 
 #[test]
-fn v8_2_cli_build_fail_closed_evidence() {
-    let mut rows = Vec::new();
+fn cli_build_fails_closed_for_unverified_callees() {
     let positive = TempProject::new();
     let entry_path = positive.0.join("entry.ax");
     let entry = fs::read_to_string(&entry_path).unwrap();
@@ -472,8 +437,7 @@ fn v8_2_cli_build_fail_closed_evidence() {
     )
     .unwrap();
     let positive_result = run_cli_build(&positive);
-    emit(
-        &mut rows,
+    assert_case(
         "cli_build_verified_shared_dag",
         json!({"exit_success": true, "proof_result": "VERIFIED", "diagnostic_class": null, "diagnostic_source": null, "diagnostic": "", "artifact_exists": true, "false_verified_on_failure": false}),
         positive_result,
@@ -504,8 +468,7 @@ fn v8_2_cli_build_fail_closed_evidence() {
     );
     assert_eq!(unsafe_result["diagnostic"], expected_unsafe_diagnostic);
     let unsafe_expected = json!({"exit_success": false, "proof_result": null, "diagnostic_class": "CALL_PRECONDITION_VIOLATION", "diagnostic_source": "unsafe.ax", "diagnostic": expected_unsafe_diagnostic, "artifact_exists": false, "false_verified_on_failure": false});
-    emit(
-        &mut rows,
+    assert_case(
         "cli_build_rejects_unsafe_caller",
         unsafe_expected,
         unsafe_result,
@@ -533,14 +496,11 @@ fn v8_2_cli_build_fail_closed_evidence() {
     );
     assert_eq!(failed_result["diagnostic"], expected_failed_diagnostic);
     let failed_expected = json!({"exit_success": false, "proof_result": null, "diagnostic_class": "UNSATISFIABLE_PRECONDITION", "diagnostic_source": "shared.ax", "diagnostic": expected_failed_diagnostic, "artifact_exists": false, "false_verified_on_failure": false});
-    emit(
-        &mut rows,
+    assert_case(
         "cli_build_rejects_failing_callee",
         failed_expected,
         failed_result,
     );
-
-    println!("V8_PROOF_CLI_EVIDENCE={}", json!({"cases": rows}));
 }
 
 fn run_cli_build(project: &TempProject) -> Value {

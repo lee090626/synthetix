@@ -1,3 +1,0 @@
-[project]
-entry = "main.ax"
-target = "web"
