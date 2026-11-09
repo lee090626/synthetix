@@ -10,6 +10,7 @@ use z3::{
 };
 
 pub mod reference;
+pub mod uniqueness;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProofResult {

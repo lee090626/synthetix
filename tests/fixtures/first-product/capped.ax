@@ -1,0 +1,5 @@
+contract capped(total: u32, cap: u32) -> u32 {
+ requires total <= 1000000; requires cap <= 1000000;
+ ensures result <= total; ensures result <= cap;
+ ensures result == total || result == cap;
+}
