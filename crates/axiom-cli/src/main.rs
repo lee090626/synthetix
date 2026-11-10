@@ -20,6 +20,7 @@ type SynthesisOutput = (
     usize,
 );
 
+mod js;
 mod web;
 
 fn main() -> ExitCode {
@@ -33,7 +34,7 @@ fn main() -> ExitCode {
             eprintln!("  axiom analyze <contract.ax> [--timeout-ms N] [--report report.json]");
             eprintln!("  axiom check");
             eprintln!(
-                "  axiom build <contract.ax> [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N] [--max-memory-bytes N]"
+                "  axiom build <contract.ax> [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N] [--max-memory-bytes N] [--emit js]"
             );
             eprintln!("  axiom build");
             eprintln!(
@@ -176,6 +177,23 @@ fn build_command(args: &[String]) -> Result<(), String> {
     };
     fs::write(&options.output, &module)
         .map_err(|error| format!("cannot write {}: {error}", options.output.display()))?;
+    if options.emit_js {
+        let guard = axiom_synth::lower_requires(&contract)?;
+        let (js, dts) = js::emit_module(
+            &contract,
+            &candidate,
+            guard.as_ref(),
+            "Source-level proof covers the AMI expression; this JS is checked by differential tests, not proven.",
+        )?;
+        let js_path = options.output.with_extension("js");
+        let dts_path = options.output.with_extension("d.ts");
+        fs::write(&js_path, js)
+            .map_err(|error| format!("cannot write {}: {error}", js_path.display()))?;
+        fs::write(&dts_path, dts)
+            .map_err(|error| format!("cannot write {}: {error}", dts_path.display()))?;
+        println!("wrote: {}", js_path.display());
+        println!("wrote: {}", dts_path.display());
+    }
     if let Some(report) = &options.report {
         write_report(
             report,
@@ -817,6 +835,7 @@ struct BuildArgs<'a> {
     timeout: Option<Duration>,
     max_candidates: usize,
     max_memory_bytes: usize,
+    emit_js: bool,
 }
 
 fn parse_build_args(args: &[String]) -> Result<BuildArgs<'_>, String> {
@@ -829,10 +848,15 @@ fn parse_build_args(args: &[String]) -> Result<BuildArgs<'_>, String> {
     let mut timeout = None;
     let mut max_candidates = axiom_synth::SynthesisOptions::default().max_candidates;
     let mut max_memory_bytes = axiom_synth::SynthesisOptions::default().max_memory_bytes;
+    let mut emit_js = false;
     let mut index = 1;
 
     while index < args.len() {
         match args[index].as_str() {
+            "--emit" => match required_value(args, &mut index, "emit target")? {
+                "js" => emit_js = true,
+                other => return Err(format!("unknown emit target: {other} (supported: js)")),
+            },
             "-o" | "--output" => {
                 output = PathBuf::from(required_value(args, &mut index, "output path")?);
             }
@@ -870,6 +894,7 @@ fn parse_build_args(args: &[String]) -> Result<BuildArgs<'_>, String> {
         timeout,
         max_candidates,
         max_memory_bytes,
+        emit_js,
     })
 }
 
