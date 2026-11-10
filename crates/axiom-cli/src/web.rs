@@ -84,8 +84,35 @@ pub fn build_with_options(
     emit_js: bool,
 ) -> Result<BuildResult, String> {
     let mut cache = VerificationCache::default();
-    let project = axiom_project::load(config_path)?;
-    build_project(&project, output_dir, &mut cache, false, emit_js)
+    let result = axiom_project::load(config_path)
+        .and_then(|project| build_project(&project, output_dir, &mut cache, false, emit_js));
+    if result.is_err() {
+        remove_verified_outputs(output_dir)?;
+    }
+    result
+}
+
+/// Files whose presence implies "built from the current spec and verified".
+/// `app.config.js` (deployment settings) and `app.css` are left in place.
+const VERIFIED_OUTPUTS: &[&str] = &[
+    "app.wasm",
+    "app.js",
+    "index.html",
+    "app.proof.json",
+    "contracts.js",
+    "contracts.d.ts",
+];
+
+/// After a failed static build, an older bundle must not pass for the current spec.
+fn remove_verified_outputs(output_dir: &Path) -> Result<(), String> {
+    for name in VERIFIED_OUTPUTS {
+        let path = output_dir.join(name);
+        if path.exists() {
+            fs::remove_file(&path)
+                .map_err(|error| format!("cannot remove stale {}: {error}", path.display()))?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2827,6 +2854,21 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
         assert!(error.contains(&format!("{}:3:", entry.display())));
         assert!(error.contains("call-site precondition for positive"));
         assert!(!failed_output.exists());
+
+        // Rebuilding the same broken spec into the previous good output must
+        // not leave the older verified bundle behind.
+        std::fs::write(output.join("app.config.js"), "window.custom = 1;\n").unwrap();
+        build(&config, &output).unwrap_err();
+        for name in VERIFIED_OUTPUTS {
+            assert!(
+                !output.join(name).exists(),
+                "stale {name} survived a failed build"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(output.join("app.config.js")).unwrap(),
+            "window.custom = 1;\n"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

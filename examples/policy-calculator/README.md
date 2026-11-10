@@ -12,5 +12,6 @@ axiom dev                    # or serve dist/ with any static server
 Observed in a real browser (static `dist/`): total=100, cap=80 → 80; total=100, floor=20, cap=80 → 80; inputs
 survive reload; total=2,000,000 is rejected by the `requires` guard.
 
-Known gap: a failing `axiom build` (e.g. contradictory `requires`) exits 1 but leaves the previous `dist/` untouched,
-so an old, still-"VERIFIED" bundle can be mistaken for the current spec's result (roadmap stage 5).
+A failing `axiom build` (e.g. contradictory `requires`) exits 1 and removes the verified outputs (`app.wasm`, `app.js`,
+`index.html`, `app.proof.json`, `contracts.js`, `contracts.d.ts`) from `dist/`, so an older bundle cannot pass for the
+current spec. `app.config.js` and `app.css` are kept. `axiom dev` is not affected by this rule.
