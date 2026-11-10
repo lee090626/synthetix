@@ -20,6 +20,7 @@ type SynthesisOutput = (
     usize,
 );
 
+mod js;
 mod web;
 
 fn main() -> ExitCode {
@@ -33,9 +34,9 @@ fn main() -> ExitCode {
             eprintln!("  axiom analyze <contract.ax> [--timeout-ms N] [--report report.json]");
             eprintln!("  axiom check");
             eprintln!(
-                "  axiom build <contract.ax> [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N] [--max-memory-bytes N]"
+                "  axiom build <contract.ax> [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N] [--max-memory-bytes N] [--emit js]"
             );
-            eprintln!("  axiom build");
+            eprintln!("  axiom build [--emit js]");
             eprintln!(
                 "  axiom run <contract.ax> [--] [<value>...] [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N] [--max-memory-bytes N]"
             );
@@ -137,13 +138,21 @@ fn analyze_command(args: &[String]) -> Result<(), String> {
 }
 
 fn build_command(args: &[String]) -> Result<(), String> {
-    if args.is_empty() {
+    if args.is_empty() || args[0].starts_with("--") {
+        let emit_js = match args {
+            [] => false,
+            [flag, target] if flag == "--emit" && target == "js" => true,
+            [flag, target] if flag == "--emit" => {
+                return Err(format!("unknown emit target: {target} (supported: js)"));
+            }
+            _ => return Err(format!("unknown project build option: {}", args.join(" "))),
+        };
         let config =
             axiom_project::find_config(env::current_dir().map_err(|error| error.to_string())?)?;
         let root = config
             .parent()
             .ok_or_else(|| "cannot determine project root".to_string())?;
-        return web::build(&config, &root.join("dist")).map(|_| ());
+        return web::build_with_options(&config, &root.join("dist"), emit_js).map(|_| ());
     }
     let options = parse_build_args(args)?;
     let (contract, candidate, module, diagnostic, candidates_checked) = match synthesize(
@@ -176,6 +185,18 @@ fn build_command(args: &[String]) -> Result<(), String> {
     };
     fs::write(&options.output, &module)
         .map_err(|error| format!("cannot write {}: {error}", options.output.display()))?;
+    if options.emit_js {
+        let guard = axiom_synth::lower_requires(&contract)?;
+        let (js, dts) = js::emit_module(&contract, &candidate, guard.as_ref(), js::PROOF_NOTE)?;
+        let js_path = options.output.with_extension("js");
+        let dts_path = options.output.with_extension("d.ts");
+        fs::write(&js_path, js)
+            .map_err(|error| format!("cannot write {}: {error}", js_path.display()))?;
+        fs::write(&dts_path, dts)
+            .map_err(|error| format!("cannot write {}: {error}", dts_path.display()))?;
+        println!("wrote: {}", js_path.display());
+        println!("wrote: {}", dts_path.display());
+    }
     if let Some(report) = &options.report {
         write_report(
             report,
@@ -817,6 +838,7 @@ struct BuildArgs<'a> {
     timeout: Option<Duration>,
     max_candidates: usize,
     max_memory_bytes: usize,
+    emit_js: bool,
 }
 
 fn parse_build_args(args: &[String]) -> Result<BuildArgs<'_>, String> {
@@ -829,10 +851,15 @@ fn parse_build_args(args: &[String]) -> Result<BuildArgs<'_>, String> {
     let mut timeout = None;
     let mut max_candidates = axiom_synth::SynthesisOptions::default().max_candidates;
     let mut max_memory_bytes = axiom_synth::SynthesisOptions::default().max_memory_bytes;
+    let mut emit_js = false;
     let mut index = 1;
 
     while index < args.len() {
         match args[index].as_str() {
+            "--emit" => match required_value(args, &mut index, "emit target")? {
+                "js" => emit_js = true,
+                other => return Err(format!("unknown emit target: {other} (supported: js)")),
+            },
             "-o" | "--output" => {
                 output = PathBuf::from(required_value(args, &mut index, "output path")?);
             }
@@ -870,6 +897,7 @@ fn parse_build_args(args: &[String]) -> Result<BuildArgs<'_>, String> {
         timeout,
         max_candidates,
         max_memory_bytes,
+        emit_js,
     })
 }
 
