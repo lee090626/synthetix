@@ -127,3 +127,47 @@ fn floor_cap_matches_oracle() {
         &[vec![0, 81, 80], vec![MAX + 1, 0, 0], vec![0, 0, MAX + 1]],
     );
 }
+
+#[test]
+fn project_build_emits_all_contracts() {
+    if !node_available() {
+        eprintln!("SKIPPED js_emit::project: node not found");
+        return;
+    }
+    let dir = scratch("project");
+    let example =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/policy-calculator");
+    for file in ["synthetix.toml", "main.ax", "policy.ax"] {
+        fs::copy(example.join(file), dir.join(file)).unwrap();
+    }
+    let build = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_axiom"))
+            .arg("build")
+            .args(args)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    build(&["--emit", "js"]);
+    let js = dir.join("dist/contracts.js");
+    let dts = fs::read_to_string(dir.join("dist/contracts.d.ts")).unwrap();
+    assert!(dts.contains("export function capped(") && dts.contains("export function floor_cap("));
+    let script = format!(
+        "import('{}').then(m=>{{console.log(m.capped(100,80),m.floor_cap(10,20,80),m.floor_cap(100,20,80));try{{m.capped(1000001,0)}}catch(e){{console.log(e.constructor.name)}}}})",
+        js.display()
+    );
+    let out = Command::new("node").args(["-e", &script]).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "80 20 80\nRangeError\n"
+    );
+
+    build(&[]);
+    assert!(!js.exists(), "plain build must remove stale contracts.js");
+    fs::remove_dir_all(dir).ok();
+}

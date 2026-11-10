@@ -5,6 +5,7 @@
 
 ```bash
 axiom check && axiom build   # synthesize, prove, emit dist/ (app.wasm + app.proof.json)
+axiom build --emit js        # also write dist/contracts.js + contracts.d.ts (plain ES module)
 axiom dev                    # or serve dist/ with any static server
 ```
 
