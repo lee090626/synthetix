@@ -21,6 +21,7 @@ struct CompiledFunction {
     candidate: Expr,
     requires: Option<Expr>,
     requires_export: Option<String>,
+    contract: axiom_parser::Contract,
 }
 
 #[derive(Debug, Clone)]
@@ -71,11 +72,23 @@ struct DevState {
     error: Option<String>,
 }
 
+#[cfg(test)]
 pub fn build(config_path: &Path, output_dir: &Path) -> Result<BuildResult, String> {
-    let mut cache = VerificationCache::default();
-    build_with_cache(config_path, output_dir, &mut cache, false)
+    build_with_options(config_path, output_dir, false)
 }
 
+/// Static build; with `emit_js`, also writes `contracts.js` and `contracts.d.ts`.
+pub fn build_with_options(
+    config_path: &Path,
+    output_dir: &Path,
+    emit_js: bool,
+) -> Result<BuildResult, String> {
+    let mut cache = VerificationCache::default();
+    let project = axiom_project::load(config_path)?;
+    build_project(&project, output_dir, &mut cache, false, emit_js)
+}
+
+#[cfg(test)]
 fn build_with_cache(
     config_path: &Path,
     output_dir: &Path,
@@ -83,7 +96,7 @@ fn build_with_cache(
     dev_runtime: bool,
 ) -> Result<BuildResult, String> {
     let project = axiom_project::load(config_path)?;
-    build_project(&project, output_dir, cache, dev_runtime)
+    build_project(&project, output_dir, cache, dev_runtime, false)
 }
 
 fn build_project(
@@ -91,6 +104,7 @@ fn build_project(
     output_dir: &Path,
     cache: &mut VerificationCache,
     dev_runtime: bool,
+    emit_js: bool,
 ) -> Result<BuildResult, String> {
     let compiled = compile_contracts_with_cache(
         project,
@@ -114,6 +128,15 @@ fn build_project(
         .map(|(name, expression, params)| (name.as_str(), *expression, *params))
         .collect::<Vec<_>>();
     let wasm = axiom_wasm::emit_functions(&functions)?;
+    let js_module = if emit_js {
+        let items = compiled
+            .iter()
+            .map(|f| (&f.contract, &f.candidate, f.requires.as_ref()))
+            .collect::<Vec<_>>();
+        Some(crate::js::emit_modules(&items, crate::js::PROOF_NOTE)?)
+    } else {
+        None
+    };
 
     fs::create_dir_all(output_dir)
         .map_err(|error| format!("cannot create {}: {error}", output_dir.display()))?;
@@ -135,6 +158,22 @@ fn build_project(
         &output_dir.join("app.proof.json"),
         proof_json(project, &compiled).as_bytes(),
     )?;
+    let (js_path, dts_path) = (
+        output_dir.join("contracts.js"),
+        output_dir.join("contracts.d.ts"),
+    );
+    if let Some((js, dts)) = js_module {
+        write_file(&js_path, js.as_bytes())?;
+        write_file(&dts_path, dts.as_bytes())?;
+    } else {
+        // A build without --emit js must not leave JS from an older spec behind.
+        for path in [&js_path, &dts_path] {
+            if path.exists() {
+                fs::remove_file(path)
+                    .map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
+            }
+        }
+    }
 
     println!("target: web");
     println!("contract_check: VALID");
@@ -171,7 +210,7 @@ pub fn dev(config_path: &Path, port: u16, open_browser: bool, once: bool) -> Res
     let mut cache = VerificationCache::default();
     let mut retained_loader = RetainedProjectLoader::default();
     let (project, _) = retained_loader.load(config_path)?;
-    let initial = build_project(&project, &output_dir, &mut cache, true)?;
+    let initial = build_project(&project, &output_dir, &mut cache, true, false)?;
     if once {
         return Ok(());
     }
@@ -410,6 +449,7 @@ fn compile_contracts_inner(
                 candidate,
                 requires,
                 requires_export,
+                contract: linked.contract.clone(),
             },
         );
     }
@@ -1645,7 +1685,7 @@ fn rebuild_if_changed(
     watched_files.push(config_path.to_path_buf());
     let mut candidate_cache = cache.clone();
     let mut guard = state.lock().expect("dev state lock poisoned");
-    match build_project(&project, output_dir, &mut candidate_cache, true) {
+    match build_project(&project, output_dir, &mut candidate_cache, true, false) {
         Ok(mut result) => {
             let active_ids = project
                 .contracts

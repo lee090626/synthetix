@@ -36,7 +36,7 @@ fn main() -> ExitCode {
             eprintln!(
                 "  axiom build <contract.ax> [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N] [--max-memory-bytes N] [--emit js]"
             );
-            eprintln!("  axiom build");
+            eprintln!("  axiom build [--emit js]");
             eprintln!(
                 "  axiom run <contract.ax> [--] [<value>...] [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N] [--max-memory-bytes N]"
             );
@@ -138,13 +138,21 @@ fn analyze_command(args: &[String]) -> Result<(), String> {
 }
 
 fn build_command(args: &[String]) -> Result<(), String> {
-    if args.is_empty() {
+    if args.is_empty() || args[0].starts_with("--") {
+        let emit_js = match args {
+            [] => false,
+            [flag, target] if flag == "--emit" && target == "js" => true,
+            [flag, target] if flag == "--emit" => {
+                return Err(format!("unknown emit target: {target} (supported: js)"));
+            }
+            _ => return Err(format!("unknown project build option: {}", args.join(" "))),
+        };
         let config =
             axiom_project::find_config(env::current_dir().map_err(|error| error.to_string())?)?;
         let root = config
             .parent()
             .ok_or_else(|| "cannot determine project root".to_string())?;
-        return web::build(&config, &root.join("dist")).map(|_| ());
+        return web::build_with_options(&config, &root.join("dist"), emit_js).map(|_| ());
     }
     let options = parse_build_args(args)?;
     let (contract, candidate, module, diagnostic, candidates_checked) = match synthesize(
@@ -179,12 +187,7 @@ fn build_command(args: &[String]) -> Result<(), String> {
         .map_err(|error| format!("cannot write {}: {error}", options.output.display()))?;
     if options.emit_js {
         let guard = axiom_synth::lower_requires(&contract)?;
-        let (js, dts) = js::emit_module(
-            &contract,
-            &candidate,
-            guard.as_ref(),
-            "Source-level proof covers the AMI expression; this JS is checked by differential tests, not proven.",
-        )?;
+        let (js, dts) = js::emit_module(&contract, &candidate, guard.as_ref(), js::PROOF_NOTE)?;
         let js_path = options.output.with_extension("js");
         let dts_path = options.output.with_extension("d.ts");
         fs::write(&js_path, js)
