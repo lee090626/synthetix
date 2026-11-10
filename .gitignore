@@ -22,3 +22,6 @@ editors/vscode/bin/
 # Scratch files from the old editor demo
 /editors/.ax
 /editors/test.ax
+
+# Local code-graph cache
+graphify-out/
