@@ -1,0 +1,211 @@
+//! JavaScript/TypeScript-declaration emitter for verified AMI candidates.
+//!
+//! The proof covers the AMI expression; this module only prints it with u32
+//! wrapping semantics. Equivalence with the AMI evaluator is checked by the
+//! differential test in `tests/js_emit.rs`, not proven.
+
+use axiom_ami::Expr;
+use axiom_parser::{Contract, Type};
+
+fn bin(op: &str, lhs: &Expr, rhs: &Expr) -> String {
+    format!("(({} {op} {}) >>> 0)", expr(lhs), expr(rhs))
+}
+
+fn cmp(op: &str, lhs: &Expr, rhs: &Expr, signed: bool) -> String {
+    let (l, r) = (expr(lhs), expr(rhs));
+    if signed {
+        format!("(({l} | 0) {op} ({r} | 0) ? 1 : 0)")
+    } else {
+        format!("({l} {op} {r} ? 1 : 0)")
+    }
+}
+
+/// Prints one AMI expression; every sub-expression evaluates to a u32 number.
+pub fn expr(e: &Expr) -> String {
+    match e {
+        Expr::Arg(i) => format!("a{i}"),
+        Expr::Const(v) => v.to_string(),
+        Expr::Add(l, r) => bin("+", l, r),
+        Expr::Sub(l, r) => bin("-", l, r),
+        Expr::Mul(l, r) => format!("(Math.imul({}, {}) >>> 0)", expr(l), expr(r)),
+        Expr::Shl(l, r) => format!("(({} << ({} & 31)) >>> 0)", expr(l), expr(r)),
+        Expr::BitAnd(l, r) => bin("&", l, r),
+        Expr::BitOr(l, r) => bin("|", l, r),
+        Expr::BitXor(l, r) => bin("^", l, r),
+        Expr::Eq(l, r) => cmp("===", l, r, false),
+        Expr::Ne(l, r) => cmp("!==", l, r, false),
+        Expr::Lt(l, r) => cmp("<", l, r, false),
+        Expr::Le(l, r) => cmp("<=", l, r, false),
+        Expr::Gt(l, r) => cmp(">", l, r, false),
+        Expr::Ge(l, r) => cmp(">=", l, r, false),
+        Expr::SLt(l, r) => cmp("<", l, r, true),
+        Expr::SLe(l, r) => cmp("<=", l, r, true),
+        Expr::SGt(l, r) => cmp(">", l, r, true),
+        Expr::SGe(l, r) => cmp(">=", l, r, true),
+        Expr::And(l, r) => format!("({} !== 0 && {} !== 0 ? 1 : 0)", expr(l), expr(r)),
+        Expr::Or(l, r) => format!("({} !== 0 || {} !== 0 ? 1 : 0)", expr(l), expr(r)),
+        Expr::Select {
+            condition,
+            then_branch,
+            else_branch,
+        } => format!(
+            "({} !== 0 ? {} : {})",
+            expr(condition),
+            expr(then_branch),
+            expr(else_branch)
+        ),
+        Expr::ArrayGet { elements, index } => {
+            let items: Vec<String> = elements
+                .iter()
+                .map(|e| format!("() => {}", expr(e)))
+                .collect();
+            format!("$at({}, [{}])", expr(index), items.join(", "))
+        }
+        Expr::Guard { condition, value } => format!(
+            "({} !== 0 ? {} : $trap(\"verified runtime guard failed\"))",
+            expr(condition),
+            expr(value)
+        ),
+    }
+}
+
+fn ts_type(ty: &Type) -> Result<&'static str, String> {
+    match ty {
+        Type::U32 | Type::I32 => Ok("number"),
+        Type::Bool => Ok("boolean"),
+        other => Err(format!(
+            "JS output supports only u32, i32 and bool, found {other:?}"
+        )),
+    }
+}
+
+const RESERVED: &[&str] = &[
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "debugger",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "enum",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "function",
+    "if",
+    "import",
+    "in",
+    "instanceof",
+    "new",
+    "null",
+    "return",
+    "super",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "var",
+    "void",
+    "while",
+    "with",
+    "yield",
+    "let",
+    "static",
+    "await",
+    "implements",
+    "interface",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "arguments",
+    "eval",
+];
+
+fn check_for(name: &str, ty: &Type, var: &str) -> Result<String, String> {
+    Ok(match ty {
+        Type::U32 => format!(
+            "  if (!Number.isInteger({var}) || {var} < 0 || {var} > 0xffffffff) throw new TypeError(\"{name}: expected u32\");\n"
+        ),
+        Type::I32 => format!(
+            "  if (!Number.isInteger({var}) || {var} < -0x80000000 || {var} > 0x7fffffff) throw new TypeError(\"{name}: expected i32\");\n"
+        ),
+        Type::Bool => format!(
+            "  if (typeof {var} !== \"boolean\") throw new TypeError(\"{name}: expected bool\");\n"
+        ),
+        other => return Err(format!("unsupported JS input type {other:?}")),
+    })
+}
+
+/// Returns `(module.js, module.d.ts)` for a verified contract.
+pub fn emit_module(
+    contract: &Contract,
+    candidate: &Expr,
+    guard: Option<&Expr>,
+    proof_note: &str,
+) -> Result<(String, String), String> {
+    let ret = ts_type(&contract.return_type)?;
+    if RESERVED.contains(&contract.name.as_str()) || contract.name.starts_with('$') {
+        return Err(format!(
+            "contract name {} is not a valid JS export",
+            contract.name
+        ));
+    }
+    let mut checks = String::new();
+    let mut lowered = String::new();
+    let mut names = Vec::new();
+    let mut dts_params = Vec::new();
+    for (i, p) in contract.params.iter().enumerate() {
+        let ty = ts_type(&p.ty)?;
+        let var = format!("p{i}");
+        checks += &check_for(&contract.name, &p.ty, &var)?;
+        lowered += &match p.ty {
+            Type::Bool => format!("  const a{i} = {var} ? 1 : 0;\n"),
+            _ => format!("  const a{i} = {var} >>> 0;\n"),
+        };
+        names.push(var);
+        let doc_name = if RESERVED.contains(&p.name.as_str()) {
+            format!("p{i}")
+        } else {
+            p.name.clone()
+        };
+        dts_params.push(format!("{doc_name}: {ty}"));
+    }
+    let guard_js = guard
+        .map(|g| {
+            format!(
+                "  if ({} === 0) throw new RangeError(\"{}: input violates a requires clause\");\n",
+                expr(g),
+                contract.name
+            )
+        })
+        .unwrap_or_default();
+    let result = expr(candidate);
+    let result = match contract.return_type {
+        Type::Bool => format!("{result} !== 0"),
+        Type::I32 => format!("({result}) | 0"),
+        _ => result,
+    };
+    let js = format!(
+        "// Generated by axiom. Do not edit.\n// {proof_note}\n\
+         const $trap = (message) => {{ throw new RangeError(message); }};\n\
+         const $at = (index, items) => (index < items.length ? items[index]() : $trap(\"fixed array index is out of bounds\"));\n\n\
+         export function {name}({params}) {{\n{checks}{lowered}{guard_js}  return {result};\n}}\n",
+        name = contract.name,
+        params = names.join(", "),
+    );
+    let dts = format!(
+        "// Generated by axiom. Do not edit.\nexport function {}({}): {ret};\n",
+        contract.name,
+        dts_params.join(", ")
+    );
+    Ok((js, dts))
+}

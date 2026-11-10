@@ -1,0 +1,16 @@
+export contract capped(total: u32, cap: u32) -> u32 {
+    requires total <= 1000000;
+    requires cap <= 1000000;
+    ensures result <= total;
+    ensures result <= cap;
+    ensures result == total || result == cap;
+}
+
+export contract floor_cap(total: u32, floor: u32, cap: u32) -> u32 {
+    requires total <= 1000000;
+    requires floor <= cap;
+    requires cap <= 1000000;
+    ensures total < floor || total > cap || result == total;
+    ensures total >= floor || result == floor;
+    ensures total <= cap || result == cap;
+}
