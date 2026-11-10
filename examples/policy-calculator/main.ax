@@ -1,0 +1,22 @@
+import { capped, floor_cap } from "./policy.ax";
+
+page Policy {
+    state total: number = 0;
+    state floor: number = 0;
+    state cap: number = 0;
+    state capped_result: number = 0;
+    state floor_cap_result: number = 0;
+
+    persist total;
+    persist floor;
+    persist cap;
+
+    input total placeholder "합계";
+    input floor placeholder "하한";
+    input cap placeholder "상한";
+
+    show capped_result;
+    show floor_cap_result;
+    button "상한 정책 적용" updates capped_result with capped(total, cap);
+    button "최소 비용 정책 적용" updates floor_cap_result with floor_cap(total, floor, cap);
+}
