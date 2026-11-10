@@ -170,7 +170,7 @@ fn build_project(
     write_file(&output_dir.join("app.wasm"), &wasm)?;
     write_file(
         &output_dir.join("index.html"),
-        page_html(project).as_bytes(),
+        page_html(project, compiled.len()).as_bytes(),
     )?;
     write_file(
         &output_dir.join("app.config.js"),
@@ -532,15 +532,41 @@ fn proof_cache_key(
     }))
 }
 
-fn page_html(project: &Project) -> String {
+/// Identifies the exact `.ax` sources a build came from (FNV-1a 64; not a security hash).
+fn spec_fingerprint(project: &Project) -> String {
+    let mut sources = project
+        .source_contents
+        .iter()
+        .map(|(path, bytes)| (source_label(&project.config.root, path), bytes))
+        .collect::<Vec<_>>();
+    sources.sort();
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for (label, bytes) in sources {
+        for byte in label
+            .as_bytes()
+            .iter()
+            .chain([0u8].iter())
+            .chain(bytes.iter())
+            .chain([0u8].iter())
+        {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    format!("{hash:016x}")
+}
+
+fn page_html(project: &Project, verified_contracts: usize) -> String {
     let title = project
         .pages
         .first()
         .map(|page| page.page.name.as_str())
         .unwrap_or("Synthetix Web App");
     format!(
-        "<!doctype html>\n<html lang=\"ko\">\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n  <title>{}</title>\n  <link rel=\"stylesheet\" href=\"./app.css\">\n</head>\n<body>\n  <main id=\"app\"><p>Loading…</p></main>\n  <div id=\"synthetix-error\" hidden></div>\n  <script src=\"./app.config.js\"></script>\n  <script type=\"module\" src=\"./app.js\"></script>\n</body>\n</html>\n",
-        escape_html(title)
+        "<!doctype html>\n<html lang=\"ko\">\n<head>\n  <meta charset=\"utf-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n  <title>{}</title>\n  <link rel=\"stylesheet\" href=\"./app.css\">\n</head>\n<body>\n  <main id=\"app\"><p>Loading…</p></main>\n  <div id=\"synthetix-error\" hidden></div>\n  <footer id=\"synthetix-provenance\">명세 <code>{}</code> · 검증된 계약 {}개 · 증명 범위: 계약 조건(소스 수준) · <a href=\"./app.proof.json\">근거</a></footer>\n  <script src=\"./app.config.js\"></script>\n  <script type=\"module\" src=\"./app.js\"></script>\n</body>\n</html>\n",
+        escape_html(title),
+        spec_fingerprint(project),
+        verified_contracts
     )
 }
 
@@ -1644,7 +1670,8 @@ fn proof_json(project: &Project, compiled: &[CompiledFunction]) -> String {
         .collect::<Vec<_>>();
     let external_boundaries = externs_json(project);
     format!(
-        "{{\n  \"version\": 4,\n  \"target\": \"web\",\n  \"verification\": {{\"contract_check\": \"VALID\", \"synthesis_result\": \"FOUND\", \"proof_result\": \"VERIFIED\", \"diagnostic\": null, \"verified\": true, \"scope\": \"WASM_CONTRACTS_ONLY\"}},\n  \"verification_scope\": {{\"contracts\": \"WASM_CONTRACTS_ONLY\", \"extern_implementations\": \"UNVERIFIED\", \"extern_response_validation\": \"DECLARED_TYPE_ONLY\"}},\n  \"contracts\": [{}],\n  \"external_boundaries\": {}\n}}\n",
+        "{{\n  \"version\": 4,\n  \"target\": \"web\",\n  \"verification\": {{\"contract_check\": \"VALID\", \"synthesis_result\": \"FOUND\", \"proof_result\": \"VERIFIED\", \"diagnostic\": null, \"verified\": true, \"scope\": \"WASM_CONTRACTS_ONLY\"}},\n  \"verification_scope\": {{\"contracts\": \"WASM_CONTRACTS_ONLY\", \"extern_implementations\": \"UNVERIFIED\", \"extern_response_validation\": \"DECLARED_TYPE_ONLY\"}},\n  \"source_fingerprint\": \"{}\",\n  \"contracts\": [{}],\n  \"external_boundaries\": {}\n}}\n",
+        spec_fingerprint(project),
         contracts.join(","),
         external_boundaries
     )
@@ -1902,6 +1929,8 @@ p { margin: 0; color: #d1d5db; }
 output { font-size: 3rem; font-variant-numeric: tabular-nums; }
 button { border: 0; border-radius: .5rem; padding: .7rem 1rem; color: white; background: #2563eb; cursor: pointer; }
 button:hover { background: #1d4ed8; }
+#synthetix-provenance { margin: 2rem auto 1rem; max-width: 48rem; padding: 0 1rem; font-size: .8rem; color: #9ca3af; }
+#synthetix-provenance a { color: inherit; }
 #synthetix-error { position: fixed; inset: 1rem; padding: 1rem; white-space: pre-wrap; color: #fecaca; background: #450a0a; border: 1px solid #ef4444; border-radius: .5rem; }
 "#;
 
@@ -2321,6 +2350,63 @@ mod tests {
             );
             assert!(fs::metadata(output.join("app.proof.json")).unwrap().len() > 0);
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn build_shows_source_fingerprint_matching_proof() {
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-web-fingerprint-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let entry = root.join("entry.ax");
+        fs::write(
+            &entry,
+            "contract id(value: u32) -> u32 { ensures result == value; }\n",
+        )
+        .unwrap();
+        let config = root.join("synthetix.toml");
+        fs::write(
+            &config,
+            "[project]\nentry = \"entry.ax\"\ntarget = \"web\"\n",
+        )
+        .unwrap();
+        let output = root.join("dist");
+        let fingerprint = |output: &Path| {
+            let proof = fs::read_to_string(output.join("app.proof.json")).unwrap();
+            let start = proof.find("\"source_fingerprint\": \"").unwrap() + 23;
+            let value = proof[start..start + 16].to_string();
+            let html = fs::read_to_string(output.join("index.html")).unwrap();
+            assert!(
+                html.contains(&format!("명세 <code>{value}</code> · 검증된 계약 1개")),
+                "{html}"
+            );
+            value
+        };
+
+        build(&config, &output).unwrap();
+        let first = fingerprint(&output);
+        build(&config, &output).unwrap();
+        assert_eq!(
+            fingerprint(&output),
+            first,
+            "same sources must give the same fingerprint"
+        );
+        fs::write(
+            &entry,
+            "contract id(value: u32) -> u32 { ensures result == value +% 0; }\n",
+        )
+        .unwrap();
+        build(&config, &output).unwrap();
+        assert_ne!(
+            fingerprint(&output),
+            first,
+            "changed sources must change the fingerprint"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
