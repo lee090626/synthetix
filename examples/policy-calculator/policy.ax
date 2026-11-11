@@ -1,3 +1,17 @@
+export contract base_amount(price: u32, quantity: u32) -> u32 {
+    requires price <= 10000;
+    requires quantity <= 100;
+    ensures result == price *% quantity;
+}
+
+export contract items_total(a: u32, b: u32, c: u32, d: u32) -> u32 {
+    requires a <= 250000;
+    requires b <= 250000;
+    requires c <= 250000;
+    requires d <= 250000;
+    ensures result == a +% b +% c +% d;
+}
+
 export contract capped(total: u32, cap: u32) -> u32 {
     requires total <= 1000000;
     requires cap <= 1000000;

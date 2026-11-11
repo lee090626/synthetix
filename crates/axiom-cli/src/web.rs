@@ -591,6 +591,8 @@ const __externs = __EXTERNS__;
 let __exports = null;
 let __state = {};
 let __lastError = null;
+// Set to the load error when stored state cannot be loaded; saving would overwrite the user's data.
+let __persistenceBlocked = null;
 let __lastTransition = null;
 let __lastEffect = null;
 let __effectAdapter = null;
@@ -691,6 +693,10 @@ function reportApplicationError(error, functionName = null, sourceOverride = nul
 }
 
 function clearApplicationError() {
+  if (__persistenceBlocked) {
+    reportApplicationError(__persistenceBlocked);
+    return;
+  }
   __lastError = null;
   const node = document.querySelector('#synthetix-error');
   node.hidden = true;
@@ -824,7 +830,7 @@ function validatePersistedValues(values) {
 
 function saveState(state = __state) {
   const persisted = __page.states.filter((candidate) => candidate.persisted);
-  if (persisted.length === 0) return;
+  if (persisted.length === 0 || __persistenceBlocked) return;
   const values = Object.fromEntries(persisted.map((candidate) => [candidate.name, state[candidate.name]]));
   validatePersistedValues(values);
   storageAdapter().setItem(__storageKey, JSON.stringify({
@@ -1057,7 +1063,10 @@ async function boot() {
   __exports = instance.exports;
   for (const state of __page.states) __state[state.name] = evaluate(state.initial);
   try { Object.assign(__state, await loadPersistedState(__state)); }
-  catch (error) { reportApplicationError(error); }
+  catch (error) {
+    __persistenceBlocked = new Error(`${error.message}; stored data was kept and will not be overwritten until it is restored or migrated`);
+    reportApplicationError(__persistenceBlocked);
+  }
   window.synthetix = {
     state: __state,
     config: Object.freeze({ ...runtimeConfig }),
@@ -1068,6 +1077,8 @@ async function boot() {
       __storageMigration = migration;
     },
     async restore() {
+      const wasBlocked = __persistenceBlocked;
+      __persistenceBlocked = null;
       try {
         const restored = await loadPersistedState(__state);
         for (const key of Object.keys(__state)) delete __state[key];
@@ -1076,6 +1087,7 @@ async function boot() {
         clearApplicationError();
         return __state;
       } catch (error) {
+        __persistenceBlocked = wasBlocked;
         throw reportApplicationError(error);
       }
     },
@@ -1241,8 +1253,16 @@ setInterval(async () => {
     const errorResponse = await fetch('/__synthetix/error', { cache: 'no-store' });
     const errorNode = document.querySelector('#synthetix-error');
     const error = await errorResponse.text();
-    errorNode.hidden = !error;
-    errorNode.textContent = error;
+    // Only own the overlay for build errors; application errors stay until the app clears them.
+    if (error) {
+      errorNode.hidden = false;
+      errorNode.textContent = error;
+      errorNode.dataset.dev = 'build';
+    } else if (errorNode.dataset.dev === 'build') {
+      errorNode.hidden = true;
+      errorNode.textContent = '';
+      delete errorNode.dataset.dev;
+    }
   } catch (_) {}
 }, 500);
 "#,
@@ -3594,6 +3614,17 @@ async function launch(storage, migration = null) {
   const badShapeResult = [badShape.window.synthetix.lastError?.category,
     badShape.window.synthetix.state.todos.length].join('|');
 
+  // A persisted state renamed in the spec must not let the next edit overwrite the stored data.
+  const renamedValue = JSON.stringify({ version: 2, values: { draft: 'kept', title: 'renamed away' } });
+  const renamedStorage = makeStorage({ [key]: renamedValue });
+  const renamed = await launch(renamedStorage);
+  const renamedInput = renamed.root.children.find((node) => node.tagName === 'input');
+  renamedInput.value = 'overwrite';
+  renamedInput.dispatch('change');
+  const renamedResult = [renamed.window.synthetix.lastError?.category,
+    String(renamed.error.textContent.includes('stored data was kept')),
+    String(renamedStorage.values.get(key) === renamedValue)].join('|');
+
   const incompatibleStorage = makeStorage({ [key]: JSON.stringify({ version: 99, values: { draft: 'old', todos: [] } }) });
   const incompatible = await launch(incompatibleStorage);
   const incompatibleResult = [incompatible.window.synthetix.lastError?.category,
@@ -3647,7 +3678,7 @@ async function launch(storage, migration = null) {
 
   process.stdout.write([persistence, restore, malformedResult, badShapeResult,
     incompatibleResult, migrationResult, retryResult, migrationFailureResult,
-    legacyResult, readFailure, writeResult].join('\n'));
+    legacyResult, readFailure, writeResult, renamedResult].join('\n'));
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 "#;
         let result = std::process::Command::new("node")
@@ -3675,6 +3706,7 @@ async function launch(storage, migration = null) {
         assert_eq!(lines.next(), Some("Legacy|Legacy todo|2"));
         assert_eq!(lines.next(), Some("APPLICATION_RUNTIME_ERROR|0"));
         assert_eq!(lines.next(), Some("APPLICATION_RUNTIME_ERROR|false"));
+        assert_eq!(lines.next(), Some("APPLICATION_RUNTIME_ERROR|true|true"));
         assert!(lines.next().is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
