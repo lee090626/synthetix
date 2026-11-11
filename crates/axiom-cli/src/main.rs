@@ -29,6 +29,7 @@ fn main() -> ExitCode {
         Err(error) => {
             eprintln!("error: {error}");
             eprintln!("usage:");
+            eprintln!("  axiom new <directory>");
             eprintln!("  axiom dev [--port N] [--no-open] [--once]");
             eprintln!("  axiom check <contract.ax>");
             eprintln!("  axiom analyze <contract.ax> [--timeout-ms N] [--report report.json]");
@@ -49,6 +50,7 @@ fn main() -> ExitCode {
 
 fn run(args: Vec<String>) -> Result<(), String> {
     match args.first().map(String::as_str) {
+        Some("new") => new_command(&args[1..]),
         Some("dev") => dev_command(&args[1..]),
         Some("check") => check_command(&args[1..]),
         Some("analyze") => analyze_command(&args[1..]),
@@ -57,6 +59,44 @@ fn run(args: Vec<String>) -> Result<(), String> {
         Some("app-run") => application_run_command(&args[1..]),
         _ => build_command(&args),
     }
+}
+
+const NEW_PROJECT_FILES: [(&str, &str); 3] = [
+    (
+        "synthetix.toml",
+        include_str!("../../../examples/web-counter/synthetix.toml"),
+    ),
+    (
+        "main.ax",
+        include_str!("../../../examples/web-counter/main.ax"),
+    ),
+    (
+        "logic.ax",
+        include_str!("../../../examples/web-counter/logic.ax"),
+    ),
+];
+
+fn new_command(args: &[String]) -> Result<(), String> {
+    let [directory] = args else {
+        return Err("new expects exactly one directory".to_string());
+    };
+    let root = Path::new(directory);
+    if root.exists()
+        && fs::read_dir(root)
+            .map_err(|error| format!("cannot read {directory}: {error}"))?
+            .next()
+            .is_some()
+    {
+        return Err(format!("{directory} already exists and is not empty"));
+    }
+    fs::create_dir_all(root).map_err(|error| format!("cannot create {directory}: {error}"))?;
+    for (name, contents) in NEW_PROJECT_FILES {
+        fs::write(root.join(name), contents)
+            .map_err(|error| format!("cannot write {name}: {error}"))?;
+    }
+    println!("created: {directory}");
+    println!("next: cd {directory} && axiom dev");
+    Ok(())
 }
 
 fn check_command(args: &[String]) -> Result<(), String> {
