@@ -28,3 +28,5 @@ graphify-out/
 
 # Local-only planning
 docs/roadmap.md
+docs/architecture.md
+docs/first-product/requirements.md
