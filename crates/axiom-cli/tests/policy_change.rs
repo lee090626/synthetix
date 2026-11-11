@@ -1,5 +1,5 @@
 //! Roadmap stage 5: for each of the three first-product tasks, change the spec by editing
-//! only `.ax`, then break it and restore it (docs/first-product/requirements.md, docs/roadmap.md).
+//! only `.ax`, then break it and restore it (docs/first-product/requirements.md).
 //! Contract results are checked by running the emitted `dist/contracts.js` in node;
 //! skipped (loudly) when node is unavailable.
 
