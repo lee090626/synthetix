@@ -20,3 +20,7 @@ current spec. `app.config.js` and `app.css` are kept. `axiom dev` is not affecte
 
 Spec changes for each task (T1 quantity limit, T2 → C1, T3 item limit), a contradictory spec, and restoring it are
 covered by [policy_change.rs](../../crates/axiom-cli/tests/policy_change.rs).
+
+If stored state cannot be loaded (for example a persisted state was renamed in `main.ax`), the app starts from the
+initial values, shows the load error, and stops saving so the stored data is not overwritten. Restore the old name, or
+bump `storage_schema_version` and register a migration, to recover it.
