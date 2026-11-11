@@ -1,15 +1,37 @@
-import { capped, floor_cap } from "./policy.ax";
+import { base_amount, items_total, capped, floor_cap } from "./policy.ax";
 
 page Policy {
+    state price: number = 0;
+    state quantity: number = 0;
+    state item1: number = 0;
+    state item2: number = 0;
+    state item3: number = 0;
+    state item4: number = 0;
     state total: number = 0;
     state floor: number = 0;
     state cap: number = 0;
     state capped_result: number = 0;
     state floor_cap_result: number = 0;
 
+    persist price;
+    persist quantity;
+    persist item1;
+    persist item2;
+    persist item3;
+    persist item4;
     persist total;
     persist floor;
     persist cap;
+
+    input price placeholder "단가";
+    input quantity placeholder "수량";
+    button "기본 금액 계산" updates total with base_amount(price, quantity);
+
+    input item1 placeholder "항목 1";
+    input item2 placeholder "항목 2";
+    input item3 placeholder "항목 3";
+    input item4 placeholder "항목 4";
+    button "네 항목 합계" updates total with items_total(item1, item2, item3, item4);
 
     input total placeholder "합계";
     input floor placeholder "하한";
