@@ -25,3 +25,6 @@ editors/vscode/bin/
 
 # Local code-graph cache
 graphify-out/
+
+# Local-only planning
+docs/roadmap.md
