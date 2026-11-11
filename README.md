@@ -76,7 +76,6 @@ synthetix/
 ├── Cargo.toml
 ├── docs/
 │   ├── application-boundary.md
-│   ├── architecture.md
 │   ├── first-product/     # Product assumptions and CLI analysis guide
 │   ├── semantics.md
 │   ├── setup.md
