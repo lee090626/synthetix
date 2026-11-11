@@ -40,10 +40,10 @@ For the browser workflow, create `synthetix.toml` with an `entry` file and run
 `axiom dev`. This starts the local web development server and watches the
 imported `.ax` files.
 
-Use the checked-in web counter as a starter project:
+Start a new project from the web counter template:
 
 ```bash
-cp -R examples/web-counter my-counter
+axiom new my-counter
 cd my-counter
 axiom check
 axiom dev
