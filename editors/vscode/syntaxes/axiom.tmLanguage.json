@@ -16,7 +16,7 @@
     },
     {
       "name": "keyword.control.axiom",
-      "match": "\\bneed\\b"
+      "match": "\\b(need|is|not|save|ask)\\b"
     },
     {
       "name": "keyword.control.axiom",

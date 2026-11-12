@@ -29,8 +29,10 @@ pub fn parse_module(input: &str) -> Result<Module, String> {
         let translated = simple::translate(input)?;
         let mut parser = Parser::new(Lexer::new(&translated))?;
         let module = parser.parse_module()?;
+        let mut known = Vec::new();
         for contract in &module.contracts {
-            simple::check_ranges(contract)?;
+            let (low, high) = simple::check_ranges(contract, &known)?;
+            known.push((contract.name.clone(), low, high));
         }
         return Ok(module);
     }
