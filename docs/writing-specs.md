@@ -21,6 +21,7 @@ fit_price(price, min, max)
 | Name | `fit_price(price, min, max)` | Rule name and its inputs |
 | Need | `need condition` | Only inputs that meet this are accepted |
 | Rule | `condition -> value` | If the condition holds, this value is the answer |
+| Name a value | `name = value` | Gives a part of the computation a name; must come before the `->` lines |
 | Default | `-> value` | The answer when no rule above matches; must be last |
 | Note | `# text` | Ignored by the computation |
 
@@ -38,7 +39,16 @@ base_amount(price, quantity)
 - Operators: `+ - * / ( )`, `< <= > >=`, `is`, `is not`, `and`, `or`.
 - `min(a, b)` and `max(a, b)` give the smaller and larger value: `-> max(lo, min(price, hi))`.
 - `/` divides and rounds down (`7 / 2` is 3). For a percent, write `price * rate / 100`.
-- `=` is never a comparison; it only sets values on pages. Write `x is 0`.
+- `=` is never a comparison. It names a value in a rule (`left = total - used`) or sets values on pages. Write `x is 0` to compare.
+- A named value is used by its name in later lines:
+
+  ```
+  leftover(total, used)
+    need used <= total
+    left = total - used
+    left > 10 -> left * 2
+    -> left
+  ```
 - A rule can use another rule from the same file: `-> fit_price(base_amount(price, quantity), min, max)`.
 - Every value is a whole number from 0 to 4294967295.
 - A file may hold several rules, each starting with an unindented name line.

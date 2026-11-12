@@ -37,6 +37,10 @@ fn oracle(name: &str, a: &[u32]) -> u32 {
         "share" => a[0] / a[1],
         "clamp_mm" => a[0].min(a[2]).max(a[1]),
         "is_check" => u32::from(a[0] == 3 && a[1] != 4),
+        "leftover" => {
+            let left = a[0] - a[1];
+            if left > 10 { left * 2 } else { left }
+        }
         _ => panic!("no oracle for {name}"),
     }
 }
@@ -134,6 +138,13 @@ clamp_mm(t, lo, hi)
 is_check(a, b)
   a is 3 and b is not 4 -> 1
   -> 0
+
+leftover(total, used)
+  need used <= total
+  need total <= 1000000
+  left = total - used
+  left > 10 -> left * 2
+  -> left
 ";
     check_file("inline", text);
 }
