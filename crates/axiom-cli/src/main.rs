@@ -114,6 +114,7 @@ fn check_command(args: &[String]) -> Result<(), String> {
 
     println!("contract: {}", contract.name);
     println!("contract_check: {}", contract_check.status_name());
+    print_unreachable_rules(&contract);
     println!("status: valid");
     Ok(())
 }
@@ -524,6 +525,25 @@ fn read_contract(input: &str) -> Result<axiom_parser::Contract, String> {
     axiom_parser::simple::check_user_syntax(&source)
         .map_err(|error| format!("INVALID: {error}"))?;
     axiom_parser::parse(&source).map_err(|error| format!("INVALID: {error}"))
+}
+
+/// Warns about `->` lines that an earlier line always beats, and prints one
+/// example per reachable `->` line so people can compare it with their intent.
+pub(crate) fn print_unreachable_rules(contract: &axiom_parser::Contract) {
+    for rule in axiom_verify::unreachable_rules(contract) {
+        println!(
+            "warning: {}: `->` line {rule} never applies; an earlier line or a `need` line always matches first",
+            contract.name
+        );
+    }
+    for (rule, args, answer) in axiom_verify::rule_examples(contract) {
+        let args: Vec<String> = args.iter().map(u32::to_string).collect();
+        println!(
+            "example: {}({}) = {answer}   (`->` line {rule})",
+            contract.name,
+            args.join(", ")
+        );
+    }
 }
 
 fn format_contract_check_error(check: &axiom_verify::ContractCheck) -> String {
