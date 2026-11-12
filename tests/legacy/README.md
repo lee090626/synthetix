@@ -19,9 +19,9 @@
 ## 기본 실행
 
 ```bash
-cargo run -p axiom-cli -- run examples/basics/mul8.ax -- 5
-cargo run -p axiom-cli -- run examples/properties/property_max.ax -- 3 8
-cargo run -p axiom-cli -- run examples/friendly/easy_min.ax -- 2 5
+cargo run -p axiom-cli -- run tests/legacy/basics/mul8.ax -- 5
+cargo run -p axiom-cli -- run tests/legacy/properties/property_max.ax -- 3 8
+cargo run -p axiom-cli -- run tests/legacy/friendly/easy_min.ax -- 2 5
 ```
 
 `errors/` 안의 파일은 일부러 실패하도록 만든 예제입니다. 실행 중 생성되는

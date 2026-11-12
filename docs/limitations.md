@@ -8,10 +8,10 @@ does not. The detailed rules are in [semantics.md](semantics.md) and
 
 - **Platforms:** CLI binaries for Linux x64, Windows x64, macOS arm64, and
   macOS x64. The VSCode extension bundles all four CLIs.
-- **Verified values:** `u32`, `i32` (32-bit wrapping arithmetic), and `bool`.
-  Proof inputs may also be fixed arrays `[u32; N]`.
-- **Verified control:** conditionals, static loops of at most 16 iterations,
-  and bounded structural recursion.
+- **Values:** whole numbers from 0 to 4294967295. `+`, `*`, and `-` must be
+  provably in range (see [writing-specs.md](writing-specs.md)).
+- **Rules:** `need` lines, `condition -> value` lines read top to bottom, and a
+  final `-> value`.
 - **Web target:** `synthetix.toml` projects with pages, state, buttons,
   persisted state with schema migration, and adapters through the application
   boundary. Start one with `axiom new <dir>`.
@@ -21,17 +21,13 @@ does not. The detailed rules are in [semantics.md](semantics.md) and
 - **Bounded search.** Synthesis enumerates candidates up to a budget (default
   50,000 candidates and 64 MiB, adjustable with `--max-candidates`,
   `--max-memory-bytes`, `--timeout-ms`). A result of `NOT_FOUND` means no
-  candidate within that budget satisfied the contract; the contract may be
-  contradictory, underconstrained, or outside the search space.
-- **Underspecified contracts are accepted.** If `ensures` admits several
-  results (for example only `result <= cap`), Synthetix picks one that
-  satisfies it. The contract, not the tool, decides what is correct.
-- **No text, lists, or records in verified code.** These values exist only at
-  the application boundary and in adapters, which are not verified.
-- **Adapters and FFI are trusted.** HTTP, storage, and other effects run
-  outside the proof; their results are validated against types only.
-- **Loops:** no nested loops, runtime-dependent bounds, or loops in contracts,
-  clauses, or page expressions.
+  candidate within that budget satisfied the rule.
+- **The rule decides what is correct.** Synthetix proves the app computes
+  exactly what the rule says; whether the rule matches your intent is for you
+  to read and judge.
+- **Old syntax removed from user files.** Negative numbers (`i32`), arrays,
+  loops, recursion, records, lists, text, and property-only results
+  (`ensures`) exist in the engine but have no simple syntax yet.
 - **No published packages.** Releases are GitHub Release assets only; there is
   no crates.io, npm, or VSCode Marketplace distribution.
 - **Not validated with real users.** Ergonomics and error messages reflect

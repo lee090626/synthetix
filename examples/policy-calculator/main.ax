@@ -1,44 +1,26 @@
-import { base_amount, items_total, capped, floor_cap } from "./policy.ax";
+from policy: base_amount, items_total, capped, floor_cap
 
-page Policy {
-    state price: number = 0;
-    state quantity: number = 0;
-    state item1: number = 0;
-    state item2: number = 0;
-    state item3: number = 0;
-    state item4: number = 0;
-    state total: number = 0;
-    state floor: number = 0;
-    state cap: number = 0;
-    state capped_result: number = 0;
-    state floor_cap_result: number = 0;
+page Policy
+  save price, quantity = 0
+  save item1, item2, item3, item4 = 0
+  save total, floor, cap = 0
+  capped_result, floor_cap_result = 0
 
-    persist price;
-    persist quantity;
-    persist item1;
-    persist item2;
-    persist item3;
-    persist item4;
-    persist total;
-    persist floor;
-    persist cap;
+  ask price "단가"
+  ask quantity "수량"
+  button "기본 금액 계산" -> total = base_amount(price, quantity)
 
-    input price placeholder "단가";
-    input quantity placeholder "수량";
-    button "기본 금액 계산" updates total with base_amount(price, quantity);
+  ask item1 "항목 1"
+  ask item2 "항목 2"
+  ask item3 "항목 3"
+  ask item4 "항목 4"
+  button "네 항목 합계" -> total = items_total(item1, item2, item3, item4)
 
-    input item1 placeholder "항목 1";
-    input item2 placeholder "항목 2";
-    input item3 placeholder "항목 3";
-    input item4 placeholder "항목 4";
-    button "네 항목 합계" updates total with items_total(item1, item2, item3, item4);
+  ask total "합계"
+  ask floor "하한"
+  ask cap "상한"
 
-    input total placeholder "합계";
-    input floor placeholder "하한";
-    input cap placeholder "상한";
-
-    show capped_result;
-    show floor_cap_result;
-    button "상한 정책 적용" updates capped_result with capped(total, cap);
-    button "최소 비용 정책 적용" updates floor_cap_result with floor_cap(total, floor, cap);
-}
+  show capped_result
+  show floor_cap_result
+  button "상한 정책 적용" -> capped_result = capped(total, cap)
+  button "최소 비용 정책 적용" -> floor_cap_result = floor_cap(total, floor, cap)

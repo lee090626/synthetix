@@ -49,8 +49,8 @@ from the release build matrix. For a local VSIX package, copy the built CLI to
 the matching `bin/<platform>/` directory as shown above. It writes the generated
 WASM under `.synthetix/build/` while preserving the source's relative path,
 then executes its `run` export. For example,
-`examples/friendly/easy_mul8.ax` produces
-`.synthetix/build/examples/friendly/easy_mul8.wasm`.
+`examples/rules/fit_price.ax` produces
+`.synthetix/build/examples/rules/fit_price.wasm`.
 
 Typing in an `.ax` file opens completion suggestions for Axiom keywords,
 types, parameters, `result`, operators, records, lists, inputs, reducers,

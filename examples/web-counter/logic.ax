@@ -1,3 +1,5 @@
-export program increment(count: number) -> number {
-    gives answer equals count plus 1;
-}
+# Add one to the count.
+increment(count)
+  need count < 1000000
+
+  -> count + 1

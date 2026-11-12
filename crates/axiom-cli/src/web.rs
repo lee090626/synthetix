@@ -3435,7 +3435,7 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
     #[test]
     fn todo_example_keeps_application_data_outside_verified_scalars() {
         let config = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../examples/v3-todo-v31/synthetix.toml");
+            .join("../../tests/legacy/v3-todo-v31/synthetix.toml");
         let root = std::env::temp_dir().join(format!(
             "synthetix-web-data-boundary-{}",
             std::time::SystemTime::now()
@@ -3531,7 +3531,8 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
                 .as_nanos()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let example = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/v3-todo-v31");
+        let example =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/legacy/v3-todo-v31");
         std::fs::copy(example.join("main.ax"), root.join("main.ax")).unwrap();
         std::fs::copy(example.join("logic.ax"), root.join("logic.ax")).unwrap();
         let config = root.join("synthetix.toml");

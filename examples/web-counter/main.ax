@@ -1,7 +1,7 @@
-import { increment } from "./logic.ax";
+from logic: increment
 
-page Counter {
-    state count: number = 0;
-    show count;
-    button "더하기" updates count with increment(count);
-}
+page Counter
+  count = 0
+
+  show count
+  button "더하기" -> count = increment(count)

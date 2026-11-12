@@ -1982,7 +1982,7 @@ mod tests {
 
     #[test]
     fn proves_mul8_shift_candidate() {
-        let contract = parse(include_str!("../../../examples/basics/mul8.ax")).unwrap();
+        let contract = parse(include_str!("../../../tests/legacy/basics/mul8.ax")).unwrap();
         let candidate = Expr::Shl(Box::new(Expr::Arg(0)), Box::new(Expr::Const(3)));
 
         assert_eq!(
@@ -1993,7 +1993,7 @@ mod tests {
 
     #[test]
     fn returns_counterexample_for_wrong_candidate() {
-        let contract = parse(include_str!("../../../examples/basics/mul8.ax")).unwrap();
+        let contract = parse(include_str!("../../../tests/legacy/basics/mul8.ax")).unwrap();
         let candidate = Expr::Arg(0);
 
         match verify(&contract, &candidate).unwrap() {
@@ -2005,7 +2005,7 @@ mod tests {
     #[test]
     fn detects_unsatisfiable_preconditions_before_proof() {
         let contract = parse(include_str!(
-            "../../../examples/errors/unsat_precondition.ax"
+            "../../../tests/legacy/errors/unsat_precondition.ax"
         ))
         .unwrap();
 
@@ -2049,11 +2049,11 @@ mod tests {
 
     #[test]
     fn classifies_contract_validity_and_unsatisfiable_postconditions() {
-        let valid = parse(include_str!("../../../examples/basics/mul8.ax")).unwrap();
+        let valid = parse(include_str!("../../../tests/legacy/basics/mul8.ax")).unwrap();
         assert_eq!(check_contract(&valid).unwrap(), ContractCheck::Valid);
 
         let impossible = parse(include_str!(
-            "../../../examples/errors/unsat_postcondition.ax"
+            "../../../tests/legacy/errors/unsat_postcondition.ax"
         ))
         .unwrap();
         assert_eq!(
@@ -2217,7 +2217,7 @@ mod tests {
 
     #[test]
     fn proves_conditional_specification_for_all_inputs() {
-        let contract = parse(include_str!("../../../examples/friendly/easy_min.ax")).unwrap();
+        let contract = parse(include_str!("../../../tests/legacy/friendly/easy_min.ax")).unwrap();
         let candidate = Expr::Select {
             condition: Box::new(Expr::Lt(Box::new(Expr::Arg(0)), Box::new(Expr::Arg(1)))),
             then_branch: Box::new(Expr::Arg(0)),
@@ -2245,7 +2245,7 @@ mod tests {
 
     #[test]
     fn proves_signed_conditional_specification() {
-        let contract = parse(include_str!("../../../examples/basics/signed_min.ax")).unwrap();
+        let contract = parse(include_str!("../../../tests/legacy/basics/signed_min.ax")).unwrap();
         let candidate = Expr::Select {
             condition: Box::new(Expr::SLt(Box::new(Expr::Arg(0)), Box::new(Expr::Arg(1)))),
             then_branch: Box::new(Expr::Arg(0)),

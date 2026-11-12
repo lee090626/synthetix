@@ -105,109 +105,50 @@ synthetix/
 
 ## 5. Quick Start
 
-Ensure Rust is installed via `rustup`:
+Ensure Rust is installed via `rustup`, then from the repository root:
 
 ```bash
-# Run these commands from the repository root.
-
-# Run the workspace tests
-cargo test --workspace
-
-# Build the axiom command
 cargo build -p axiom-cli
 
-# Check a contract
-cargo run -p axiom-cli -- check examples/basics/mul8.ax
+# Prove and run one rule
+./target/debug/axiom run examples/rules/fit_price.ax -- 10 20 80   # result: 20
 
-# Synthesize and write the WASM result
-cargo run -p axiom-cli -- build examples/basics/mul8.ax -o mul8.wasm
-
-# Synthesize, verify, execute, and print a result
-cargo run -p axiom-cli -- run examples/basics/mul8.ax -- 5
-
-# Optional JSON report and synthesis timeout
-cargo run -p axiom-cli -- run examples/basics/mul8.ax -- 5 --report /tmp/mul8.json --timeout-ms 10000
+# Start a web project
+./target/debug/axiom new my-app
+cd my-app
+../target/debug/axiom dev
 ```
 
-To check whether a declarative contract permits different outputs at the same input,
-use `axiom analyze <contract.ax>`. `AT_MOST_ONE` does not prove an output exists
-for every valid input. See [result analysis](docs/first-product/result-analysis.md)
-for witnesses, supported types, and inconclusive outcomes.
+A rule looks like this:
 
-For VSCode development, open `editors` as an extension project and start the
-Extension Development Host. In the host, open an `.ax` file and click the play
-button. The command asks for a `u32` input, runs the generated WASM, and shows
-the result in `Output → Synthetix`. See [the VSCode guide](docs/vscode.md).
+```
+fit_price(price, min, max)
+  need min <= max
 
-The proof core supports pure `u32`, signed `i32`, and `bool` values with finite conditional values.
-The browser app layer adds records, lists, text inputs, components, and explicit
-localStorage persistence around verified scalar reducers. See the
-[application boundary](docs/application-boundary.md) for the web build boundary.
-
-For the browser workflow:
-
-```bash
-cd examples/web-counter
-cargo run -p axiom-cli -- dev
+  price < min -> min
+  price > max -> max
+  -> price
 ```
 
-For the v3.1 dynamic Todo workflow:
+A page uses the rules:
 
-```bash
-cd examples/v3-todo-v31
-cargo run -p axiom-cli -- dev
+```
+from logic: fit_price
+
+page Shop
+  save price, min, max = 0
+  result = 0
+
+  ask price "Price"
+  ask min "Min"
+  ask max "Max"
+  show result
+  button "Fit" -> result = fit_price(price, min, max)
 ```
 
-The dev command opens a local page, verifies the imported contract, and
-rebuilds the page when an `.ax` file is saved.
+See [writing specs](docs/writing-specs.md) for the full syntax and
+[limitations](docs/limitations.md) for what is not supported. Examples:
+`examples/rules`, `examples/web-counter`, and `examples/policy-calculator`.
 
-For the v3 typed-state example:
-
-```bash
-cd examples/v3-status
-cargo run -p axiom-cli -- dev
-```
-
-This example uses a verified `bool` contract to conditionally show a message.
-
-The state-based checklist example is in `examples/v3-todo`.
-
-Signed contracts and conditional numeric examples are available in
-`examples/basics/signed_min.ax`, `examples/friendly/easy_min.ax`,
-`examples/friendly/easy_max.ax`, and `examples/friendly/easy_clamp.ax`:
-
-```bash
-cargo run -p axiom-cli -- run examples/basics/signed_min.ax -- -1 1
-```
-
-예제 목록과 역할은 [examples/README.md](examples/README.md)에 정리되어 있습니다.
-
-## Easy-word syntax
-
-The original formal keywords remain supported, but beginners can use simpler
-aliases:
-
-```axiom
-program mul8(x: number) -> number {
-    gives answer equals x times 8;
-}
-```
-
-`program`/`contract`, `when`/`requires`, `gives`/`ensures`,
-`answer`/`result`, `number`/`u32`, and word operators such as `plus`
-and `times` are equivalent.
-
-Use `i32` when comparisons should use signed WebAssembly semantics. The CLI
-accepts negative `i32` inputs and prints signed results.
-
-Conditional and named expressions stay inside the specification:
-
-```axiom
-program minimum(first: number, second: number) -> number {
-    gives answer equals if first < second { first } else { second };
-}
-
-program double_with_name(x: number) -> number {
-    gives answer equals let doubled = x plus x in doubled;
-}
-```
+The old contract syntax (`contract`, `ensures`, `{ }`) is no longer accepted in
+user files. It remains only as the internal format and in `tests/legacy`.
