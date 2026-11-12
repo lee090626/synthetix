@@ -50,24 +50,26 @@ pub enum Token {
     Colon,
     Dot,
     Range,
-    Arrow,   // ->
-    Semi,    // ;
-    Assign,  // =
-    EqEq,    // ==
-    ExclEq,  // !=
-    Lt,      // <
-    Le,      // <=
-    Gt,      // >
-    Ge,      // >=
-    AndAnd,  // &&
-    OrOr,    // ||
-    MulWrap, // *%
-    AddWrap, // +%
-    SubWrap, // -%
-    Shl,     // <<
-    BitAnd,  // &
-    BitOr,   // |
-    BitXor,  // ^
+    Arrow,      // ->
+    Semi,       // ;
+    Assign,     // =
+    EqEq,       // ==
+    ExclEq,     // !=
+    Lt,         // <
+    Le,         // <=
+    Gt,         // >
+    Ge,         // >=
+    AndAnd,     // &&
+    OrOr,       // ||
+    MulWrap,    // *%
+    Slash,      // /
+    AddWrap,    // +%
+    SubWrap,    // -%
+    SubChecked, // -!
+    Shl,        // <<
+    BitAnd,     // &
+    BitOr,      // |
+    BitXor,     // ^
     Eof,
 }
 
@@ -174,6 +176,7 @@ impl<'a> Lexer<'a> {
                 }
             }
             ';' => Ok(Token::Semi),
+            '/' => Ok(Token::Slash),
             '-' => {
                 if self.chars.peek() == Some(&'>') {
                     self.take_char();
@@ -181,6 +184,9 @@ impl<'a> Lexer<'a> {
                 } else if self.chars.peek() == Some(&'%') {
                     self.take_char();
                     Ok(Token::SubWrap)
+                } else if self.chars.peek() == Some(&'!') {
+                    self.take_char();
+                    Ok(Token::SubChecked)
                 } else {
                     Err(self.error("Unexpected '-' (use '-%' for wrapping sub)"))
                 }

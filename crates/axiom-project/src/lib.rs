@@ -1639,7 +1639,9 @@ fn page_expr_type(
                 }
                 axiom_parser::BinaryOp::AddWrap
                 | axiom_parser::BinaryOp::SubWrap
+                | axiom_parser::BinaryOp::SubChecked
                 | axiom_parser::BinaryOp::MulWrap
+                | axiom_parser::BinaryOp::Div
                 | axiom_parser::BinaryOp::Shl
                 | axiom_parser::BinaryOp::BitAnd
                 | axiom_parser::BinaryOp::BitOr

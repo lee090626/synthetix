@@ -33,6 +33,8 @@ fn oracle(name: &str, a: &[u32]) -> u32 {
             }
         }
         "gap" => a[0].abs_diff(a[1]),
+        "discount" => a[0] - a[0] * a[1] / 100,
+        "share" => a[0] / a[1],
         "is_check" => u32::from(a[0] == 3 && a[1] != 4),
         _ => panic!("no oracle for {name}"),
     }
@@ -114,6 +116,15 @@ fn subtraction_and_is_match_oracles() {
 gap(a, b)
   a > b -> a - b
   -> b - a
+
+discount(price, rate)
+  need price <= 1000000
+  need rate <= 100
+  -> price - price * rate / 100
+
+share(total, people)
+  need people >= 1
+  -> total / people
 
 is_check(a, b)
   a is 3 and b is not 4 -> 1
