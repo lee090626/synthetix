@@ -256,6 +256,8 @@ function explainLine(text) {
   if (arrow > 0 && !line.startsWith("button")) {
     return `${line.slice(0, arrow).trim()} 이면 답은 ${line.slice(arrow + 2).trim()} 입니다. (위에서부터 처음 맞는 줄이 답)`;
   }
+  const named = line.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/);
+  if (named) return `${named[1]} 은(는) ${named[2]} 입니다. 아래 줄에서 이 이름을 씁니다.`;
   return undefined;
 }
 

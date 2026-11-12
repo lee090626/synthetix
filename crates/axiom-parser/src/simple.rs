@@ -113,6 +113,7 @@ pub fn translate(source: &str) -> Result<String, String> {
                 current = Some(Current::Rule(Block {
                     name_line: line_no,
                     rules: Vec::new(),
+                    names: Vec::new(),
                 }));
             }
             continue;
@@ -148,32 +149,84 @@ fn rule_line(
     trimmed: &str,
 ) -> Result<(), String> {
     let line_no = index + 1;
-    if let Some(condition) = trimmed.strip_prefix("need ") {
+    let expr = |text: &str| -> Result<String, String> {
+        Ok(substitute(&expression(text, line_no)?, &block.names))
+    };
+    if let Some((name, value)) = named_value(trimmed) {
+        if !block.rules.is_empty() {
+            return Err(format!(
+                "line {line_no}: put every `name = value` line before the `->` lines"
+            ));
+        }
+        check_name(name, line_no)?;
+        if block.names.iter().any(|(known, _)| known == name) {
+            return Err(format!("line {line_no}: `{name}` is already set"));
+        }
+        let value = format!("({})", expr(value)?);
+        block.names.push((name.to_string(), value));
+    } else if let Some(condition) = trimmed.strip_prefix("need ") {
         if !block.rules.is_empty() {
             return Err(format!(
                 "line {line_no}: put every `need` line before the `->` lines"
             ));
         }
-        out[index] = format!("    requires {};", expression(condition, line_no)?);
+        out[index] = format!("    requires {};", expr(condition)?);
     } else if let Some((condition, value)) = trimmed.split_once("->") {
         let condition = condition.trim();
         let condition = if condition.is_empty() {
             None
         } else {
-            Some(expression(condition, line_no)?)
+            Some(expr(condition)?)
         };
         block.rules.push(Rule {
             index,
             line_no,
             condition,
-            value: expression(value.trim(), line_no)?,
+            value: expr(value.trim())?,
         });
     } else {
         return Err(format!(
-            "line {line_no}: expected `need ...`, `condition -> value`, or `-> value`"
+            "line {line_no}: expected `need ...`, `name = value`, `condition -> value`, or `-> value`"
         ));
     }
     Ok(())
+}
+
+/// Splits `name = value` (a single `=`, not part of `<=` or `>=`).
+fn named_value(line: &str) -> Option<(&str, &str)> {
+    if line.contains("->") {
+        return None;
+    }
+    let (name, value) = line.split_once('=')?;
+    let name = name.trim();
+    let simple = !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_');
+    (simple && !value.starts_with('=')).then_some((name, value.trim()))
+}
+
+/// Replaces whole-word uses of earlier names with their values.
+fn substitute(text: &str, names: &[(String, String)]) -> String {
+    if names.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        match names.iter().find(|(name, _)| name == word) {
+            Some((_, value)) => out.push_str(value),
+            None => out.push_str(word),
+        }
+        word.clear();
+    };
+    for c in text.chars() {
+        if c.is_alphanumeric() || c == '_' {
+            word.push(c);
+        } else {
+            flush(&mut word, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
 }
 
 fn import(rest: &str, line_no: usize) -> Result<String, String> {
@@ -384,6 +437,8 @@ impl Facts {
 struct Block {
     name_line: usize,
     rules: Vec<Rule>,
+    /// `name = value` lines, already translated, in order.
+    names: Vec<(String, String)>,
 }
 
 struct Rule {
@@ -714,6 +769,26 @@ mod tests {
     use super::*;
 
     const FIT: &str = "# note\nfit_price(price, min, max)\n  need min <= max\n\n  price < min -> min\n  price > max -> max\n  -> price\n";
+
+    #[test]
+    fn named_values_are_inlined() {
+        let src = "f(total, used)\n  need used <= total\n  need total <= 1000\n  left = total - used\n  twice = left * 2\n  left is 0 -> 0\n  -> twice\n";
+        let out = translate(src).unwrap();
+        assert!(out.contains("(total -! used) == 0"), "{out}");
+        assert!(out.contains("((total -! used) *% 2)"), "{out}");
+        crate::parse_module(src).unwrap();
+        assert!(
+            translate("f(x)\n  a = x\n  a = x\n  -> a\n")
+                .unwrap_err()
+                .contains("already set")
+        );
+        assert!(
+            translate("f(x)\n  x > 1 -> 1\n  a = x\n  -> a\n")
+                .unwrap_err()
+                .contains("before")
+        );
+        assert!(translate("f(x)\n  x <= 1 -> 1\n  -> x\n").is_ok());
+    }
 
     #[test]
     fn detects_simple_syntax() {
