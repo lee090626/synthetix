@@ -217,10 +217,8 @@ fn page_line(trimmed: &str, line_no: usize) -> Result<String, String> {
             let label = quoted(label.trim(), line_no)?;
             Ok(format!("    input {name} placeholder {label};"))
         }
-        "show" => {
-            check_name(rest, line_no)?;
-            Ok(format!("    show {rest};"))
-        }
+        "show" if rest.starts_with('"') => Ok(format!("    show {};", quoted(rest, line_no)?)),
+        "show" => Ok(format!("    show {};", expression(rest, line_no)?)),
         "button" => {
             let label_end = rest
                 .get(1..)
@@ -284,8 +282,16 @@ fn quoted(text: &str, line_no: usize) -> Result<&str, String> {
 /// Proves that `+`, `-`, and `*` cannot leave `0..=u32::MAX`. Facts come
 /// from `need` lines and, inside a rule, from that rule's condition (and the
 /// failed conditions of the rules above it).
-pub fn check_ranges(contract: &Contract) -> Result<(), String> {
+///
+/// `known` holds the answer ranges of rules checked earlier in the file, so
+/// `double(x) + 1` can use what `double` returns. The answer range of this
+/// rule is returned for the rules after it.
+pub fn check_ranges(
+    contract: &Contract,
+    known: &[(String, u64, u64)],
+) -> Result<(u64, u64), String> {
     let mut facts = Facts {
+        calls: known.to_vec(),
         bounds: contract
             .params
             .iter()
@@ -296,15 +302,23 @@ pub fn check_ranges(contract: &Contract) -> Result<(), String> {
     for requirement in &contract.requires {
         facts.learn(requirement, true);
     }
+    let mut answer = (0, u64::from(u32::MAX));
     for ensures in &contract.ensures {
-        range(ensures, &facts, &contract.name)?;
+        if let SpecExpr::Binary(BinaryOp::Eq, left, right) = ensures
+            && matches!(left.as_ref(), SpecExpr::Ident(name) if name == "result")
+        {
+            answer = range(right, &facts, &contract.name)?;
+        } else {
+            range(ensures, &facts, &contract.name)?;
+        }
     }
-    Ok(())
+    Ok(answer)
 }
 
 /// What is known about the inputs: value bounds and `left >= right` pairs.
 #[derive(Clone)]
 struct Facts {
+    calls: Vec<(String, u64, u64)>,
     bounds: Vec<(String, u64, u64)>,
     order: Vec<(String, String)>,
 }
@@ -480,15 +494,19 @@ fn expression(text: &str, line_no: usize) -> Result<String, String> {
                 out.push(c);
                 out.push('%');
             }
-            '<' | '>' | '!' if next == Some('=') => {
+            '!' if next == Some('=') => {
+                return Err(format!("line {line_no}: use `is not` to compare"));
+            }
+            '<' | '>' if next == Some('=') => {
                 out.push(c);
                 out.push('=');
                 index += 1;
             }
-            '=' if next == Some('=') => {
-                return Err(format!("line {line_no}: use `=` instead of `==`"));
+            '=' => {
+                return Err(format!(
+                    "line {line_no}: use `is` to compare (`=` only sets values on pages)"
+                ));
             }
-            '=' => out.push_str("=="),
             '{' | '}' | ';' | '%' | '&' | '|' | '^' => {
                 return Err(format!("line {line_no}: `{c}` is not allowed here"));
             }
@@ -503,6 +521,25 @@ fn expression(text: &str, line_no: usize) -> Result<String, String> {
                 match word.as_str() {
                     "and" => out.push_str("&&"),
                     "or" => out.push_str("||"),
+                    "is" => {
+                        let rest: String = chars[index + 1..].iter().collect();
+                        let after = rest.trim_start();
+                        let skip = rest.len() - after.len();
+                        if after.starts_with("not")
+                            && !after[3..]
+                                .chars()
+                                .next()
+                                .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                        {
+                            out.push_str("!=");
+                            index += skip + 3;
+                        } else {
+                            out.push_str("==");
+                        }
+                    }
+                    "not" => {
+                        return Err(format!("line {line_no}: write `is not` to compare"));
+                    }
                     _ => out.push_str(&word),
                 }
             }
@@ -544,6 +581,16 @@ fn range(expr: &SpecExpr, facts: &Facts, name: &str) -> Result<(u64, u64), Strin
             .iter()
             .find(|(param, _, _)| param == ident)
             .map_or((0, MAX), |(_, low, high)| (*low, *high)),
+        SpecExpr::Call(callee, args) => {
+            for arg in args {
+                range(arg, facts, name)?;
+            }
+            facts
+                .calls
+                .iter()
+                .find(|(rule, _, _)| rule == callee)
+                .map_or((0, MAX), |(_, low, high)| (*low, *high))
+        }
         SpecExpr::If(condition, then, otherwise) => {
             range(condition, facts, name)?;
             let mut when_true = facts.clone();
@@ -642,10 +689,17 @@ mod tests {
                 .contains("before")
         );
         assert!(
-            translate("f(x)\n  x == 1 -> 1\n  -> 0\n")
+            translate("f(x)\n  x = 1 -> 1\n  -> 0\n")
                 .unwrap_err()
-                .contains("use `=`")
+                .contains("use `is`")
         );
+        assert!(
+            translate("f(x)\n  x != 1 -> 1\n  -> 0\n")
+                .unwrap_err()
+                .contains("is not")
+        );
+        let out = translate("f(x, y)\n  x is 1 and y is not 2 -> 1\n  -> 0\n").unwrap();
+        assert!(out.contains("if x == 1 && y != 2 { 1 }"), "{out}");
         assert!(
             translate("f(input)\n  -> 1\n")
                 .unwrap_err()
@@ -670,6 +724,15 @@ mod tests {
         crate::parse_module("f(a, b)\n  a > b -> a - b\n  -> b - a\n").unwrap();
         crate::parse_module("f(a, b)\n  need a >= b\n  -> a - b\n").unwrap();
         crate::parse_module("f(a)\n  a > 5 -> a - 5\n  -> 0\n").unwrap();
+        crate::parse_module(
+            "d(x)\n  need x <= 10\n  -> x + x\n\ng(x)\n  need x <= 5\n  -> d(x) + 1\n",
+        )
+        .unwrap();
+        assert!(
+            crate::parse_module("g(x)\n  -> h(x) + 1\n")
+                .unwrap_err()
+                .contains("may exceed")
+        );
         assert!(
             crate::parse_module("f(a, b)\n  a > b -> b - a\n  -> 0\n")
                 .unwrap_err()
@@ -697,6 +760,16 @@ mod tests {
         );
         assert_eq!(lines[5], "    input count placeholder \"Count #\";");
         assert_eq!(lines[6], "    show count;");
+        assert!(
+            translate("page P\n  show a * 2\n")
+                .unwrap()
+                .contains("show a *% 2;")
+        );
+        assert!(
+            translate("page P\n  show \"Hi\"\n")
+                .unwrap()
+                .contains("show \"Hi\";")
+        );
         assert_eq!(
             lines[7],
             "    button \"Add\" updates count with increment(count +% 1);"

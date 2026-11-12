@@ -35,7 +35,9 @@ base_amount(price, quantity)
   -> price * quantity
 ```
 
-- Operators: `+ - * ( )`, `< <= > >= = !=`, `and`, `or`.
+- Operators: `+ - * ( )`, `< <= > >=`, `is`, `is not`, `and`, `or`.
+- `=` is never a comparison; it only sets values on pages. Write `x is 0`.
+- A rule can use another rule from the same file: `-> fit_price(base_amount(price, quantity), min, max)`.
 - Every value is a whole number from 0 to 4294967295.
 - A file may hold several rules, each starting with an unindented name line.
 
@@ -73,7 +75,8 @@ page Shop
 | `save a, b = 0` | Values that start at 0 and are kept after reload |
 | `a, b = 0` | Values that start at 0 and reset on reload |
 | `ask a "Label"` | An input box for `a` |
-| `show a` | Show the value of `a` |
+| `show a` | Show the value of `a`; any calculation or rule works too (`show price * quantity`) |
+| `show "Text"` | Show fixed text |
 | `button "Label" -> a = rule(...)` | On click, set `a` to the rule's answer |
 
 ## When it fails
@@ -84,6 +87,8 @@ page Shop
 | `may exceed 4294967295` | Add `need name <= limit` lines for the inputs |
 | `may go below 0` | Make the left side of `-` at least the right side (see above) |
 | `is a reserved word` | Rename the input |
+| `use is to compare` | Write `x is 1` / `x is not 1` instead of `=` / `!=` |
+| `call-site precondition ... is not established` | The values passed to another rule may break its `need` lines; add `need` lines or a condition |
 | `UNSATISFIABLE_PRECONDITION` | The `need` lines contradict each other |
 | `old syntax, which is no longer supported` | Rewrite the file in the forms above |
 
