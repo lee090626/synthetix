@@ -40,6 +40,9 @@ pub fn eval_ami(expr: &Expr, args: &[u32]) -> Result<u32, String> {
         Expr::Add(lhs, rhs) => Ok(eval_ami(lhs, args)?.wrapping_add(eval_ami(rhs, args)?)),
         Expr::Sub(lhs, rhs) => Ok(eval_ami(lhs, args)?.wrapping_sub(eval_ami(rhs, args)?)),
         Expr::Mul(lhs, rhs) => Ok(eval_ami(lhs, args)?.wrapping_mul(eval_ami(rhs, args)?)),
+        Expr::Div(lhs, rhs) => eval_ami(lhs, args)?
+            .checked_div(eval_ami(rhs, args)?)
+            .ok_or_else(|| "division by zero".to_string()),
         Expr::Shl(lhs, rhs) => Ok(eval_ami(lhs, args)?.wrapping_shl(eval_ami(rhs, args)? & 31)),
         Expr::BitAnd(lhs, rhs) => Ok(eval_ami(lhs, args)? & eval_ami(rhs, args)?),
         Expr::BitOr(lhs, rhs) => Ok(eval_ami(lhs, args)? | eval_ami(rhs, args)?),
@@ -304,7 +307,21 @@ fn eval_binary(op: &BinaryOp, lhs: Value, rhs: Value) -> Result<Value, String> {
     match op {
         BinaryOp::AddWrap => numeric(lhs, rhs, u32::wrapping_add),
         BinaryOp::SubWrap => numeric(lhs, rhs, u32::wrapping_sub),
+        BinaryOp::SubChecked => match (lhs, rhs) {
+            (Value::U32(lhs), Value::U32(rhs)) => lhs
+                .checked_sub(rhs)
+                .map(Value::U32)
+                .ok_or_else(|| "subtraction below 0".to_string()),
+            _ => Err("checked subtraction is only supported for u32".to_string()),
+        },
         BinaryOp::MulWrap => numeric(lhs, rhs, u32::wrapping_mul),
+        BinaryOp::Div => match (lhs, rhs) {
+            (Value::U32(lhs), Value::U32(rhs)) => lhs
+                .checked_div(rhs)
+                .map(Value::U32)
+                .ok_or_else(|| "division by zero".to_string()),
+            _ => Err("division is only supported for u32".to_string()),
+        },
         BinaryOp::Shl => numeric(lhs, rhs, |lhs, rhs| lhs.wrapping_shl(rhs & 31)),
         BinaryOp::BitAnd => numeric(lhs, rhs, |lhs, rhs| lhs & rhs),
         BinaryOp::BitOr => numeric(lhs, rhs, |lhs, rhs| lhs | rhs),

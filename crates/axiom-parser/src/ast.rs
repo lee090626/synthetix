@@ -40,21 +40,23 @@ pub struct Span {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BinaryOp {
-    AddWrap, // +%
-    SubWrap, // -%
-    MulWrap, // *%
-    Shl,     // <<
-    BitAnd,  // &
-    BitOr,   // |
-    BitXor,  // ^
-    Eq,      // ==
-    Ne,      // !=
-    Lt,      // <
-    Le,      // <=
-    Gt,      // >
-    Ge,      // >=
-    And,     // &&
-    Or,      // ||
+    AddWrap,    // +%
+    SubWrap,    // -%
+    SubChecked, // -! (must not go below 0; proven by the verifier)
+    MulWrap,    // *%
+    Div,        // / (unsigned, rounds down; divisor must be non-zero)
+    Shl,        // <<
+    BitAnd,     // &
+    BitOr,      // |
+    BitXor,     // ^
+    Eq,         // ==
+    Ne,         // !=
+    Lt,         // <
+    Le,         // <=
+    Gt,         // >
+    Ge,         // >=
+    And,        // &&
+    Or,         // ||
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

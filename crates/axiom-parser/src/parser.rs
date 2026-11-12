@@ -851,8 +851,10 @@ impl<'a> Parser<'a> {
                 Token::BitAnd => (BinaryOp::BitAnd, 13, 14),
                 Token::AddWrap => (BinaryOp::AddWrap, 15, 16),
                 Token::SubWrap => (BinaryOp::SubWrap, 15, 16),
+                Token::SubChecked => (BinaryOp::SubChecked, 15, 16),
                 Token::Shl => (BinaryOp::Shl, 17, 18),
                 Token::MulWrap => (BinaryOp::MulWrap, 19, 20),
+                Token::Slash => (BinaryOp::Div, 19, 20),
                 _ => break,
             };
 

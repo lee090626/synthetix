@@ -988,6 +988,7 @@ fn candidate_type(expr: &Expr, contract: &Contract) -> Option<Type> {
         Expr::Add(lhs, rhs)
         | Expr::Sub(lhs, rhs)
         | Expr::Mul(lhs, rhs)
+        | Expr::Div(lhs, rhs)
         | Expr::Shl(lhs, rhs)
         | Expr::BitAnd(lhs, rhs)
         | Expr::BitOr(lhs, rhs)
@@ -1117,6 +1118,7 @@ fn estimated_candidate_bytes(expr: &Expr) -> usize {
         Expr::Add(lhs, rhs)
         | Expr::Sub(lhs, rhs)
         | Expr::Mul(lhs, rhs)
+        | Expr::Div(lhs, rhs)
         | Expr::Shl(lhs, rhs)
         | Expr::BitAnd(lhs, rhs)
         | Expr::BitOr(lhs, rhs)
@@ -1726,6 +1728,10 @@ fn eval_spec(
                 (BinaryOp::AddWrap, Value::U32(lhs), Value::I32(rhs)) => {
                     Ok(Value::I32((lhs as i32).wrapping_add(rhs)))
                 }
+                (BinaryOp::SubChecked, Value::U32(lhs), Value::U32(rhs)) => lhs
+                    .checked_sub(rhs)
+                    .map(Value::U32)
+                    .ok_or_else(|| "subtraction below 0".to_string()),
                 (BinaryOp::SubWrap, Value::U32(lhs), Value::U32(rhs)) => {
                     Ok(Value::U32(lhs.wrapping_sub(rhs)))
                 }
@@ -1741,6 +1747,10 @@ fn eval_spec(
                 (BinaryOp::MulWrap, Value::U32(lhs), Value::U32(rhs)) => {
                     Ok(Value::U32(lhs.wrapping_mul(rhs)))
                 }
+                (BinaryOp::Div, Value::U32(lhs), Value::U32(rhs)) => lhs
+                    .checked_div(rhs)
+                    .map(Value::U32)
+                    .ok_or_else(|| "division by zero".to_string()),
                 (BinaryOp::MulWrap, Value::I32(lhs), Value::I32(rhs)) => {
                     Ok(Value::I32(lhs.wrapping_mul(rhs)))
                 }
@@ -1966,7 +1976,9 @@ fn lower_spec_expr(
             Ok(match op {
                 BinaryOp::AddWrap => Expr::Add(lhs, rhs),
                 BinaryOp::SubWrap => Expr::Sub(lhs, rhs),
+                BinaryOp::SubChecked => Expr::Sub(lhs, rhs),
                 BinaryOp::MulWrap => Expr::Mul(lhs, rhs),
+                BinaryOp::Div => Expr::Div(lhs, rhs),
                 BinaryOp::Shl => Expr::Shl(lhs, rhs),
                 BinaryOp::BitAnd => Expr::BitAnd(lhs, rhs),
                 BinaryOp::BitOr => Expr::BitOr(lhs, rhs),

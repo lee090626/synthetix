@@ -656,7 +656,9 @@ pub fn type_of_expr(
             match op {
                 BinaryOp::AddWrap
                 | BinaryOp::SubWrap
+                | BinaryOp::SubChecked
                 | BinaryOp::MulWrap
+                | BinaryOp::Div
                 | BinaryOp::Shl
                 | BinaryOp::BitAnd
                 | BinaryOp::BitOr

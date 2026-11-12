@@ -32,7 +32,7 @@
     },
     {
       "name": "keyword.operator.axiom",
-      "match": "(-%|\\*%|\\+%|<<|==|!=|<=|>=|<|>|=|\\+|\\*|-|->|&|\\||\\^|plus|minus|times|shift_left|equals|not_equals|is_not|and|or)"
+      "match": "(-%|\\*%|\\+%|<<|==|!=|<=|>=|<|>|=|\\+|\\*|\\/|-|->|&|\\||\\^|plus|minus|times|shift_left|equals|not_equals|is_not|and|or)"
     },
     {
       "name": "variable.language.result.axiom",

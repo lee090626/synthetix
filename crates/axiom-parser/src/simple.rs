@@ -310,7 +310,6 @@ pub fn check_ranges(
             .iter()
             .map(|param| (param.name.clone(), 0, u64::from(u32::MAX)))
             .collect(),
-        order: Vec::new(),
     };
     for requirement in &contract.requires {
         facts.learn(requirement, true);
@@ -328,12 +327,11 @@ pub fn check_ranges(
     Ok(answer)
 }
 
-/// What is known about the inputs: value bounds and `left >= right` pairs.
+/// What is known about the inputs: value bounds and answers of earlier rules.
 #[derive(Clone)]
 struct Facts {
     calls: Vec<(String, u64, u64)>,
     bounds: Vec<(String, u64, u64)>,
-    order: Vec<(String, String)>,
 }
 
 impl Facts {
@@ -361,15 +359,6 @@ impl Facts {
             (SpecExpr::Number(n), SpecExpr::Ident(name)) => {
                 self.bound(name, flip(op), u64::from(*n))
             }
-            (SpecExpr::Ident(l), SpecExpr::Ident(r)) => match op {
-                BinaryOp::Ge | BinaryOp::Gt => self.order.push((l.clone(), r.clone())),
-                BinaryOp::Le | BinaryOp::Lt => self.order.push((r.clone(), l.clone())),
-                BinaryOp::Eq => {
-                    self.order.push((l.clone(), r.clone()));
-                    self.order.push((r.clone(), l.clone()));
-                }
-                _ => {}
-            },
             _ => {}
         }
     }
@@ -388,15 +377,6 @@ impl Facts {
                 entry.2 = entry.2.min(number);
             }
             _ => {}
-        }
-    }
-
-    fn at_least(&self, left: &SpecExpr, right: &SpecExpr) -> bool {
-        match (left, right) {
-            (SpecExpr::Ident(l), SpecExpr::Ident(r)) => {
-                l == r || self.order.iter().any(|(a, b)| a == l && b == r)
-            }
-            _ => false,
         }
     }
 }
@@ -517,10 +497,11 @@ fn expression(text: &str, line_no: usize) -> Result<String, String> {
         let c = chars[index];
         let next = chars.get(index + 1).copied();
         match c {
-            '+' | '-' | '*' => {
+            '+' | '*' => {
                 out.push(c);
                 out.push('%');
             }
+            '-' => out.push_str("-!"),
             '!' if next == Some('=') => {
                 return Err(format!("line {line_no}: use `is not` to compare"));
             }
@@ -646,13 +627,16 @@ fn range(expr: &SpecExpr, facts: &Facts, name: &str) -> Result<(u64, u64), Strin
                     }
                     (l_low * r_low, high)
                 }
-                BinaryOp::SubWrap if l_low >= r_high => (l_low - r_high, l_high - r_low),
-                BinaryOp::SubWrap if facts.at_least(left, right) => (0, l_high),
-                BinaryOp::SubWrap => {
+                BinaryOp::Div if r_low == 0 => {
                     return Err(format!(
-                        "{name}: `-` may go below 0; make sure the left side is at least the right side with a `need` line or the rule's condition"
+                        "{name}: `/` may divide by 0; add a `need` line that keeps the right side at least 1"
                     ));
                 }
+                BinaryOp::Div => (l_low / r_high, l_high / r_low),
+                // `-` must not go below 0. When the bounds alone cannot show
+                // that, the verifier proves it (or reports an input that breaks it).
+                BinaryOp::SubChecked if l_low >= r_high => (l_low - r_high, l_high - r_low),
+                BinaryOp::SubChecked => (0, l_high),
                 _ => (0, 1),
             }
         }
@@ -742,15 +726,18 @@ mod tests {
                 .contains("may exceed")
         );
         crate::parse_module("f(a, b)\n  need a <= 10000\n  need b <= 100\n  -> a * b\n").unwrap();
-        assert!(
-            crate::parse_module("f(a, b)\n  -> a - b\n")
-                .unwrap_err()
-                .contains("below 0")
-        );
         crate::parse_module("f(a, b)\n  need a >= 10\n  need b <= 10\n  -> a - b\n").unwrap();
         crate::parse_module("f(a, b)\n  a > b -> a - b\n  -> b - a\n").unwrap();
         crate::parse_module("f(a, b)\n  need a >= b\n  -> a - b\n").unwrap();
         crate::parse_module("f(a)\n  a > 5 -> a - 5\n  -> 0\n").unwrap();
+        crate::parse_module("p(x, r)\n  need x <= 1000000\n  need r <= 100\n  -> x * r / 100\n")
+            .unwrap();
+        assert!(
+            crate::parse_module("q(x, d)\n  -> x / d\n")
+                .unwrap_err()
+                .contains("divide by 0")
+        );
+        crate::parse_module("q(x, d)\n  need d >= 1\n  -> x / d\n").unwrap();
         crate::parse_module(
             "d(x)\n  need x <= 10\n  -> x + x\n\ng(x)\n  need x <= 5\n  -> d(x) + 1\n",
         )
@@ -759,16 +746,6 @@ mod tests {
             crate::parse_module("g(x)\n  -> h(x) + 1\n")
                 .unwrap_err()
                 .contains("may exceed")
-        );
-        assert!(
-            crate::parse_module("f(a, b)\n  a > b -> b - a\n  -> 0\n")
-                .unwrap_err()
-                .contains("below 0")
-        );
-        assert!(
-            crate::parse_module("f(a, b)\n  a > b or a > 3 -> a - b\n  -> 0\n")
-                .unwrap_err()
-                .contains("below 0")
         );
     }
 

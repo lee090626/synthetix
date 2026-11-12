@@ -735,12 +735,25 @@ fn lower_implementation_value(
                                 else_branch: Box::new(rhs_defined),
                             },
                         ),
+                        BinaryOp::SubChecked => and_expr(
+                            and_expr(lhs_defined, rhs_defined),
+                            Expr::Ge(Box::new(lhs.clone()), Box::new(rhs.clone())),
+                        ),
+                        BinaryOp::Div => and_expr(
+                            and_expr(lhs_defined, rhs_defined),
+                            Expr::Ne(Box::new(rhs.clone()), Box::new(Expr::Const(0))),
+                        ),
                         _ => and_expr(lhs_defined, rhs_defined),
                     };
                     let binary = match op {
                         BinaryOp::AddWrap => Expr::Add(Box::new(lhs), Box::new(rhs)),
                         BinaryOp::SubWrap => Expr::Sub(Box::new(lhs), Box::new(rhs)),
+                        BinaryOp::SubChecked => Expr::Sub(Box::new(lhs), Box::new(rhs)),
                         BinaryOp::MulWrap => Expr::Mul(Box::new(lhs), Box::new(rhs)),
+                        BinaryOp::Div if lhs_type == Type::I32 => {
+                            return Err("division is only supported for u32".to_string());
+                        }
+                        BinaryOp::Div => Expr::Div(Box::new(lhs), Box::new(rhs)),
                         BinaryOp::Shl => Expr::Shl(Box::new(lhs), Box::new(rhs)),
                         BinaryOp::BitAnd => Expr::BitAnd(Box::new(lhs), Box::new(rhs)),
                         BinaryOp::BitOr => Expr::BitOr(Box::new(lhs), Box::new(rhs)),
@@ -1576,6 +1589,7 @@ fn expr_to_bv(expr: &Expr, args: &[BV]) -> Result<BV, String> {
         Expr::Add(lhs, rhs) => Ok(&expr_to_bv(lhs, args)? + &expr_to_bv(rhs, args)?),
         Expr::Sub(lhs, rhs) => Ok(&expr_to_bv(lhs, args)? - &expr_to_bv(rhs, args)?),
         Expr::Mul(lhs, rhs) => Ok(&expr_to_bv(lhs, args)? * &expr_to_bv(rhs, args)?),
+        Expr::Div(lhs, rhs) => Ok(expr_to_bv(lhs, args)?.bvudiv(&expr_to_bv(rhs, args)?)),
         Expr::Shl(lhs, rhs) => {
             let lhs = expr_to_bv(lhs, args)?;
             let rhs = expr_to_bv(rhs, args)?;
@@ -1660,7 +1674,7 @@ fn require_defined_when(
     match solver_check(&solver, metrics) {
         SatResult::Unsat => Ok(()),
         SatResult::Sat => Err(format!(
-            "{subject} has an unproven bounds, loop-invariant, or recursion-depth guard at {:?}",
+            "{subject} is not defined for inputs {:?}: a `-` may go below 0, a `/` may divide by 0, or an unproven bounds, loop-invariant, or recursion-depth guard fails; add `need` lines or a condition",
             model_inputs(&solver, args)?
         )),
         SatResult::Unknown => Err(format!(
@@ -1752,6 +1766,30 @@ fn spec_definedness(
                 Bool::or(&[&lhs_value, &rhs_defined]),
             ]))
         }
+        SpecExpr::Binary(BinaryOp::SubChecked, lhs, rhs) => {
+            let (Value::U32(left), Value::U32(right)) = (
+                spec_to_value(lhs, contract, args, result, locals)?,
+                spec_to_value(rhs, contract, args, result, locals)?,
+            ) else {
+                return Err("checked subtraction is only supported for u32".to_string());
+            };
+            Ok(and(vec![
+                spec_definedness(lhs, contract, args, result, locals)?,
+                spec_definedness(rhs, contract, args, result, locals)?,
+                left.bvuge(&right),
+            ]))
+        }
+        SpecExpr::Binary(BinaryOp::Div, lhs, rhs) => {
+            let divisor = match spec_to_value(rhs, contract, args, result, locals)? {
+                Value::U32(value) => value,
+                _ => return Err("division is only supported for u32".to_string()),
+            };
+            Ok(and(vec![
+                spec_definedness(lhs, contract, args, result, locals)?,
+                spec_definedness(rhs, contract, args, result, locals)?,
+                divisor.eq(BV::from_u64(0, 32)).not(),
+            ]))
+        }
         SpecExpr::Binary(_, lhs, rhs) => Ok(and(vec![
             spec_definedness(lhs, contract, args, result, locals)?,
             spec_definedness(rhs, contract, args, result, locals)?,
@@ -1778,6 +1816,11 @@ fn ami_definedness(expr: &Expr, args: &[BV]) -> Result<Bool, String> {
     let and = |values: Vec<Bool>| Bool::and(&values.iter().collect::<Vec<_>>());
     match expr {
         Expr::Arg(_) | Expr::Const(_) => Ok(Bool::from_bool(true)),
+        Expr::Div(lhs, rhs) => Ok(and(vec![
+            ami_definedness(lhs, args)?,
+            ami_definedness(rhs, args)?,
+            expr_to_bv(rhs, args)?.ne(BV::from_u64(0, 32)),
+        ])),
         Expr::ArrayGet { elements, index } => {
             let index_value = expr_to_bv(index, args)?;
             let index_defined = ami_definedness(index, args)?;
@@ -2007,6 +2050,12 @@ fn spec_to_value(
                 }
                 (BinaryOp::MulWrap, Value::U32(lhs), Value::U32(rhs)) => {
                     Ok(Value::U32(&lhs * &rhs))
+                }
+                (BinaryOp::Div, Value::U32(lhs), Value::U32(rhs)) => {
+                    Ok(Value::U32(lhs.bvudiv(&rhs)))
+                }
+                (BinaryOp::SubChecked, Value::U32(lhs), Value::U32(rhs)) => {
+                    Ok(Value::U32(&lhs - &rhs))
                 }
                 (BinaryOp::MulWrap, Value::I32(lhs), Value::I32(rhs))
                 | (BinaryOp::MulWrap, Value::I32(lhs), Value::U32(rhs))
@@ -2841,5 +2890,22 @@ mod tests {
             };
             assert_eq!(answer, expected, "rule {rule} {args:?}");
         }
+    }
+
+    #[test]
+    fn checked_subtraction_and_division_are_proven_safe() {
+        let valid = |source: &str| {
+            matches!(
+                check_contract(&parse(source).unwrap()).unwrap(),
+                ContractCheck::Valid
+            )
+        };
+        assert!(valid(
+            "d(price, rate)\n  need price <= 1000000\n  need rate <= 100\n  -> price - price * rate / 100\n"
+        ));
+        assert!(valid("g(a, b)\n  a > b -> a - b\n  -> b - a\n"));
+        assert!(!valid("f(a, b)\n  -> a - b\n"));
+        assert!(!valid("f(a, b)\n  a > b -> b - a\n  -> 0\n"));
+        assert!(!valid("f(a, b)\n  a > b or a > 3 -> a - b\n  -> 0\n"));
     }
 }

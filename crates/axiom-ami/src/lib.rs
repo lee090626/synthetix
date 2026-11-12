@@ -14,6 +14,8 @@ pub enum Expr {
     Sub(Box<Expr>, Box<Expr>),
     /// Multiplication with wrap-around (modulo 2^32)
     Mul(Box<Expr>, Box<Expr>),
+    /// Unsigned division rounding down; a zero divisor is an error
+    Div(Box<Expr>, Box<Expr>),
     /// Left shift (masked by 31 in standard bit-vector / WASM semantics)
     Shl(Box<Expr>, Box<Expr>),
     /// Bitwise AND
@@ -69,6 +71,10 @@ impl Expr {
             Expr::Add(lhs, rhs) => Ok(lhs.try_eval(args)?.wrapping_add(rhs.try_eval(args)?)),
             Expr::Sub(lhs, rhs) => Ok(lhs.try_eval(args)?.wrapping_sub(rhs.try_eval(args)?)),
             Expr::Mul(lhs, rhs) => Ok(lhs.try_eval(args)?.wrapping_mul(rhs.try_eval(args)?)),
+            Expr::Div(lhs, rhs) => lhs
+                .try_eval(args)?
+                .checked_div(rhs.try_eval(args)?)
+                .ok_or_else(|| "division by zero".to_string()),
             Expr::Shl(lhs, rhs) => {
                 let shift = rhs.try_eval(args)? & 31;
                 Ok(lhs.try_eval(args)?.wrapping_shl(shift))

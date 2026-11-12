@@ -651,7 +651,14 @@ function evaluate(expression, scope = __state) {
 function binary(op, left, right) {
   switch (op) {
     case 'add': return (left + right) >>> 0;
+    case 'sub': return (left - right) >>> 0;
+    case 'sub_checked':
+      if (left < right) throw new Error('subtraction below 0');
+      return left - right;
     case 'mul': return Math.imul(left, right) >>> 0;
+    case 'div':
+      if (right === 0) throw new Error('division by zero');
+      return Math.floor(left / right) >>> 0;
     case 'shl': return (left << (right & 31)) >>> 0;
     case 'eq': return left === right;
     case 'ne': return left !== right;
@@ -1662,7 +1669,9 @@ fn binary_name(op: &BinaryOp) -> &'static str {
     match op {
         BinaryOp::AddWrap => "add",
         BinaryOp::SubWrap => "sub",
+        BinaryOp::SubChecked => "sub_checked",
         BinaryOp::MulWrap => "mul",
+        BinaryOp::Div => "div",
         BinaryOp::Shl => "shl",
         BinaryOp::BitAnd => "bit_and",
         BinaryOp::BitOr => "bit_or",

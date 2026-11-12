@@ -35,7 +35,8 @@ base_amount(price, quantity)
   -> price * quantity
 ```
 
-- Operators: `+ - * ( )`, `< <= > >=`, `is`, `is not`, `and`, `or`.
+- Operators: `+ - * / ( )`, `< <= > >=`, `is`, `is not`, `and`, `or`.
+- `/` divides and rounds down (`7 / 2` is 3). For a percent, write `price * rate / 100`.
 - `=` is never a comparison; it only sets values on pages. Write `x is 0`.
 - A rule can use another rule from the same file: `-> fit_price(base_amount(price, quantity), min, max)`.
 - Every value is a whole number from 0 to 4294967295.
@@ -43,14 +44,15 @@ base_amount(price, quantity)
 
 ### Numbers must stay in range
 
-`+` and `*` must not go above 4294967295, and `-` must not go below 0.
-Synthetix checks this before building and rejects the rule otherwise:
-
-- For `+` and `*`, add `need name <= limit` lines for the inputs.
-- For `a - b`, make sure `a` is at least `b`: a `need a >= b` line, number
-  bounds such as `need a >= 10` and `need b <= 10`, or the rule's own
-  condition (`a > b -> a - b`). On the default line, the failed conditions
-  above count too (`a > b -> ...` then `-> b - a` is fine).
+- `+` and `*` must not go above 4294967295: add `need name <= limit` lines
+  for their inputs.
+- `/` must not divide by 0: add `need divisor >= 1`, unless the divisor is a
+  number like `100`.
+- `-` must not go below 0. Synthetix proves this for every allowed input,
+  using `need` lines and the rule's own condition (and the failed conditions
+  above it). `price - price * rate / 100` with `need rate <= 100` is fine;
+  `a - b` with nothing about `a` and `b` is rejected with an input that breaks
+  it.
 
 ## Pages
 
@@ -85,7 +87,8 @@ page Shop
 | --- | --- |
 | `the last line must be -> value` | Add a final `-> value` line for when no rule matches |
 | `may exceed 4294967295` | Add `need name <= limit` lines for the inputs |
-| `may go below 0` | Make the left side of `-` at least the right side (see above) |
+| `may divide by 0` | Add `need divisor >= 1` |
+| `is not defined for inputs [...]` | A `-` can go below 0 for those inputs; add a `need` line or a condition |
 | `is a reserved word` | Rename the input |
 | `use is to compare` | Write `x is 1` / `x is not 1` instead of `=` / `!=` |
 | `call-site precondition ... is not established` | The values passed to another rule may break its `need` lines; add `need` lines or a condition |
