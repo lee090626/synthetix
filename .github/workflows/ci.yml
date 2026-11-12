@@ -22,11 +22,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Check formatting
+        run: cargo fmt --all -- --check
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
       - name: Run tests
-        run: cargo test --locked --workspace
+        run: cargo nextest run --locked --workspace
+      - name: Run doctests
+        run: cargo test --locked --workspace --doc
