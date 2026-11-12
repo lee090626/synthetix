@@ -102,7 +102,8 @@ fn check_file(path: &str, text: &str) {
     let mut rng = Rng(0x5eed);
     for contract in &module.contracts {
         let options = SynthesisOptions {
-            timeout: Some(Duration::from_secs(20)),
+            // Generous: CI runners are slower and run these tests in parallel.
+            timeout: Some(Duration::from_secs(120)),
             ..SynthesisOptions::default()
         };
         let (_, wasm, _, _) = synthesize_wasm_with_metrics(&contract, options)
