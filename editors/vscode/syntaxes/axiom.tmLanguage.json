@@ -15,6 +15,10 @@
       "match": "^[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()"
     },
     {
+      "name": "support.function.axiom",
+      "match": "\\b(min|max)(?=\\s*\\()"
+    },
+    {
       "name": "keyword.control.axiom",
       "match": "\\b(need|is|not|save|ask)\\b"
     },
