@@ -683,8 +683,9 @@ function decimalsOf(name) {
 function display(value, decimals = 0) {
   if (value === undefined) return '';
   if (decimals > 0 && typeof value === 'number') {
-    const digits = String(value).padStart(decimals + 1, '0');
-    return `${digits.slice(0, -decimals)}.${digits.slice(-decimals)}`;
+    const sign = value < 0 ? '-' : '';
+    const digits = String(Math.abs(value)).padStart(decimals + 1, '0');
+    return `${sign}${digits.slice(0, -decimals)}.${digits.slice(-decimals)}`;
   }
   if (typeof value === 'boolean') return value ? 'true' : 'false';
   if (typeof value === 'object') return JSON.stringify(value);
@@ -806,7 +807,10 @@ function callContract(name, args) {
       if (typeof check !== 'function') throw new Error(`Missing WASM precondition check: ${name}`);
       if (check(...lowered) !== 1) throw new Error(`${name}: input violates a requires clause`);
     }
-    return liftResult(fn(...lowered), contract.result);
+    const result = liftResult(fn(...lowered), contract.result);
+    if (!contract.labels) return result;
+    if (!(result in contract.labels)) throw new TypeError(`${name}: no text for answer ${result}`);
+    return contract.labels[result];
   } catch (error) {
     throw applicationError(error, name);
   }
@@ -818,11 +822,14 @@ function parseInputValue(input, type, decimals = 0) {
   if (type !== 'u32' && type !== 'i32') throw new TypeError(`input does not support ${type}`);
   if (input.value.trim() === '') throw new TypeError(`expected ${type} input`);
   if (decimals > 0) {
-    const match = /^(\d+)(?:\.(\d+))?$/.exec(input.value.trim());
-    if (!match || (match[2] ?? '').length > decimals)
+    const match = /^(-?)(\d+)(?:\.(\d+))?$/.exec(input.value.trim());
+    if (!match || (match[3] ?? '').length > decimals || (match[1] && type !== 'i32'))
       throw new TypeError(`expected a number with at most ${decimals} decimal places`);
-    const scaled = Number(match[1] + (match[2] ?? '').padEnd(decimals, '0'));
-    if (!Number.isSafeInteger(scaled) || scaled > 0xffffffff) throw new TypeError(`input is outside ${type}`);
+    const scaled = Number(match[1] + match[2] + (match[3] ?? '').padEnd(decimals, '0'));
+    const minimum = type === 'i32' ? -0x80000000 : 0;
+    const maximum = type === 'i32' ? 0x7fffffff : 0xffffffff;
+    if (!Number.isSafeInteger(scaled) || scaled < minimum || scaled > maximum)
+      throw new TypeError(`input is outside ${type}`);
     return scaled;
   }
   const value = Number(input.value);
@@ -988,7 +995,7 @@ function renderElement(element, root, scope) {
   }
   if (element.kind === 'show-expr') {
     const output = document.createElement('output');
-    output.textContent = display(evaluate(element.value, scope));
+    output.textContent = display(evaluate(element.value, scope), element.decimals ?? 0);
     root.append(output);
     return;
   }
@@ -1330,7 +1337,7 @@ fn page_json(linked: &LinkedPage, root: &Path, storage_schema_version: u32) -> S
     let elements = page
         .elements
         .iter()
-        .map(|element| element_json(element, &page.reducers))
+        .map(|element| element_json(element, &page.reducers, &page.states))
         .collect::<Vec<_>>();
     let reducers = page
         .reducers
@@ -1371,15 +1378,42 @@ fn page_json(linked: &LinkedPage, root: &Path, storage_schema_version: u32) -> S
     )
 }
 
-fn element_json(element: &PageElement, reducers: &[Reducer]) -> String {
+/// Decimal places of the values a page expression uses (they all match).
+fn expr_decimals(expr: &SpecExpr, states: &[axiom_parser::State]) -> u32 {
+    match expr {
+        SpecExpr::Ident(name) => states
+            .iter()
+            .find(|state| &state.name == name)
+            .map_or(0, |state| state.decimals),
+        SpecExpr::Binary(_, left, right) => {
+            expr_decimals(left, states).max(expr_decimals(right, states))
+        }
+        SpecExpr::If(_, then, otherwise) => {
+            expr_decimals(then, states).max(expr_decimals(otherwise, states))
+        }
+        _ => 0,
+    }
+}
+
+fn element_json(
+    element: &PageElement,
+    reducers: &[Reducer],
+    states: &[axiom_parser::State],
+) -> String {
     match element {
         PageElement::Show { state } => {
             format!("{{\"kind\":\"show\",\"state\":{}}}", json_string(state))
         }
-        PageElement::ShowExpr { value } => format!(
-            "{{\"kind\":\"show-expr\",\"value\":{}}}",
-            expr_json(value).unwrap_or_else(|error| error_json(&error))
-        ),
+        PageElement::ShowExpr { value } => {
+            let decimals = match expr_decimals(value, states) {
+                0 => String::new(),
+                places => format!(",\"decimals\":{places}"),
+            };
+            format!(
+                "{{\"kind\":\"show-expr\",\"value\":{}{decimals}}}",
+                expr_json(value).unwrap_or_else(|error| error_json(&error))
+            )
+        }
         PageElement::ShowText { text } => {
             format!("{{\"kind\":\"text\",\"text\":{}}}", json_string(text))
         }
@@ -1451,7 +1485,7 @@ fn element_json(element: &PageElement, reducers: &[Reducer]) -> String {
             json_string(item),
             elements
                 .iter()
-                .map(|element| element_json(element, reducers))
+                .map(|element| element_json(element, reducers, states))
                 .collect::<Vec<_>>()
                 .join(",")
         ),
@@ -1552,8 +1586,22 @@ fn contracts_json(project: &Project) -> String {
             } else {
                 json_string(&requires_export_name(&linked.contract.name))
             };
+            let labels = if linked.contract.labels.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    ",\"labels\":[{}]",
+                    linked
+                        .contract
+                        .labels
+                        .iter()
+                        .map(|label| json_string(label))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            };
             format!(
-                "{}:{{\"source\":{},\"params\":[{}],\"result\":{},\"requires\":{}}}",
+                "{}:{{\"source\":{},\"params\":[{}],\"result\":{},\"requires\":{}{labels}}}",
                 json_string(&linked.contract.name),
                 json_string(&source_label(&project.config.root, &linked.source)),
                 params,

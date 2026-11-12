@@ -249,6 +249,7 @@ impl<'a> Parser<'a> {
             requires_spans: Vec::new(),
             ensures_spans: Vec::new(),
             decimals: 0,
+            labels: Vec::new(),
         })
     }
 
@@ -358,6 +359,7 @@ impl<'a> Parser<'a> {
             requires_spans,
             ensures_spans,
             decimals: 0,
+            labels: Vec::new(),
         })
     }
 

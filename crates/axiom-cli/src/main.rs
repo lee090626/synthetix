@@ -316,7 +316,10 @@ fn run_command(args: &[String]) -> Result<(), String> {
         .values
         .iter()
         .zip(&contract.params)
-        .map(|(value, param)| parse_input_value(value, &param.ty))
+        .map(|(value, param)| {
+            let value = unscale(value, contract.decimals)?;
+            parse_input_value(&value, &param.ty)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     if let Err(error) = axiom_synth::check_requires(&contract, &values) {
         if let Some(report) = &options.report {
@@ -406,18 +409,22 @@ fn run_command(args: &[String]) -> Result<(), String> {
     if values.len() == 1 {
         println!(
             "input: {}",
-            display_result(&contract.params[0].ty, values[0])
+            shown(&contract, &contract.params[0].ty, values[0])
         );
     } else {
         let inputs = contract
             .params
             .iter()
             .zip(&values)
-            .map(|(param, value)| display_result(&param.ty, *value))
+            .map(|(param, value)| shown(&contract, &param.ty, *value))
             .collect::<Vec<_>>();
         println!("inputs: {inputs:?}");
     }
-    println!("result: {}", display_result(&contract.return_type, result));
+    let answer = match contract.labels.get(result as usize) {
+        Some(label) if !contract.labels.is_empty() => format!("{label:?}"),
+        _ => shown(&contract, &contract.return_type, result),
+    };
+    println!("result: {answer}");
     println!("wrote: {}", options.output.display());
     if let Some(report) = options.report {
         println!("report: {}", report.display());
@@ -451,6 +458,49 @@ fn application_run_command(args: &[String]) -> Result<(), String> {
     println!("proof_result: VERIFIED");
     println!("result: {result:?}");
     Ok(())
+}
+
+/// A value as written in the rule: with its decimal places (`12.50`).
+fn shown(contract: &axiom_parser::Contract, ty: &axiom_parser::Type, value: u32) -> String {
+    let text = display_result(ty, value);
+    let places = contract.decimals as usize;
+    if places == 0 || !matches!(ty, axiom_parser::Type::U32 | axiom_parser::Type::I32) {
+        return text;
+    }
+    let (sign, digits) = match text.strip_prefix('-') {
+        Some(digits) => ("-", digits),
+        None => ("", text.as_str()),
+    };
+    let digits = format!("{digits:0>width$}", width = places + 1);
+    let (whole, fraction) = digits.split_at(digits.len() - places);
+    format!("{sign}{whole}.{fraction}")
+}
+
+/// Reads `12.5` for a rule with 2 decimal places as `1250`.
+fn unscale(value: &str, places: u32) -> Result<String, String> {
+    if places == 0 {
+        return Ok(value.to_string());
+    }
+    let (sign, digits) = match value.strip_prefix('-') {
+        Some(digits) => ("-", digits),
+        None => ("", value),
+    };
+    let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
+    if whole.is_empty()
+        || fraction.len() > places as usize
+        || !whole
+            .chars()
+            .chain(fraction.chars())
+            .all(|c| c.is_ascii_digit())
+    {
+        return Err(format!(
+            "invalid input '{value}': expected a number with at most {places} decimal places"
+        ));
+    }
+    Ok(format!(
+        "{sign}{whole}{fraction:0<width$}",
+        width = places as usize
+    ))
 }
 
 fn display_result(ty: &axiom_parser::Type, result: u32) -> String {
@@ -537,7 +587,15 @@ pub(crate) fn print_unreachable_rules(contract: &axiom_parser::Contract) {
         );
     }
     for (rule, args, answer) in axiom_verify::rule_examples(contract) {
-        let args: Vec<String> = args.iter().map(u32::to_string).collect();
+        let args: Vec<String> = args
+            .iter()
+            .zip(&contract.params)
+            .map(|(value, param)| shown(contract, &param.ty, *value))
+            .collect();
+        let answer = match contract.labels.get(answer as usize) {
+            Some(label) => format!("{label:?}"),
+            None => shown(contract, &contract.return_type, answer),
+        };
         println!(
             "example: {}({}) = {answer}   (`->` line {rule})",
             contract.name,

@@ -104,6 +104,8 @@ pub struct Contract {
     /// Decimal places of every number (`with 2 decimals`); values are stored
     /// as whole numbers times 10^decimals. 0 means whole numbers.
     pub decimals: u32,
+    /// Text answers: the rule returns `n` for `labels[n]`. Empty for numbers.
+    pub labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
