@@ -13,7 +13,7 @@
 //! line numbers. Arithmetic must provably stay within `0..=u32::MAX` using the
 //! `need` bounds; see [`check_ranges`].
 
-use crate::ast::{BinaryOp, Contract, SpecExpr};
+use crate::ast::{BinaryOp, Contract, SpecExpr, Type};
 use crate::lexer::{Lexer, Token};
 
 /// Returns true when the first meaningful line is a simple-syntax header:
@@ -68,14 +68,28 @@ pub fn show_source_line(error: String, source: &str) -> String {
 
 enum Current {
     Rule(Block),
-    Page { last_index: usize },
+    Page { last_index: usize, page: PageInfo },
+}
+
+/// What a page declares that later lines depend on.
+struct PageInfo {
+    name: String,
+    lists: Vec<(String, usize)>,
+}
+
+/// Decimal places declared with `with N decimals`, which the contract syntax
+/// cannot express: rule name to places, and (page, value) to places.
+#[derive(Debug, Default)]
+pub struct Decimals {
+    pub rules: Vec<(String, u32)>,
+    pub states: Vec<(String, String, u32)>,
 }
 
 impl Current {
     fn finish(self, out: &mut [String]) -> Result<(), String> {
         match self {
             Current::Rule(block) => block.finish(out),
-            Current::Page { last_index } => {
+            Current::Page { last_index, .. } => {
                 out[last_index].push_str("\n}");
                 Ok(())
             }
@@ -85,6 +99,12 @@ impl Current {
 
 /// Translates simple syntax into contract and page syntax, line for line.
 pub fn translate(source: &str) -> Result<String, String> {
+    translate_with_decimals(source).map(|(text, _)| text)
+}
+
+/// Like [`translate`], also returning the declared decimal places.
+pub fn translate_with_decimals(source: &str) -> Result<(String, Decimals), String> {
+    let mut decimals = Decimals::default();
     let lines: Vec<&str> = source.lines().collect();
     let mut out: Vec<String> = vec![String::new(); lines.len()];
     let mut current: Option<Current> = None;
@@ -107,21 +127,34 @@ pub fn translate(source: &str) -> Result<String, String> {
                 let name = name.trim();
                 check_name(name, line_no)?;
                 out[index] = format!("page {name} {{");
-                current = Some(Current::Page { last_index: index });
+                current = Some(Current::Page {
+                    last_index: index,
+                    page: PageInfo {
+                        name: name.to_string(),
+                        lists: Vec::new(),
+                    },
+                });
             } else {
-                out[index] = header(trimmed, line_no)?;
+                let header = header(trimmed, line_no)?;
+                out[index] = header.text;
+                if header.decimals > 0 {
+                    decimals.rules.push((header.name, header.decimals));
+                }
                 current = Some(Current::Rule(Block {
                     name_line: line_no,
                     rules: Vec::new(),
                     names: Vec::new(),
+                    signed: header.signed,
+                    decimals: header.decimals,
+                    lists: header.lists,
                 }));
             }
             continue;
         }
         match current.as_mut() {
             Some(Current::Rule(block)) => rule_line(block, &mut out, index, trimmed)?,
-            Some(Current::Page { last_index }) => {
-                out[index] = page_line(trimmed, line_no)?;
+            Some(Current::Page { last_index, page }) => {
+                out[index] = page_line(trimmed, line_no, page, &mut decimals.states)?;
                 *last_index = index;
             }
             None => {
@@ -139,7 +172,7 @@ pub fn translate(source: &str) -> Result<String, String> {
         }
         None => {}
     }
-    Ok(out.join("\n"))
+    Ok((out.join("\n"), decimals))
 }
 
 fn rule_line(
@@ -149,8 +182,13 @@ fn rule_line(
     trimmed: &str,
 ) -> Result<(), String> {
     let line_no = index + 1;
+    let ctx = Ctx {
+        signed: block.signed,
+        decimals: block.decimals,
+        lists: &block.lists,
+    };
     let expr = |text: &str| -> Result<String, String> {
-        Ok(substitute(&expression(text, line_no)?, &block.names))
+        Ok(substitute(&expression(text, line_no, &ctx)?, &block.names))
     };
     if let Some((name, value)) = named_value(trimmed) {
         if !block.rules.is_empty() {
@@ -170,7 +208,8 @@ fn rule_line(
                 "line {line_no}: put every `need` line before the `->` lines"
             ));
         }
-        out[index] = format!("    requires {};", expr(condition)?);
+        let condition = each_item(condition, &block.lists, line_no)?;
+        out[index] = format!("    requires {};", expr(&condition)?);
     } else if let Some((condition, value)) = trimmed.split_once("->") {
         let condition = condition.trim();
         let condition = if condition.is_empty() {
@@ -270,20 +309,61 @@ fn names_list(text: &str, line_no: usize) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-fn page_line(trimmed: &str, line_no: usize) -> Result<String, String> {
+fn page_line(
+    trimmed: &str,
+    line_no: usize,
+    page: &mut PageInfo,
+    decimals: &mut Vec<(String, String, u32)>,
+) -> Result<String, String> {
     let (word, rest) = trimmed.split_once(' ').unwrap_or((trimmed, ""));
     let rest = rest.trim();
+    let lists = &mut page.lists;
+    let ctx = Ctx {
+        signed: false,
+        decimals: 0,
+        lists: &lists.clone(),
+    };
+    let mut states =
+        |text: &str, persist: bool, line_no: usize, lists: &mut Vec<(String, usize)>| {
+            let (text, places) = strip_decimals(text, line_no)?;
+            let line = states(text, persist, line_no, lists)?;
+            if places > 0 {
+                for state in line.split(" state ").skip(1) {
+                    let name = state.split(':').next().unwrap_or_default();
+                    decimals.push((page.name.clone(), name.to_string(), places));
+                }
+            }
+            Ok::<_, String>(line)
+        };
+    let expression = |text: &str, line_no: usize| expression(text, line_no, &ctx);
     match word {
-        "save" => states(rest, true, line_no),
+        "save" => states(rest, true, line_no, lists),
         "ask" => {
             let (name, label) = rest
                 .split_once(' ')
                 .ok_or_else(|| format!("line {line_no}: expected `ask name \"label\"`"))?;
             check_name(name, line_no)?;
             let label = quoted(label.trim(), line_no)?;
+            if let Some((_, size)) = lists.iter().find(|(list, _)| list == name) {
+                let label = &label[1..label.len() - 1];
+                return Ok((1..=*size)
+                    .map(|item| format!("    input {name}_{item} placeholder \"{label} {item}\";"))
+                    .collect::<Vec<_>>()
+                    .join(""));
+            }
             Ok(format!("    input {name} placeholder {label};"))
         }
-        "show" if rest.starts_with('"') => Ok(format!("    show {};", quoted(rest, line_no)?)),
+        "show" if rest.starts_with('"') => match split_if(rest) {
+            Some((text, condition)) => Ok(format!(
+                "    when {} show {};",
+                expression(condition, line_no)?,
+                quoted(text, line_no)?
+            )),
+            None => Ok(format!("    show {};", quoted(rest, line_no)?)),
+        },
+        "show" if split_if(rest).is_some() => Err(format!(
+            "line {line_no}: only a text in quotes can be shown with `if`, like `show \"Too high\" if total > 100`"
+        )),
         "show" => Ok(format!("    show {};", expression(rest, line_no)?)),
         "button" => {
             let label_end = rest
@@ -308,14 +388,23 @@ fn page_line(trimmed: &str, line_no: usize) -> Result<String, String> {
                 expression(value.trim(), line_no)?
             ))
         }
-        _ if trimmed.contains('=') => states(trimmed, false, line_no),
+        _ if trimmed.contains('=') => states(trimmed, false, line_no, lists),
         _ => Err(format!(
             "line {line_no}: expected `save`, `ask`, `show`, `button`, or `name = 0`"
         )),
     }
 }
 
-fn states(text: &str, persist: bool, line_no: usize) -> Result<String, String> {
+fn states(
+    text: &str,
+    persist: bool,
+    line_no: usize,
+    lists: &mut Vec<(String, usize)>,
+) -> Result<String, String> {
+    let (text, signed) = match text.strip_suffix("can be negative") {
+        Some(rest) => (rest.trim_end(), true),
+        None => (text, false),
+    };
     let (names, initial) = text
         .split_once('=')
         .ok_or_else(|| format!("line {line_no}: expected `name = 0`"))?;
@@ -325,14 +414,49 @@ fn states(text: &str, persist: bool, line_no: usize) -> Result<String, String> {
             "line {line_no}: the starting value must be a number"
         ));
     }
+    let ty = if signed { "i32" } else { "number" };
     let mut out = String::from("   ");
-    for name in names_list(names, line_no)? {
-        out.push_str(&format!(" state {name}: number = {initial};"));
-        if persist {
-            out.push_str(&format!(" persist {name};"));
+    for name in names
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        let items: Vec<String> = match list_param(name, line_no)? {
+            Some((list, size)) => {
+                lists.push((list.to_string(), size));
+                (1..=size).map(|item| format!("{list}_{item}")).collect()
+            }
+            None => {
+                check_name(name, line_no)?;
+                vec![name.to_string()]
+            }
+        };
+        for name in items {
+            out.push_str(&format!(" state {name}: {ty} = {initial};"));
+            if persist {
+                out.push_str(&format!(" persist {name};"));
+            }
         }
     }
+    if out.trim().is_empty() {
+        return Err(format!("line {line_no}: expected at least one name"));
+    }
     Ok(out)
+}
+
+/// Splits `"text" if condition` at an `if` outside the quotes.
+fn split_if(text: &str) -> Option<(&str, &str)> {
+    let mut in_quotes = false;
+    for (index, c) in text.char_indices() {
+        match c {
+            '"' => in_quotes = !in_quotes,
+            ' ' if !in_quotes && text[index..].starts_with(" if ") => {
+                return Some((text[..index].trim(), text[index + 4..].trim()));
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn quoted(text: &str, line_no: usize) -> Result<&str, String> {
@@ -345,29 +469,145 @@ fn quoted(text: &str, line_no: usize) -> Result<&str, String> {
     }
 }
 
-/// Proves that `+`, `-`, and `*` cannot leave `0..=u32::MAX`. Facts come
-/// from `need` lines and, inside a rule, from that rule's condition (and the
-/// failed conditions of the rules above it).
+/// Records decimal places on rules and page values, and rescales `*` and `/`
+/// in decimal rules: with 2 places, `a * b` is `a * b / 100` and `a / b` is
+/// `a * 100 / b`. Rules may only call rules with the same places.
+pub fn apply_decimals(module: &mut crate::ast::Module, decimals: &Decimals) -> Result<(), String> {
+    let places_of = |name: &str| {
+        decimals
+            .rules
+            .iter()
+            .find(|(rule, _)| rule == name)
+            .map_or(0, |(_, places)| *places)
+    };
+    let local: Vec<String> = module.contracts.iter().map(|c| c.name.clone()).collect();
+    for contract in &mut module.contracts {
+        contract.decimals = places_of(&contract.name);
+        let scale = 10u32.pow(contract.decimals);
+        for expr in contract
+            .requires
+            .iter_mut()
+            .chain(contract.ensures.iter_mut())
+        {
+            check_calls(expr, &contract.name, contract.decimals, &|callee: &str| {
+                local
+                    .iter()
+                    .any(|name| name == callee)
+                    .then(|| places_of(callee))
+            })?;
+            if scale > 1 {
+                *expr = rescale(expr.clone(), scale);
+            }
+        }
+    }
+    for page in &mut module.pages {
+        for state in &mut page.states {
+            state.decimals = decimals
+                .states
+                .iter()
+                .find(|(owner, name, _)| owner == &page.name && name == &state.name)
+                .map_or(0, |(_, _, places)| *places);
+        }
+    }
+    Ok(())
+}
+
+fn check_calls(
+    expr: &SpecExpr,
+    rule: &str,
+    places: u32,
+    places_of: &dyn Fn(&str) -> Option<u32>,
+) -> Result<(), String> {
+    match expr {
+        SpecExpr::Call(callee, args) => {
+            if let Some(other) = places_of(callee)
+                && other != places
+            {
+                return Err(format!(
+                    "{rule}: uses {callee}, which has {other} decimal places, but {rule} has {places}; give both the same `with N decimals`"
+                ));
+            }
+            for arg in args {
+                check_calls(arg, rule, places, places_of)?;
+            }
+        }
+        SpecExpr::Binary(_, left, right) => {
+            check_calls(left, rule, places, places_of)?;
+            check_calls(right, rule, places, places_of)?;
+        }
+        SpecExpr::If(condition, then, otherwise) => {
+            check_calls(condition, rule, places, places_of)?;
+            check_calls(then, rule, places, places_of)?;
+            check_calls(otherwise, rule, places, places_of)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn rescale(expr: SpecExpr, scale: u32) -> SpecExpr {
+    let boxed = |expr: SpecExpr| Box::new(rescale(expr, scale));
+    match expr {
+        SpecExpr::Binary(BinaryOp::MulWrap, left, right) => SpecExpr::Binary(
+            BinaryOp::Div,
+            Box::new(SpecExpr::Binary(
+                BinaryOp::MulWrap,
+                boxed(*left),
+                boxed(*right),
+            )),
+            Box::new(SpecExpr::Number(scale)),
+        ),
+        SpecExpr::Binary(BinaryOp::Div, left, right) => SpecExpr::Binary(
+            BinaryOp::Div,
+            Box::new(SpecExpr::Binary(
+                BinaryOp::MulWrap,
+                boxed(*left),
+                Box::new(SpecExpr::Number(scale)),
+            )),
+            boxed(*right),
+        ),
+        SpecExpr::Binary(op, left, right) => SpecExpr::Binary(op, boxed(*left), boxed(*right)),
+        SpecExpr::If(condition, then, otherwise) => {
+            SpecExpr::If(boxed(*condition), boxed(*then), boxed(*otherwise))
+        }
+        SpecExpr::Call(callee, args) => SpecExpr::Call(
+            callee,
+            args.into_iter().map(|arg| rescale(arg, scale)).collect(),
+        ),
+        other => other,
+    }
+}
+
+/// Proves that `+`, `-`, `*`, and `/` stay in range: `0..=u32::MAX`, or the
+/// i32 range for `can be negative` rules. Facts come from `need` lines and,
+/// inside a rule, from that rule's condition (and the failed conditions of the
+/// rules above it).
 ///
 /// `known` holds the answer ranges of rules checked earlier in the file, so
 /// `double(x) + 1` can use what `double` returns. The answer range of this
 /// rule is returned for the rules after it.
 pub fn check_ranges(
     contract: &Contract,
-    known: &[(String, u64, u64)],
-) -> Result<(u64, u64), String> {
+    known: &[(String, i64, i64)],
+) -> Result<(i64, i64), String> {
+    let limits = if contract.return_type == Type::I32 {
+        (i64::from(i32::MIN), i64::from(i32::MAX))
+    } else {
+        (0, i64::from(u32::MAX))
+    };
     let mut facts = Facts {
+        limits,
         calls: known.to_vec(),
         bounds: contract
             .params
             .iter()
-            .map(|param| (param.name.clone(), 0, u64::from(u32::MAX)))
+            .map(|param| (param.name.clone(), limits.0, limits.1))
             .collect(),
     };
     for requirement in &contract.requires {
         facts.learn(requirement, true);
     }
-    let mut answer = (0, u64::from(u32::MAX));
+    let mut answer = limits;
     for ensures in &contract.ensures {
         if let SpecExpr::Binary(BinaryOp::Eq, left, right) = ensures
             && matches!(left.as_ref(), SpecExpr::Ident(name) if name == "result")
@@ -383,8 +623,9 @@ pub fn check_ranges(
 /// What is known about the inputs: value bounds and answers of earlier rules.
 #[derive(Clone)]
 struct Facts {
-    calls: Vec<(String, u64, u64)>,
-    bounds: Vec<(String, u64, u64)>,
+    limits: (i64, i64),
+    calls: Vec<(String, i64, i64)>,
+    bounds: Vec<(String, i64, i64)>,
 }
 
 impl Facts {
@@ -408,21 +649,21 @@ impl Facts {
             negate(op.clone())
         };
         match (left.as_ref(), right.as_ref()) {
-            (SpecExpr::Ident(name), SpecExpr::Number(n)) => self.bound(name, op, u64::from(*n)),
+            (SpecExpr::Ident(name), SpecExpr::Number(n)) => self.bound(name, op, i64::from(*n)),
             (SpecExpr::Number(n), SpecExpr::Ident(name)) => {
-                self.bound(name, flip(op), u64::from(*n))
+                self.bound(name, flip(op), i64::from(*n))
             }
             _ => {}
         }
     }
 
-    fn bound(&mut self, name: &str, op: BinaryOp, number: u64) {
+    fn bound(&mut self, name: &str, op: BinaryOp, number: i64) {
         let Some(entry) = self.bounds.iter_mut().find(|(param, _, _)| param == name) else {
             return;
         };
         match op {
             BinaryOp::Le => entry.2 = entry.2.min(number),
-            BinaryOp::Lt => entry.2 = entry.2.min(number.saturating_sub(1)),
+            BinaryOp::Lt => entry.2 = entry.2.min(number - 1),
             BinaryOp::Ge => entry.1 = entry.1.max(number),
             BinaryOp::Gt => entry.1 = entry.1.max(number + 1),
             BinaryOp::Eq => {
@@ -439,6 +680,19 @@ struct Block {
     rules: Vec<Rule>,
     /// `name = value` lines, already translated, in order.
     names: Vec<(String, String)>,
+    /// `can be negative` rules use signed numbers.
+    signed: bool,
+    /// `with N decimals` rules scale every number by 10^N.
+    decimals: u32,
+    /// List inputs (`prices[3]`) and their sizes.
+    lists: Vec<(String, usize)>,
+}
+
+/// What an expression may use: signed arithmetic and list names.
+struct Ctx<'a> {
+    signed: bool,
+    decimals: u32,
+    lists: &'a [(String, usize)],
 }
 
 struct Rule {
@@ -493,26 +747,125 @@ fn strip_comment(line: &str) -> &str {
     line
 }
 
-fn header(line: &str, line_no: usize) -> Result<String, String> {
+struct Header {
+    name: String,
+    text: String,
+    signed: bool,
+    decimals: u32,
+    lists: Vec<(String, usize)>,
+}
+
+/// Parses `name(a, b)`, `name(prices[3])`, `name(a, b) can be negative`, and
+/// `name(a, b) with 2 decimals`.
+fn header(line: &str, line_no: usize) -> Result<Header, String> {
+    let (line, decimals) = strip_decimals(line, line_no)?;
+    let (line, signed) = match line.strip_suffix("can be negative") {
+        Some(rest) => (rest.trim_end(), true),
+        None => (line, false),
+    };
+    if signed && decimals > 0 {
+        return Err(format!(
+            "line {line_no}: a rule cannot both be negative and have decimals"
+        ));
+    }
     let (name, rest) = line
         .split_once('(')
         .ok_or_else(|| format!("line {line_no}: expected a name like `price(a, b)`"))?;
-    let params = rest
-        .trim()
-        .strip_suffix(')')
-        .ok_or_else(|| format!("line {line_no}: expected `)` at the end of the name line"))?;
+    let params = rest.trim().strip_suffix(')').ok_or_else(|| {
+        format!("line {line_no}: expected `)` at the end of the name line (or `) can be negative`)")
+    })?;
     let name = name.trim();
     check_name(name, line_no)?;
+    let ty = if signed { "i32" } else { "u32" };
     let mut typed = Vec::new();
+    let mut lists = Vec::new();
     for param in params.split(',').map(str::trim).filter(|p| !p.is_empty()) {
-        check_name(param, line_no)?;
-        typed.push(format!("{param}: u32"));
+        match list_param(param, line_no)? {
+            Some((list, size)) => {
+                for item in 1..=size {
+                    typed.push(format!("{list}_{item}: {ty}"));
+                }
+                lists.push((list.to_string(), size));
+            }
+            None => {
+                check_name(param, line_no)?;
+                typed.push(format!("{param}: {ty}"));
+            }
+        }
     }
-    Ok(format!(
-        "export contract {name}({}) -> u32 {{",
-        typed.join(", ")
-    ))
+    Ok(Header {
+        name: name.to_string(),
+        text: format!("export contract {name}({}) -> {ty} {{", typed.join(", ")),
+        signed,
+        decimals,
+        lists,
+    })
 }
+
+/// The most decimal places a number may have.
+const MAX_DECIMALS: u32 = 6;
+
+/// Strips a trailing `with 2 decimals` (or `with 1 decimal`).
+fn strip_decimals(line: &str, line_no: usize) -> Result<(&str, u32), String> {
+    let Some(rest) = line
+        .strip_suffix("decimals")
+        .or_else(|| line.strip_suffix("decimal"))
+    else {
+        return Ok((line, 0));
+    };
+    let Some((before, places)) = rest.trim_end().rsplit_once(" with ") else {
+        return Ok((line, 0));
+    };
+    let places = places
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|places| (1..=MAX_DECIMALS).contains(places))
+        .ok_or_else(|| {
+            format!("line {line_no}: write `with 2 decimals` with 1 to {MAX_DECIMALS} places")
+        })?;
+    Ok((before.trim_end(), places))
+}
+
+/// Reads `12.5` as a whole number times 10^decimals (`1250` for 2 places).
+fn scaled_number(text: &str, decimals: u32, line_no: usize) -> Result<String, String> {
+    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+    if fraction.len() > decimals as usize {
+        return Err(if decimals == 0 {
+            format!("line {line_no}: `{text}` has decimals; add `with 2 decimals` to the name line")
+        } else {
+            format!("line {line_no}: `{text}` has more than {decimals} decimal places")
+        });
+    }
+    if whole.is_empty() || (text.contains('.') && fraction.is_empty()) {
+        return Err(format!("line {line_no}: `{text}` is not a number"));
+    }
+    let digits = format!("{whole}{fraction:0<width$}", width = decimals as usize);
+    let value = digits
+        .parse::<u32>()
+        .map_err(|_| format!("line {line_no}: `{text}` is too large"))?;
+    Ok(value.to_string())
+}
+
+/// Reads `prices[3]` as a list of three values.
+fn list_param(text: &str, line_no: usize) -> Result<Option<(&str, usize)>, String> {
+    let Some((name, size)) = text.split_once('[') else {
+        return Ok(None);
+    };
+    let name = name.trim();
+    check_name(name, line_no)?;
+    let size = size
+        .strip_suffix(']')
+        .and_then(|size| size.trim().parse::<usize>().ok())
+        .filter(|size| (1..=MAX_LIST).contains(size))
+        .ok_or_else(|| {
+            format!("line {line_no}: write a list as `{name}[3]` with a size from 1 to {MAX_LIST}")
+        })?;
+    Ok(Some((name, size)))
+}
+
+/// The largest list size; each item becomes one input.
+const MAX_LIST: usize = 16;
 
 fn check_name(name: &str, line_no: usize) -> Result<(), String> {
     match Lexer::new(name).next_token() {
@@ -527,7 +880,7 @@ fn check_name(name: &str, line_no: usize) -> Result<(), String> {
 }
 
 /// Rewrites simple operators to contract operators.
-fn expression(text: &str, line_no: usize) -> Result<String, String> {
+fn expression(text: &str, line_no: usize, ctx: &Ctx) -> Result<String, String> {
     if text.is_empty() {
         return Err(format!("line {line_no}: missing value"));
     }
@@ -545,6 +898,13 @@ fn expression(text: &str, line_no: usize) -> Result<String, String> {
     if depth > 0 {
         return Err(format!("line {line_no}: a `(` is not closed; add `)`"));
     }
+    let text = rewrite_lists(text, ctx.lists, None, line_no)?.0;
+    if ctx.decimals > 0 && find_word_call(&text, "round").is_some() {
+        return Err(format!(
+            "line {line_no}: `round` works only in rules without decimals"
+        ));
+    }
+    let text = expand_round(&text, ctx.signed, line_no)?;
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::new();
     let mut index = 0;
@@ -556,7 +916,9 @@ fn expression(text: &str, line_no: usize) -> Result<String, String> {
                 out.push(c);
                 out.push('%');
             }
+            '-' if ctx.signed => out.push_str("-%"),
             '-' => out.push_str("-!"),
+            '/' if ctx.signed => return Err(no_signed(line_no, "/")),
             '!' if next == Some('=') => {
                 return Err(format!("line {line_no}: use `is not` to compare"));
             }
@@ -569,6 +931,16 @@ fn expression(text: &str, line_no: usize) -> Result<String, String> {
                 return Err(format!(
                     "line {line_no}: use `is` to compare (`=` only sets values on pages)"
                 ));
+            }
+            c if c.is_ascii_digit() => {
+                let start = index;
+                while index + 1 < chars.len()
+                    && (chars[index + 1].is_ascii_digit() || chars[index + 1] == '.')
+                {
+                    index += 1;
+                }
+                let number: String = chars[start..=index].iter().collect();
+                out.push_str(&scaled_number(&number, ctx.decimals, line_no)?);
             }
             '{' | '}' | ';' | '%' | '&' | '|' | '^' => {
                 return Err(format!("line {line_no}: `{c}` is not allowed here"));
@@ -583,6 +955,13 @@ fn expression(text: &str, line_no: usize) -> Result<String, String> {
                 let word: String = chars[start..=index].iter().collect();
                 match word.as_str() {
                     "and" => out.push_str("&&"),
+                    "mod" if ctx.signed => return Err(no_signed(line_no, "mod")),
+                    "mod" if ctx.decimals > 0 => {
+                        return Err(format!(
+                            "line {line_no}: `mod` works only in rules without decimals"
+                        ));
+                    }
+                    "mod" => out.push('%'),
                     "or" => out.push_str("||"),
                     "is" => {
                         let rest: String = chars[index + 1..].iter().collect();
@@ -611,6 +990,161 @@ fn expression(text: &str, line_no: usize) -> Result<String, String> {
         index += 1;
     }
     expand_min_max(&out, line_no)
+}
+
+fn no_signed(line_no: usize, op: &str) -> String {
+    format!("line {line_no}: `{op}` works only in rules that cannot be negative")
+}
+
+/// Rewrites list uses: `sum(p)`, `min(p)`, `max(p)`, `count(p)`, `p[2]`, and
+/// a bare `p` (all items as call arguments, or item `each` when given).
+/// Also reports whether a bare list name was seen.
+fn rewrite_lists(
+    text: &str,
+    lists: &[(String, usize)],
+    each: Option<usize>,
+    line_no: usize,
+) -> Result<(String, bool), String> {
+    if lists.is_empty() {
+        return Ok((text.to_string(), false));
+    }
+    let size_of = |name: &str| lists.iter().find(|(list, _)| list == name).map(|(_, n)| *n);
+    let items =
+        |name: &str, n: usize| -> Vec<String> { (1..=n).map(|i| format!("{name}_{i}")).collect() };
+    let mut out = String::new();
+    let mut bare = false;
+    let mut rest = text;
+    while let Some(start) = rest.find(|c: char| c.is_alphanumeric() || c == '_') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start..];
+        let end = after
+            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .unwrap_or(after.len());
+        let word = &after[..end];
+        let tail = &after[end..];
+        // `sum(prices)` and friends take a whole list.
+        if matches!(word, "sum" | "min" | "max" | "count")
+            && let Some(inner) = tail.trim_start().strip_prefix('(')
+            && let Some(close) = inner.find(')')
+            && let Some(n) = size_of(inner[..close].trim())
+        {
+            let list = inner[..close].trim();
+            let names = items(list, n);
+            let value = match word {
+                "sum" => format!("({})", names.join(" + ")),
+                "count" => n.to_string(),
+                _ => names
+                    .iter()
+                    .rev()
+                    .cloned()
+                    .reduce(|acc, name| format!("{word}({name}, {acc})"))
+                    .unwrap_or_default(),
+            };
+            out.push_str(&value);
+            rest = &inner[close + 1..];
+            continue;
+        }
+        let Some(n) = size_of(word) else {
+            out.push_str(word);
+            rest = tail;
+            continue;
+        };
+        if let Some(index) = tail.strip_prefix('[') {
+            let close = index
+                .find(']')
+                .ok_or_else(|| format!("line {line_no}: `[` needs a closing `]`"))?;
+            let item = index[..close]
+                .trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|item| (1..=n).contains(item))
+                .ok_or_else(|| {
+                    format!("line {line_no}: `{word}` has items 1 to {n}; write `{word}[1]`")
+                })?;
+            out.push_str(&format!("{word}_{item}"));
+            rest = &index[close + 1..];
+            continue;
+        }
+        bare = true;
+        match each {
+            Some(item) if item <= n => out.push_str(&format!("{word}_{item}")),
+            Some(_) => {
+                return Err(format!(
+                    "line {line_no}: lists in one `need` line must have the same size"
+                ));
+            }
+            None => out.push_str(&items(word, n).join(", ")),
+        }
+        rest = tail;
+    }
+    out.push_str(rest);
+    Ok((out, bare))
+}
+
+/// `need prices <= 100` holds for every item: one condition per item.
+fn each_item(condition: &str, lists: &[(String, usize)], line_no: usize) -> Result<String, String> {
+    let (_, bare) = rewrite_lists(condition, lists, Some(0), line_no).unwrap_or_default();
+    if !bare {
+        return Ok(condition.to_string());
+    }
+    let size = lists.iter().map(|(_, n)| *n).max().unwrap_or(1);
+    let mut parts = Vec::new();
+    for item in 1..=size {
+        let (part, _) = rewrite_lists(condition, lists, Some(item), line_no)?;
+        parts.push(format!("({part})"));
+    }
+    Ok(parts.join(" and "))
+}
+
+/// Rewrites `round(a / b)` into `(a + b / 2) / b` (rounds half up).
+fn expand_round(text: &str, signed: bool, line_no: usize) -> Result<String, String> {
+    let Some(start) = find_word_call(text, "round") else {
+        return Ok(text.to_string());
+    };
+    if signed {
+        return Err(no_signed(line_no, "round"));
+    }
+    let open = start + text[start..].find('(').unwrap_or_default();
+    let mut depth = 0;
+    let mut close = None;
+    let mut slash = None;
+    for (index, c) in text.char_indices().skip(open) {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(index);
+                    break;
+                }
+            }
+            '/' if depth == 1 => slash = Some(index),
+            _ => {}
+        }
+    }
+    let (Some(close), Some(slash)) = (close, slash) else {
+        return Err(format!(
+            "line {line_no}: round takes a division, like `round(price / 3)`"
+        ));
+    };
+    let top = expand_round(text[open + 1..slash].trim(), signed, line_no)?;
+    let bottom = expand_round(text[slash + 1..close].trim(), signed, line_no)?;
+    Ok(format!(
+        "{}((({top}) + ({bottom}) / 2) / ({bottom})){}",
+        &text[..start],
+        expand_round(&text[close + 1..], signed, line_no)?
+    ))
+}
+
+/// Finds `name(` where `name` starts a word.
+fn find_word_call(text: &str, name: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    (0..text.len()).find(|&index| {
+        text[index..].starts_with(name)
+            && (index == 0
+                || !(bytes[index - 1].is_ascii_alphanumeric() || bytes[index - 1] == b'_'))
+            && text[index + name.len()..].trim_start().starts_with('(')
+    })
 }
 
 /// Rewrites `min(a, b)` and `max(a, b)` into conditionals.
@@ -693,15 +1227,22 @@ fn flip(op: BinaryOp) -> BinaryOp {
     }
 }
 
-fn range(expr: &SpecExpr, facts: &Facts, name: &str) -> Result<(u64, u64), String> {
-    const MAX: u64 = u32::MAX as u64;
+fn range(expr: &SpecExpr, facts: &Facts, name: &str) -> Result<(i64, i64), String> {
+    let (min, max) = facts.limits;
+    let fits = |low: i64, high: i64, op: &str| {
+        if low < min || high > max {
+            Err(out_of_range(name, op, facts.limits))
+        } else {
+            Ok((low, high))
+        }
+    };
     Ok(match expr {
-        SpecExpr::Number(n) => (u64::from(*n), u64::from(*n)),
+        SpecExpr::Number(n) => (i64::from(*n), i64::from(*n)),
         SpecExpr::Ident(ident) => facts
             .bounds
             .iter()
             .find(|(param, _, _)| param == ident)
-            .map_or((0, MAX), |(_, low, high)| (*low, *high)),
+            .map_or((min, max), |(_, low, high)| (*low, *high)),
         SpecExpr::Call(callee, args) => {
             for arg in args {
                 range(arg, facts, name)?;
@@ -710,7 +1251,7 @@ fn range(expr: &SpecExpr, facts: &Facts, name: &str) -> Result<(u64, u64), Strin
                 .calls
                 .iter()
                 .find(|(rule, _, _)| rule == callee)
-                .map_or((0, MAX), |(_, low, high)| (*low, *high))
+                .map_or((min, max), |(_, low, high)| (*low, *high))
         }
         SpecExpr::If(condition, then, otherwise) => {
             range(condition, facts, name)?;
@@ -726,26 +1267,30 @@ fn range(expr: &SpecExpr, facts: &Facts, name: &str) -> Result<(u64, u64), Strin
             let (l_low, l_high) = range(left, facts, name)?;
             let (r_low, r_high) = range(right, facts, name)?;
             match op {
-                BinaryOp::AddWrap => {
-                    let high = l_high + r_high;
-                    if high > MAX {
-                        return Err(too_big(name, "+"));
-                    }
-                    (l_low + r_low, high)
-                }
+                BinaryOp::AddWrap => fits(l_low + r_low, l_high + r_high, "+")?,
+                BinaryOp::SubWrap => fits(l_low - r_high, l_high - r_low, "-")?,
                 BinaryOp::MulWrap => {
-                    let high = l_high.saturating_mul(r_high);
-                    if high > MAX {
-                        return Err(too_big(name, "*"));
+                    let corners = [
+                        i128::from(l_low) * i128::from(r_low),
+                        i128::from(l_low) * i128::from(r_high),
+                        i128::from(l_high) * i128::from(r_low),
+                        i128::from(l_high) * i128::from(r_high),
+                    ];
+                    let low = corners.iter().min().copied().unwrap_or_default();
+                    let high = corners.iter().max().copied().unwrap_or_default();
+                    if low < i128::from(min) || high > i128::from(max) {
+                        return Err(out_of_range(name, "*", facts.limits));
                     }
-                    (l_low * r_low, high)
+                    (low as i64, high as i64)
                 }
-                BinaryOp::Div if r_low == 0 => {
+                BinaryOp::Div | BinaryOp::Rem if r_low <= 0 => {
+                    let op = if *op == BinaryOp::Div { "/" } else { "mod" };
                     return Err(format!(
-                        "{name}: `/` may divide by 0; add a `need` line that keeps the right side at least 1"
+                        "{name}: `{op}` may divide by 0; add a `need` line that keeps the right side at least 1"
                     ));
                 }
                 BinaryOp::Div => (l_low / r_high, l_high / r_low),
+                BinaryOp::Rem => (0, l_high.min(r_high - 1)),
                 // `-` must not go below 0. When the bounds alone cannot show
                 // that, the verifier proves it (or reports an input that breaks it).
                 BinaryOp::SubChecked if l_low >= r_high => (l_low - r_high, l_high - r_low),
@@ -753,14 +1298,13 @@ fn range(expr: &SpecExpr, facts: &Facts, name: &str) -> Result<(u64, u64), Strin
                 _ => (0, 1),
             }
         }
-        _ => (0, MAX),
+        _ => (min, max),
     })
 }
 
-fn too_big(name: &str, op: &str) -> String {
+fn out_of_range(name: &str, op: &str, (min, max): (i64, i64)) -> String {
     format!(
-        "{name}: `{op}` may exceed {}; add `need name <= limit` lines for its inputs",
-        u32::MAX
+        "{name}: `{op}` may go outside {min} to {max}; add `need name <= limit` lines for its inputs"
     )
 }
 
@@ -769,6 +1313,47 @@ mod tests {
     use super::*;
 
     const FIT: &str = "# note\nfit_price(price, min, max)\n  need min <= max\n\n  price < min -> min\n  price > max -> max\n  -> price\n";
+
+    #[test]
+    fn new_features_reject_misuse() {
+        let err = |src: &str| crate::parse_module(src).unwrap_err();
+        assert!(err("f(a, b) can be negative\n  -> a / b\n").contains("cannot be negative"));
+        assert!(err("f(a, b) can be negative\n  -> a mod b\n").contains("cannot be negative"));
+        assert!(err("f(a, b) can be negative\n  -> a + b\n").contains("may go outside"));
+        assert!(err("f(a, b)\n  -> round(a + b)\n").contains("round takes a division"));
+        assert!(err("f(a, b)\n  -> a mod b\n").contains("divide by 0"));
+        assert!(err("f(p[3])\n  -> p[4]\n").contains("items 1 to 3"));
+        assert!(err("f(p[0])\n  -> 1\n").contains("size from 1"));
+        assert!(err("f(a) can be negative with 2 decimals\n  -> a\n").contains("both"));
+        assert!(err("f(a) with 1 decimal\n  -> a * 1.25\n").contains("more than 1"));
+        assert!(
+            err("g(a) with 2 decimals\n  -> a\n\nf(a)\n  -> g(a)\n").contains("decimal places")
+        );
+        assert!(err("page P\n  save a = 0\n  show a if a > 1\n").contains("only a text"));
+    }
+
+    #[test]
+    fn new_features_translate() {
+        let module =
+            crate::parse_module("f(p[2]) with 2 decimals\n  need p <= 10\n  -> sum(p) * 1.5\n")
+                .unwrap();
+        let contract = &module.contracts[0];
+        assert_eq!(contract.decimals, 2);
+        assert_eq!(contract.params.len(), 2);
+        assert_eq!(contract.requires.len(), 1);
+        let out = translate("f(a, b) can be negative\n  -> a - b\n").unwrap();
+        assert!(out.contains("-> i32") && out.contains("a -% b"), "{out}");
+        let out = translate("f(a, b)\n  need b >= 1\n  -> round(a / b) + a mod b\n").unwrap();
+        assert!(out.contains("(((a) +% (b) / 2) / (b)) +% a % b"), "{out}");
+        let out =
+            translate("page P\n  save p[2] = 0\n  ask p \"Price\"\n  show \"Big\" if p[1] > 9\n")
+                .unwrap();
+        assert!(
+            out.contains("input p_1 placeholder \"Price 1\";    input p_2"),
+            "{out}"
+        );
+        assert!(out.contains("when p_1 > 9 show \"Big\";"), "{out}");
+    }
 
     #[test]
     fn named_values_are_inlined() {
@@ -856,7 +1441,7 @@ mod tests {
         assert!(
             crate::parse_module("f(a, b)\n  -> a * b\n")
                 .unwrap_err()
-                .contains("may exceed")
+                .contains("may go outside")
         );
         crate::parse_module("f(a, b)\n  need a <= 10000\n  need b <= 100\n  -> a * b\n").unwrap();
         crate::parse_module("f(a, b)\n  need a >= 10\n  need b <= 10\n  -> a - b\n").unwrap();
@@ -889,7 +1474,7 @@ mod tests {
         assert!(
             crate::parse_module("g(x)\n  -> h(x) + 1\n")
                 .unwrap_err()
-                .contains("may exceed")
+                .contains("may go outside")
         );
     }
 

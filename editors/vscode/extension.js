@@ -107,6 +107,12 @@ function completionItems(document) {
     completion("button", vscode.CompletionItemKind.Keyword, 'button "Label" -> a = rule(...)'),
     completion("min", vscode.CompletionItemKind.Function, "min(a, b): the smaller value"),
     completion("max", vscode.CompletionItemKind.Function, "max(a, b): the larger value"),
+    completion("mod", vscode.CompletionItemKind.Keyword, "a mod b: what is left after dividing"),
+    completion("round", vscode.CompletionItemKind.Function, "round(a / b): divide and round half up"),
+    completion("sum", vscode.CompletionItemKind.Function, "sum(prices): add every item"),
+    completion("count", vscode.CompletionItemKind.Function, "count(prices): number of items"),
+    completion("can be negative", vscode.CompletionItemKind.Keyword, "values may go below 0"),
+    completion("with 2 decimals", vscode.CompletionItemKind.Keyword, "values have 2 decimal places"),
   ];
   for (const operator of ["->", "+", "-", "*", "<", "<=", ">", ">="]) {
     items.push(
@@ -243,7 +249,14 @@ const hoverDocs = new Map([
   ["show", "값이나 계산 결과를 화면에 보여줍니다."],
   ["button", "누르면 오른쪽 계산 결과를 값에 넣습니다."],
   ["min", "`min(a, b)`: 둘 중 작은 값입니다."],
-  ["max", "`max(a, b)`: 둘 중 큰 값입니다."],
+  ["max", "`max(a, b)`: 둘 중 큰 값입니다. `max(prices)`: 목록에서 가장 큰 값입니다."],
+  ["mod", "`a mod b`: a를 b로 나눈 나머지입니다."],
+  ["round", "`round(a / b)`: 나누고 반올림합니다."],
+  ["sum", "`sum(prices)`: 목록의 합입니다."],
+  ["count", "`count(prices)`: 목록의 개수입니다."],
+  ["negative", "`can be negative`: 이 규칙(값)은 0보다 작아질 수 있습니다."],
+  ["decimals", "`with 2 decimals`: 모든 값이 소수점 2자리까지입니다."],
+  ["decimal", "`with 1 decimal`: 모든 값이 소수점 1자리까지입니다."],
 ]);
 
 /// Explains a rule line in Korean, e.g. `price < min -> min`.

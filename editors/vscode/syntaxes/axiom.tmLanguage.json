@@ -16,11 +16,11 @@
     },
     {
       "name": "support.function.axiom",
-      "match": "\\b(min|max)(?=\\s*\\()"
+      "match": "\\b(min|max|round|sum|count)(?=\\s*\\()"
     },
     {
       "name": "keyword.control.axiom",
-      "match": "\\b(need|is|not|save|ask)\\b"
+      "match": "\\b(need|is|not|save|ask|mod|can|be|negative|decimals?)\\b"
     },
     {
       "name": "keyword.control.axiom",
@@ -32,7 +32,7 @@
     },
     {
       "name": "constant.numeric.axiom",
-      "match": "\\b\\d+\\b"
+      "match": "\\b\\d+(\\.\\d+)?\\b"
     },
     {
       "name": "keyword.operator.axiom",

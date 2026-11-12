@@ -41,6 +41,22 @@ fn oracle(name: &str, a: &[u32]) -> u32 {
             let left = a[0] - a[1];
             if left > 10 { left * 2 } else { left }
         }
+        "change" => (a[0] as i32 - a[1] as i32) as u32,
+        "leftover_share" => a[0] % a[1],
+        "fair_share" => (a[0] + a[1] / 2) / a[1],
+        "cart" => (a[0] + a[1] + a[2]).min(200_000),
+        "spread" => a.iter().max().unwrap() - a.iter().min().unwrap(),
+        "first" => a[0],
+        // `with N decimals`: values are stored times 10^N.
+        "vat" => a[0] * 10 / 100,
+        "per" => a[0] * 10 / a[1],
+        "over" => {
+            if a[0] > 999 {
+                100
+            } else {
+                0
+            }
+        }
         _ => panic!("no oracle for {name}"),
     }
 }
@@ -113,6 +129,50 @@ fn policy_calculator_rules_match_oracles() {
 fn fit_price_matches_oracle() {
     let path = "examples/rules/fit_price.ax";
     check_file(path, &source(path));
+}
+
+#[test]
+fn negatives_mod_round_and_lists_match_oracles() {
+    let text = "\
+change(now, before) can be negative
+  need now <= 1000000 and now >= 0
+  need before <= 1000000 and before >= 0
+  -> now - before
+
+leftover_share(total, people)
+  need people >= 1
+  -> total mod people
+
+fair_share(total, people)
+  need total <= 1000000
+  need people >= 1
+  -> round(total / people)
+
+cart(prices[3])
+  need prices <= 100000
+  sum(prices) > 200000 -> 200000
+  -> sum(prices)
+
+spread(prices[3])
+  -> max(prices) - min(prices)
+
+first(prices[3])
+  -> prices[1]
+
+vat(price) with 2 decimals
+  need price <= 100000
+  -> price * 0.1
+
+per(total, people) with 1 decimal
+  need total <= 100000
+  need people >= 1
+  -> total / people
+
+over(price) with 2 decimals
+  price > 9.99 -> 1
+  -> 0
+";
+    check_file("inline-new", text);
 }
 
 #[test]
