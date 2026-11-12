@@ -1,0 +1,7 @@
+# Keep the price between min and max.
+fit_price(price, min, max)
+  need min <= max
+
+  price < min -> min
+  price > max -> max
+  -> price

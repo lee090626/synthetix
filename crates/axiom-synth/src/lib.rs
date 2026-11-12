@@ -2058,7 +2058,7 @@ mod tests {
 
     #[test]
     fn synthesizes_mul8() {
-        let contract = parse(include_str!("../../../examples/basics/mul8.ax")).unwrap();
+        let contract = parse(include_str!("../../../tests/legacy/basics/mul8.ax")).unwrap();
         let candidate = synthesize(&contract).unwrap();
 
         assert_eq!(
@@ -2069,7 +2069,7 @@ mod tests {
 
     #[test]
     fn completes_mul8_pipeline() {
-        let contract = parse(include_str!("../../../examples/basics/mul8.ax")).unwrap();
+        let contract = parse(include_str!("../../../tests/legacy/basics/mul8.ax")).unwrap();
         let (candidate, module) = synthesize_wasm(&contract).unwrap();
 
         assert_eq!(
@@ -2241,7 +2241,7 @@ mod tests {
     #[test]
     fn reports_when_postconditions_are_contradictory() {
         let contract = parse(include_str!(
-            "../../../examples/errors/unsat_postcondition.ax"
+            "../../../tests/legacy/errors/unsat_postcondition.ax"
         ))
         .unwrap();
 
@@ -2252,7 +2252,7 @@ mod tests {
     #[test]
     fn rejects_unsatisfiable_preconditions_before_search() {
         let contract = parse(include_str!(
-            "../../../examples/errors/unsat_precondition.ax"
+            "../../../tests/legacy/errors/unsat_precondition.ax"
         ))
         .unwrap();
 
@@ -2262,7 +2262,7 @@ mod tests {
 
     #[test]
     fn exposes_timeout_and_resource_limit_as_search_states() {
-        let contract = parse(include_str!("../../../examples/basics/mul8.ax")).unwrap();
+        let contract = parse(include_str!("../../../tests/legacy/basics/mul8.ax")).unwrap();
 
         let timed_out = synthesize_result_with_options(
             &contract,
@@ -2507,7 +2507,7 @@ mod tests {
 
     #[test]
     fn search_result_and_candidate_order_are_deterministic() {
-        let contract = parse(include_str!("../../../examples/basics/mul8.ax")).unwrap();
+        let contract = parse(include_str!("../../../tests/legacy/basics/mul8.ax")).unwrap();
         let first_order = depth_one_candidates(contract.params.len(), 1000, Instant::now(), None);
         let second_order = depth_one_candidates(contract.params.len(), 1000, Instant::now(), None);
         assert_eq!(first_order, second_order);
@@ -2574,7 +2574,7 @@ mod tests {
 
     #[test]
     fn reports_a_zero_timeout_before_search() {
-        let contract = parse(include_str!("../../../examples/basics/mul8.ax")).unwrap();
+        let contract = parse(include_str!("../../../tests/legacy/basics/mul8.ax")).unwrap();
         let error = synthesize_with_options(
             &contract,
             SynthesisOptions {
@@ -2589,7 +2589,7 @@ mod tests {
 
     #[test]
     fn synthesizes_and_runs_conditional_contract() {
-        let contract = parse(include_str!("../../../examples/friendly/easy_min.ax")).unwrap();
+        let contract = parse(include_str!("../../../tests/legacy/friendly/easy_min.ax")).unwrap();
         let (candidate, module) = synthesize_wasm(&contract).unwrap();
 
         assert_eq!(candidate.eval(&[2, 5]), 2);
@@ -2600,7 +2600,7 @@ mod tests {
 
     #[test]
     fn synthesizes_signed_conditional_contract() {
-        let contract = parse(include_str!("../../../examples/basics/signed_min.ax")).unwrap();
+        let contract = parse(include_str!("../../../tests/legacy/basics/signed_min.ax")).unwrap();
         let (candidate, module) = synthesize_wasm(&contract).unwrap();
 
         assert_eq!(candidate.eval(&[u32::MAX, 1]), u32::MAX);
@@ -2617,7 +2617,7 @@ mod tests {
 
     #[test]
     fn lowers_let_contract_to_a_verified_candidate() {
-        let contract = parse(include_str!("../../../examples/friendly/easy_let.ax")).unwrap();
+        let contract = parse(include_str!("../../../tests/legacy/friendly/easy_let.ax")).unwrap();
         let candidate = synthesize(&contract).unwrap();
 
         assert_eq!(candidate.eval(&[21]), 42);
@@ -2690,7 +2690,7 @@ mod tests {
     #[test]
     fn synthesizes_property_and_constant_branches() {
         let contract = parse(include_str!(
-            "../../../examples/properties/property_at_least_ten.ax"
+            "../../../tests/legacy/properties/property_at_least_ten.ax"
         ))
         .unwrap();
         let (candidate, module) = synthesize_wasm(&contract).unwrap();
@@ -2706,7 +2706,7 @@ mod tests {
 
     #[test]
     fn synthesizes_bit_mask_and_wrapping_subtraction_properties() {
-        let mask = parse(include_str!("../../../examples/basics/bitwise.ax")).unwrap();
+        let mask = parse(include_str!("../../../tests/legacy/basics/bitwise.ax")).unwrap();
         let (mask_candidate, mask_module) = synthesize_wasm(&mask).unwrap();
         assert_eq!(mask_candidate.eval(&[0b1100, 0b1010]), 0b1000);
         assert_eq!(
@@ -2714,7 +2714,7 @@ mod tests {
             0
         );
 
-        let subtract = parse(include_str!("../../../examples/basics/subtract.ax")).unwrap();
+        let subtract = parse(include_str!("../../../tests/legacy/basics/subtract.ax")).unwrap();
         let (subtract_candidate, subtract_module) = synthesize_wasm(&subtract).unwrap();
         assert_eq!(subtract_candidate.eval(&[0]), u32::MAX);
         assert_eq!(
@@ -2726,7 +2726,7 @@ mod tests {
     #[test]
     fn validates_property_ranges_at_the_input_boundary() {
         let contract = parse(include_str!(
-            "../../../examples/properties/property_clamp.ax"
+            "../../../tests/legacy/properties/property_clamp.ax"
         ))
         .unwrap();
 
@@ -2738,15 +2738,15 @@ mod tests {
     fn keeps_max_min_and_clamp_regressions_in_sync_across_backends() {
         let cases = [
             (
-                include_str!("../../../examples/properties/property_max.ax"),
+                include_str!("../../../tests/legacy/properties/property_max.ax"),
                 vec![vec![0, 0], vec![0, 1], vec![u32::MAX, 1]],
             ),
             (
-                include_str!("../../../examples/friendly/easy_min.ax"),
+                include_str!("../../../tests/legacy/friendly/easy_min.ax"),
                 vec![vec![0, 0], vec![0, 1], vec![u32::MAX, 1]],
             ),
             (
-                include_str!("../../../examples/properties/property_clamp.ax"),
+                include_str!("../../../tests/legacy/properties/property_clamp.ax"),
                 vec![vec![0, 10, 20], vec![15, 10, 20], vec![30, 10, 20]],
             ),
         ];

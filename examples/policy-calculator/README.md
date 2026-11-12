@@ -1,6 +1,6 @@
 # Policy calculator (first-product vertical slice)
 
-`policy.ax` states only result conditions (no implementation) for the three tasks in
+`policy.ax` uses the simple syntax (see `docs/writing-specs.md`) for the three tasks in
 the first-product requirements: T1 base amount (`base_amount`), T3 four-item total
 (`items_total`), and the T2 cap policy (`capped`) or C1 floor/cap policy (`floor_cap`). `main.ax` wires them to a
 browser page: T1 or T3 fills `total`, and a policy button applies T2 or C1 to it.

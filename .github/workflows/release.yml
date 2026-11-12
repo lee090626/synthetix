@@ -75,6 +75,9 @@ jobs:
       - name: Smoke test native release CLI
         id: smoke_cli
         shell: bash
+        env:
+          # The smoke fixtures use the old syntax kept for internal tests.
+          AXIOM_LEGACY_SYNTAX: "1"
         run: |
           set -euo pipefail
           if [[ "$RUNNER_OS" == "Windows" ]]; then
@@ -84,11 +87,11 @@ jobs:
           fi
           evidence="$RUNNER_TEMP/native-cli-evidence"
 
-          "$cli" check examples/basics/mul8.ax > "$evidence/check.log" 2>&1
+          "$cli" check tests/legacy/basics/mul8.ax > "$evidence/check.log" 2>&1
           grep -F "contract_check: VALID" "$evidence/check.log"
           printf '\n- Check representative .ax: PASS\n' >> "$evidence/summary.md"
 
-          "$cli" build examples/basics/mul8.ax \
+          "$cli" build tests/legacy/basics/mul8.ax \
             -o "$evidence/mul8-build.wasm" \
             --report "$evidence/mul8-build.json" \
             > "$evidence/build.log" 2>&1
@@ -97,19 +100,19 @@ jobs:
             "$evidence/mul8-build.json"
           printf '%s\n' "- Build verified .ax and emitted WASM: PASS" >> "$evidence/summary.md"
 
-          mul8_output=$("$cli" run examples/basics/mul8.ax -- 5 -o "$evidence/mul8-run.wasm" 2>&1)
+          mul8_output=$("$cli" run tests/legacy/basics/mul8.ax -- 5 -o "$evidence/mul8-run.wasm" 2>&1)
           [[ "$mul8_output" == *"result: 40"* ]]
           test -s "$evidence/mul8-run.wasm"
           printf '%s\n' "- mul8(5) = 40: PASS" >> "$evidence/summary.md"
 
-          signed_output=$("$cli" run examples/basics/signed_min.ax -- -1 1 -o "$evidence/signed-min.wasm" 2>&1)
+          signed_output=$("$cli" run tests/legacy/basics/signed_min.ax -- -1 1 -o "$evidence/signed-min.wasm" 2>&1)
           [[ "$signed_output" == *"result: -1"* ]]
           test -s "$evidence/signed-min.wasm"
           printf '%s\n' "- signed_min(-1, 1) = -1: PASS" >> "$evidence/summary.md"
 
           for fixture_case in \
-            "UNSATISFIABLE_PRECONDITION:examples/errors/unsat_precondition.ax" \
-            "UNSATISFIABLE_POSTCONDITION:examples/errors/unsat_postcondition.ax"; do
+            "UNSATISFIABLE_PRECONDITION:tests/legacy/errors/unsat_precondition.ax" \
+            "UNSATISFIABLE_POSTCONDITION:tests/legacy/errors/unsat_postcondition.ax"; do
             expected="${fixture_case%%:*}"
             fixture="${fixture_case#*:}"
             name="$(basename "$fixture" .ax)"
@@ -144,7 +147,7 @@ jobs:
           done
 
           v6_root="$evidence/v6-release-project"
-          cp -R examples/v6-release "$v6_root"
+          cp -R tests/legacy/v6-release "$v6_root"
           (
             cd "$v6_root"
             "$cli" check > "$evidence/v6-check.log" 2>&1

@@ -464,7 +464,7 @@ mod tests {
     use super::*;
 
     fn mul8() -> Contract {
-        parse(include_str!("../../../examples/basics/mul8.ax")).unwrap()
+        parse(include_str!("../../../tests/legacy/basics/mul8.ax")).unwrap()
     }
 
     #[test]
@@ -594,7 +594,7 @@ mod tests {
 
     #[test]
     fn application_boundary_round_trips_signed_i32_values() {
-        let contract = parse(include_str!("../../../examples/basics/signed_min.ax")).unwrap();
+        let contract = parse(include_str!("../../../tests/legacy/basics/signed_min.ax")).unwrap();
         let verified = VerifiedComputation::synthesize(&contract).unwrap();
         let call = ApplicationCall::new(
             verified.clone(),
