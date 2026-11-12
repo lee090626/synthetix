@@ -3,12 +3,20 @@
 pub mod ast;
 pub mod lexer;
 pub mod parser;
+pub mod simple;
 
 pub use ast::*;
 pub use lexer::Lexer;
 pub use parser::Parser;
 
 pub fn parse(input: &str) -> Result<Contract, String> {
+    if simple::is_simple(input) {
+        let module = parse_module(input)?;
+        let [contract] = <[Contract; 1]>::try_from(module.contracts)
+            .map_err(|_| "expected exactly one rule in this file".to_string())?;
+        validate(&contract)?;
+        return Ok(contract);
+    }
     let lexer = Lexer::new(input);
     let mut parser = Parser::new(lexer)?;
     let contract = parser.parse_contract()?;
@@ -17,6 +25,15 @@ pub fn parse(input: &str) -> Result<Contract, String> {
 }
 
 pub fn parse_module(input: &str) -> Result<Module, String> {
+    if simple::is_simple(input) {
+        let translated = simple::translate(input)?;
+        let mut parser = Parser::new(Lexer::new(&translated))?;
+        let module = parser.parse_module()?;
+        for contract in &module.contracts {
+            simple::check_ranges(contract)?;
+        }
+        return Ok(module);
+    }
     let lexer = Lexer::new(input);
     let mut parser = Parser::new(lexer)?;
     parser.parse_module()
