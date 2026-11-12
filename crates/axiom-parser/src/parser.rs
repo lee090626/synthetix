@@ -248,6 +248,7 @@ impl<'a> Parser<'a> {
             ensures: Vec::new(),
             requires_spans: Vec::new(),
             ensures_spans: Vec::new(),
+            decimals: 0,
         })
     }
 
@@ -356,6 +357,7 @@ impl<'a> Parser<'a> {
             ensures,
             requires_spans,
             ensures_spans,
+            decimals: 0,
         })
     }
 
@@ -382,6 +384,7 @@ impl<'a> Parser<'a> {
                         name: state_name,
                         ty,
                         initial,
+                        decimals: 0,
                     });
                 }
                 Token::Persist => {
@@ -855,6 +858,7 @@ impl<'a> Parser<'a> {
                 Token::Shl => (BinaryOp::Shl, 17, 18),
                 Token::MulWrap => (BinaryOp::MulWrap, 19, 20),
                 Token::Slash => (BinaryOp::Div, 19, 20),
+                Token::Percent => (BinaryOp::Rem, 19, 20),
                 _ => break,
             };
 

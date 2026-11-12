@@ -16,6 +16,8 @@ pub enum Expr {
     Mul(Box<Expr>, Box<Expr>),
     /// Unsigned division rounding down; a zero divisor is an error
     Div(Box<Expr>, Box<Expr>),
+    /// Unsigned remainder; a zero divisor is an error
+    Rem(Box<Expr>, Box<Expr>),
     /// Left shift (masked by 31 in standard bit-vector / WASM semantics)
     Shl(Box<Expr>, Box<Expr>),
     /// Bitwise AND
@@ -74,6 +76,10 @@ impl Expr {
             Expr::Div(lhs, rhs) => lhs
                 .try_eval(args)?
                 .checked_div(rhs.try_eval(args)?)
+                .ok_or_else(|| "division by zero".to_string()),
+            Expr::Rem(lhs, rhs) => lhs
+                .try_eval(args)?
+                .checked_rem(rhs.try_eval(args)?)
                 .ok_or_else(|| "division by zero".to_string()),
             Expr::Shl(lhs, rhs) => {
                 let shift = rhs.try_eval(args)? & 31;

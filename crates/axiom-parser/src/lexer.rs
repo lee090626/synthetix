@@ -63,6 +63,7 @@ pub enum Token {
     OrOr,       // ||
     MulWrap,    // *%
     Slash,      // /
+    Percent,    // %
     AddWrap,    // +%
     SubWrap,    // -%
     SubChecked, // -!
@@ -177,6 +178,7 @@ impl<'a> Lexer<'a> {
             }
             ';' => Ok(Token::Semi),
             '/' => Ok(Token::Slash),
+            '%' => Ok(Token::Percent),
             '-' => {
                 if self.chars.peek() == Some(&'>') {
                     self.take_char();

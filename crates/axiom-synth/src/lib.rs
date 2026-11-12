@@ -989,6 +989,7 @@ fn candidate_type(expr: &Expr, contract: &Contract) -> Option<Type> {
         | Expr::Sub(lhs, rhs)
         | Expr::Mul(lhs, rhs)
         | Expr::Div(lhs, rhs)
+        | Expr::Rem(lhs, rhs)
         | Expr::Shl(lhs, rhs)
         | Expr::BitAnd(lhs, rhs)
         | Expr::BitOr(lhs, rhs)
@@ -1119,6 +1120,7 @@ fn estimated_candidate_bytes(expr: &Expr) -> usize {
         | Expr::Sub(lhs, rhs)
         | Expr::Mul(lhs, rhs)
         | Expr::Div(lhs, rhs)
+        | Expr::Rem(lhs, rhs)
         | Expr::Shl(lhs, rhs)
         | Expr::BitAnd(lhs, rhs)
         | Expr::BitOr(lhs, rhs)
@@ -1751,6 +1753,10 @@ fn eval_spec(
                     .checked_div(rhs)
                     .map(Value::U32)
                     .ok_or_else(|| "division by zero".to_string()),
+                (BinaryOp::Rem, Value::U32(lhs), Value::U32(rhs)) => lhs
+                    .checked_rem(rhs)
+                    .map(Value::U32)
+                    .ok_or_else(|| "division by zero".to_string()),
                 (BinaryOp::MulWrap, Value::I32(lhs), Value::I32(rhs)) => {
                     Ok(Value::I32(lhs.wrapping_mul(rhs)))
                 }
@@ -1979,6 +1985,7 @@ fn lower_spec_expr(
                 BinaryOp::SubChecked => Expr::Sub(lhs, rhs),
                 BinaryOp::MulWrap => Expr::Mul(lhs, rhs),
                 BinaryOp::Div => Expr::Div(lhs, rhs),
+                BinaryOp::Rem => Expr::Rem(lhs, rhs),
                 BinaryOp::Shl => Expr::Shl(lhs, rhs),
                 BinaryOp::BitAnd => Expr::BitAnd(lhs, rhs),
                 BinaryOp::BitOr => Expr::BitOr(lhs, rhs),

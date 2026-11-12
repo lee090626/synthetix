@@ -43,6 +43,9 @@ pub fn eval_ami(expr: &Expr, args: &[u32]) -> Result<u32, String> {
         Expr::Div(lhs, rhs) => eval_ami(lhs, args)?
             .checked_div(eval_ami(rhs, args)?)
             .ok_or_else(|| "division by zero".to_string()),
+        Expr::Rem(lhs, rhs) => eval_ami(lhs, args)?
+            .checked_rem(eval_ami(rhs, args)?)
+            .ok_or_else(|| "division by zero".to_string()),
         Expr::Shl(lhs, rhs) => Ok(eval_ami(lhs, args)?.wrapping_shl(eval_ami(rhs, args)? & 31)),
         Expr::BitAnd(lhs, rhs) => Ok(eval_ami(lhs, args)? & eval_ami(rhs, args)?),
         Expr::BitOr(lhs, rhs) => Ok(eval_ami(lhs, args)? | eval_ami(rhs, args)?),
@@ -318,6 +321,13 @@ fn eval_binary(op: &BinaryOp, lhs: Value, rhs: Value) -> Result<Value, String> {
         BinaryOp::Div => match (lhs, rhs) {
             (Value::U32(lhs), Value::U32(rhs)) => lhs
                 .checked_div(rhs)
+                .map(Value::U32)
+                .ok_or_else(|| "division by zero".to_string()),
+            _ => Err("division is only supported for u32".to_string()),
+        },
+        BinaryOp::Rem => match (lhs, rhs) {
+            (Value::U32(lhs), Value::U32(rhs)) => lhs
+                .checked_rem(rhs)
                 .map(Value::U32)
                 .ok_or_else(|| "division by zero".to_string()),
             _ => Err("division is only supported for u32".to_string()),

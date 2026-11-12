@@ -659,6 +659,9 @@ function binary(op, left, right) {
     case 'div':
       if (right === 0) throw new Error('division by zero');
       return Math.floor(left / right) >>> 0;
+    case 'rem':
+      if (right === 0) throw new Error('division by zero');
+      return (left % right) >>> 0;
     case 'shl': return (left << (right & 31)) >>> 0;
     case 'eq': return left === right;
     case 'ne': return left !== right;
@@ -672,8 +675,17 @@ function binary(op, left, right) {
   }
 }
 
-function display(value) {
+function decimalsOf(name) {
+  return __page.states.find((candidate) => candidate.name === name)?.decimals ?? 0;
+}
+
+// A value with decimals is stored times 10^places: 1250 with 2 places is 12.50.
+function display(value, decimals = 0) {
   if (value === undefined) return '';
+  if (decimals > 0 && typeof value === 'number') {
+    const digits = String(value).padStart(decimals + 1, '0');
+    return `${digits.slice(0, -decimals)}.${digits.slice(-decimals)}`;
+  }
   if (typeof value === 'boolean') return value ? 'true' : 'false';
   if (typeof value === 'object') return JSON.stringify(value);
   return String(value);
@@ -800,11 +812,19 @@ function callContract(name, args) {
   }
 }
 
-function parseInputValue(input, type) {
+function parseInputValue(input, type, decimals = 0) {
   if (type === 'text') return input.value;
   if (type === 'bool') return input.checked;
   if (type !== 'u32' && type !== 'i32') throw new TypeError(`input does not support ${type}`);
   if (input.value.trim() === '') throw new TypeError(`expected ${type} input`);
+  if (decimals > 0) {
+    const match = /^(\d+)(?:\.(\d+))?$/.exec(input.value.trim());
+    if (!match || (match[2] ?? '').length > decimals)
+      throw new TypeError(`expected a number with at most ${decimals} decimal places`);
+    const scaled = Number(match[1] + (match[2] ?? '').padEnd(decimals, '0'));
+    if (!Number.isSafeInteger(scaled) || scaled > 0xffffffff) throw new TypeError(`input is outside ${type}`);
+    return scaled;
+  }
   const value = Number(input.value);
   const minimum = type === 'i32' ? -0x80000000 : 0;
   const maximum = type === 'i32' ? 0x7fffffff : 0xffffffff;
@@ -962,7 +982,7 @@ function renderElement(element, root, scope) {
   if (element.kind === 'show') {
     const output = document.createElement('output');
     output.dataset.state = element.state;
-    output.textContent = display(getPath(scope, element.state));
+    output.textContent = display(getPath(scope, element.state), decimalsOf(element.state));
     root.append(output);
     return;
   }
@@ -990,13 +1010,13 @@ function renderElement(element, root, scope) {
     const state = __page.states.find((candidate) => candidate.name === element.state);
     const input = document.createElement('input');
     input.type = state?.type === 'bool' ? 'checkbox' : state?.type === 'u32' || state?.type === 'i32' ? 'number' : 'text';
-    input.step = input.type === 'number' ? '1' : undefined;
+    input.step = input.type === 'number' ? (state?.decimals ? String(10 ** -state.decimals) : '1') : undefined;
     if (input.type === 'checkbox') input.checked = getPath(__state, element.state) ?? false;
-    else input.value = getPath(__state, element.state) ?? '';
+    else input.value = display(getPath(__state, element.state), state?.decimals ?? 0);
     input.placeholder = element.placeholder;
     input.addEventListener('change', () => {
       try {
-        setPath(__state, element.state, parseInputValue(input, state?.type ?? 'unsupported'));
+        setPath(__state, element.state, parseInputValue(input, state?.type ?? 'unsupported', state?.decimals ?? 0));
         saveState();
         clearApplicationError();
       } catch (error) {
@@ -1291,8 +1311,13 @@ fn page_json(linked: &LinkedPage, root: &Path, storage_schema_version: u32) -> S
         .states
         .iter()
         .map(|state| {
+            let decimals = if state.decimals > 0 {
+                format!(",\"decimals\":{}", state.decimals)
+            } else {
+                String::new()
+            };
             format!(
-                "{{\"name\":{},\"type\":{},\"initial\":{},\"persisted\":{}}}",
+                "{{\"name\":{},\"type\":{},\"initial\":{},\"persisted\":{}{decimals}}}",
                 json_string(&state.name),
                 json_string(state_type_name(&state.ty)),
                 expr_json(&state.initial).unwrap_or_else(|error| {
@@ -1672,6 +1697,7 @@ fn binary_name(op: &BinaryOp) -> &'static str {
         BinaryOp::SubChecked => "sub_checked",
         BinaryOp::MulWrap => "mul",
         BinaryOp::Div => "div",
+        BinaryOp::Rem => "rem",
         BinaryOp::Shl => "shl",
         BinaryOp::BitAnd => "bit_and",
         BinaryOp::BitOr => "bit_or",
@@ -3073,16 +3099,19 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
                     name: "x".to_string(),
                     ty: Type::U32,
                     initial: SpecExpr::Number(0),
+                    decimals: 0,
                 },
                 State {
                     name: "y".to_string(),
                     ty: Type::U32,
                     initial: SpecExpr::Number(0),
+                    decimals: 0,
                 },
                 State {
                     name: "result".to_string(),
                     ty: Type::U32,
                     initial: SpecExpr::Number(0),
+                    decimals: 0,
                 },
             ],
             persisted: Vec::new(),

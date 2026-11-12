@@ -29,6 +29,7 @@ pub fn expr(e: &Expr) -> String {
         Expr::Sub(l, r) => bin("-", l, r),
         Expr::Mul(l, r) => format!("(Math.imul({}, {}) >>> 0)", expr(l), expr(r)),
         Expr::Div(l, r) => format!("(Math.floor({} / {}) >>> 0)", expr(l), expr(r)),
+        Expr::Rem(l, r) => format!("(({} % {}) >>> 0)", expr(l), expr(r)),
         Expr::Shl(l, r) => format!("(({} << ({} & 31)) >>> 0)", expr(l), expr(r)),
         Expr::BitAnd(l, r) => bin("&", l, r),
         Expr::BitOr(l, r) => bin("|", l, r),

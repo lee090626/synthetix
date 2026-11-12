@@ -36,9 +36,11 @@ base_amount(price, quantity)
   -> price * quantity
 ```
 
-- Operators: `+ - * / ( )`, `< <= > >=`, `is`, `is not`, `and`, `or`.
+- Operators: `+ - * / ( )`, `mod`, `< <= > >=`, `is`, `is not`, `and`, `or`.
 - `min(a, b)` and `max(a, b)` give the smaller and larger value: `-> max(lo, min(price, hi))`.
 - `/` divides and rounds down (`7 / 2` is 3). For a percent, write `price * rate / 100`.
+- `a mod b` is what is left after dividing (`7 mod 2` is 1).
+- `round(a / b)` divides and rounds half up (`round(7 / 2)` is 4).
 - `=` is never a comparison. It names a value in a rule (`left = total - used`) or sets values on pages. Write `x is 0` to compare.
 - A named value is used by its name in later lines:
 
@@ -50,13 +52,60 @@ base_amount(price, quantity)
     -> left
   ```
 - A rule can use another rule from the same file: `-> fit_price(base_amount(price, quantity), min, max)`.
-- Every value is a whole number from 0 to 4294967295.
+- Every value is a whole number from 0 to 4294967295, unless the name line
+  says otherwise (below).
 - A file may hold several rules, each starting with an unindented name line.
+
+### Negative numbers
+
+Add `can be negative` to the name line. Values then go from -2147483648 to
+2147483647, and `-` may go below 0:
+
+```
+change(now, before) can be negative
+  need now <= 1000000 and now >= 0
+  need before <= 1000000 and before >= 0
+  -> now - before
+```
+
+`/`, `mod`, and `round` work only in rules that cannot be negative. To write a
+negative number, subtract: `0 - 5`.
+
+### Lists
+
+`prices[3]` is a list of three values. Use `sum(prices)`, `min(prices)`,
+`max(prices)`, `count(prices)`, or one item, counted from 1: `prices[1]`.
+A `need` line about the list holds for every item:
+
+```
+cart(prices[3])
+  need prices <= 100000
+  sum(prices) > 200000 -> 200000
+  -> sum(prices)
+```
+
+A list has a fixed size from 1 to 16.
+
+### Decimals
+
+Add `with 2 decimals` (1 to 6 places) to the name line. Every value in the rule,
+inputs and answer, then has that many decimal places, and `*` and `/` round
+down to them:
+
+```
+vat(price) with 2 decimals
+  need price <= 100000
+  -> price * 0.1
+```
+
+`vat(12.50)` is `1.25`. A rule can only use rules with the same places, and
+`mod` and `round` work only in rules without decimals.
 
 ### Numbers must stay in range
 
-- `+` and `*` must not go above 4294967295: add `need name <= limit` lines
-  for their inputs.
+- `+` and `*` must not go above 4294967295 (or outside -2147483648 to
+  2147483647 in `can be negative` rules): add `need name <= limit` lines for
+  their inputs.
 - `/` must not divide by 0: add `need divisor >= 1`, unless the divisor is a
   number like `100`.
 - `-` must not go below 0. Synthetix proves this for every allowed input,
@@ -90,17 +139,28 @@ page Shop
 | `ask a "Label"` | An input box for `a` |
 | `show a` | Show the value of `a`; any calculation or rule works too (`show price * quantity`) |
 | `show "Text"` | Show fixed text |
+| `show "Text" if a > 100` | Show the text only while the condition holds |
+| `save prices[3] = 0` | A list of three values (`prices_1` to `prices_3`) |
+| `ask prices "Price"` | One input box per item: "Price 1", "Price 2", ... |
+| `save diff = 0 can be negative` | Values that may go below 0 |
+| `save price = 0 with 2 decimals` | Values typed and shown with 2 decimal places |
 | `button "Label" -> a = rule(...)` | On click, set `a` to the rule's answer |
+
+Pass a list to a rule by name: `button "Total" -> total = cart(prices)`.
+A value with decimals goes only into a rule with the same places, and is shown
+on its own (`show tax`). A whole number up to 2147483647 may go into a
+`can be negative` rule.
 
 ## When it fails
 
 | Message | What to do |
 | --- | --- |
 | `the last line must be -> value` | Add a final `-> value` line for when no rule matches |
-| `may exceed 4294967295` | Add `need name <= limit` lines for the inputs |
+| `may go outside 0 to 4294967295` | Add `need name <= limit` lines for the inputs |
 | `may divide by 0` | Add `need divisor >= 1` |
 | `is not defined for inputs [...]` | A `-` can go below 0 for those inputs; add a `need` line or a condition |
 | `is a reserved word` | Rename the input |
+| `has N decimal places but ...` | Give the rules and page values the same `with N decimals` |
 | `use is to compare` | Write `x is 1` / `x is not 1` instead of `=` / `!=` |
 | `call-site precondition ... is not established` | The values passed to another rule may break its `need` lines; add `need` lines or a condition |
 | `UNSATISFIABLE_PRECONDITION` | The `need` lines contradict each other |
