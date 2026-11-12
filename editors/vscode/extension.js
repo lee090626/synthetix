@@ -94,69 +94,19 @@ function activate(context) {
 
 function completionItems(document) {
   const items = [
-    completion("contract", vscode.CompletionItemKind.Keyword),
-    completion("program", vscode.CompletionItemKind.Keyword),
-    completion("fn", vscode.CompletionItemKind.Keyword),
-    completion("extern", vscode.CompletionItemKind.Keyword),
-    completion("return", vscode.CompletionItemKind.Keyword),
-    completion("import", vscode.CompletionItemKind.Keyword),
-    completion("export", vscode.CompletionItemKind.Keyword),
-    completion("from", vscode.CompletionItemKind.Keyword),
-    completion("requires", vscode.CompletionItemKind.Keyword),
-    completion("when", vscode.CompletionItemKind.Keyword),
-    completion("ensures", vscode.CompletionItemKind.Keyword),
-    completion("gives", vscode.CompletionItemKind.Keyword),
-    completion("if", vscode.CompletionItemKind.Keyword),
-    completion("else", vscode.CompletionItemKind.Keyword),
-    completion("let", vscode.CompletionItemKind.Keyword),
-    completion("in", vscode.CompletionItemKind.Keyword),
-    completion("page", vscode.CompletionItemKind.Keyword),
-    completion("record", vscode.CompletionItemKind.Keyword),
-    completion("component", vscode.CompletionItemKind.Keyword),
-    completion("use", vscode.CompletionItemKind.Keyword),
-    completion("state", vscode.CompletionItemKind.Keyword),
-    completion("show", vscode.CompletionItemKind.Keyword),
-    completion("button", vscode.CompletionItemKind.Keyword),
-    completion("updates", vscode.CompletionItemKind.Keyword),
-    completion("adds", vscode.CompletionItemKind.Keyword),
-    completion("runs", vscode.CompletionItemKind.Keyword),
-    completion("reducer", vscode.CompletionItemKind.Keyword),
-    completion("input", vscode.CompletionItemKind.Keyword),
-    completion("placeholder", vscode.CompletionItemKind.Keyword),
-    completion("persist", vscode.CompletionItemKind.Keyword),
-    completion("list", vscode.CompletionItemKind.Keyword),
-    completion("as", vscode.CompletionItemKind.Keyword),
-    completion("with", vscode.CompletionItemKind.Keyword),
-    completion("u32", vscode.CompletionItemKind.TypeParameter),
-    completion("i32", vscode.CompletionItemKind.TypeParameter),
-    completion("number", vscode.CompletionItemKind.TypeParameter),
-    completion("bool", vscode.CompletionItemKind.TypeParameter),
-    completion("text", vscode.CompletionItemKind.TypeParameter),
-    completion("result", vscode.CompletionItemKind.Variable, "u32 result"),
-    completion("answer", vscode.CompletionItemKind.Variable, "u32 result"),
-    completion("true", vscode.CompletionItemKind.Value),
-    completion("false", vscode.CompletionItemKind.Value),
+    completion("need", vscode.CompletionItemKind.Keyword, "need condition"),
+    completion("is", vscode.CompletionItemKind.Keyword, "x is 1"),
+    completion("not", vscode.CompletionItemKind.Keyword, "x is not 1"),
+    completion("and", vscode.CompletionItemKind.Keyword),
+    completion("or", vscode.CompletionItemKind.Keyword),
+    completion("from", vscode.CompletionItemKind.Keyword, "from file: rule"),
+    completion("page", vscode.CompletionItemKind.Keyword, "page Name"),
+    completion("save", vscode.CompletionItemKind.Keyword, "save a = 0"),
+    completion("ask", vscode.CompletionItemKind.Keyword, 'ask a "Label"'),
+    completion("show", vscode.CompletionItemKind.Keyword, "show a"),
+    completion("button", vscode.CompletionItemKind.Keyword, 'button "Label" -> a = rule(...)'),
   ];
-  for (const operator of [
-    "+%",
-    "*%",
-    "<<",
-    "==",
-    "!=",
-    "<",
-    "<=",
-    ">",
-    ">=",
-    "&&",
-    "||",
-    "plus",
-    "times",
-    "shift_left",
-    "equals",
-    "not_equals",
-    "and",
-    "or",
-  ]) {
+  for (const operator of ["->", "+", "-", "*", "<", "<=", ">", ">="]) {
     items.push(
       completion(
         operator,
@@ -168,7 +118,7 @@ function completionItems(document) {
 
   const parameterList = document
     .getText()
-    .match(/\b(?:contract|program)\s+\w+\s*\(([^)]*)\)/)?.[1];
+    .match(/^[A-Za-z_]\w*\s*\(([^)]*)\)\s*$/m)?.[1];
   for (const parameter of parameterList?.split(",") ?? []) {
     const name = parameter.trim().split(":")[0];
     if (name) {
@@ -279,32 +229,43 @@ function completion(label, kind, detail) {
 }
 
 const hoverDocs = new Map([
-  ["number", "32비트 부호 없는 정수입니다. WASM에서는 i32로 실행됩니다."],
-  ["u32", "number의 원래 타입 이름입니다. 모든 연산은 2^32에서 감쌉니다."],
-  ["i32", "32비트 부호 있는 정수입니다. 비교는 signed WASM 의미를 사용합니다."],
-  ["bool", "true 또는 false입니다. 검증 계약에서는 0 또는 1로 방출됩니다."],
-  ["text", "웹 입력과 화면 문구에 사용하는 문자열입니다."],
-  ["record", "여러 필드를 하나로 묶는 화면 데이터 타입입니다."],
-  ["list", "같은 타입의 값을 여러 개 담는 화면 데이터 타입입니다."],
-  ["reducer", "검증된 순수 계약 여러 개로 상태를 함께 갱신합니다."],
-  ["persist", "해당 상태를 브라우저 localStorage에 저장합니다."],
-  ["input", "text 상태와 연결되는 브라우저 입력창입니다."],
+  ["need", "이 조건을 지키는 입력만 받습니다."],
+  ["is", "같은지 비교합니다. `x is 1`은 x가 1이면 참입니다."],
+  ["not", "`is not`: 다른지 비교합니다."],
+  ["and", "두 조건이 모두 맞아야 합니다."],
+  ["or", "두 조건 중 하나만 맞으면 됩니다."],
+  ["from", "`from 파일: 규칙`: 다른 파일의 규칙을 가져옵니다."],
+  ["page", "화면을 시작합니다."],
+  ["save", "새로고침해도 남는 값입니다."],
+  ["ask", "값을 입력받는 칸입니다."],
+  ["show", "값이나 계산 결과를 화면에 보여줍니다."],
+  ["button", "누르면 오른쪽 계산 결과를 값에 넣습니다."],
 ]);
 
+/// Explains a rule line in Korean, e.g. `price < min -> min`.
+function explainLine(text) {
+  const line = text.replace(/#.*$/, "").trim();
+  if (!line) return undefined;
+  if (line.startsWith("need ")) return `입력 조건: ${line.slice(5)} 인 입력만 받습니다.`;
+  if (line.startsWith("->")) return `위 줄이 하나도 맞지 않으면 답은 ${line.slice(2).trim()} 입니다.`;
+  const arrow = line.indexOf("->");
+  if (arrow > 0 && !line.startsWith("button")) {
+    return `${line.slice(0, arrow).trim()} 이면 답은 ${line.slice(arrow + 2).trim()} 입니다. (위에서부터 처음 맞는 줄이 답)`;
+  }
+  return undefined;
+}
+
 function hoverFor(document, position) {
-  const range = document.getWordRangeAtPosition(position, /[A-Za-z_][A-Za-z0-9_]*/);
+  const range = document.getWordRangeAtPosition(position, /->|[A-Za-z_][A-Za-z0-9_]*/);
   if (!range) return undefined;
   const word = document.getText(range);
-  const source = document.getText();
-  let detail = hoverDocs.get(word);
-  const contract = source.match(
-    new RegExp(`\\b(?:contract|program)\\s+${escapeRegExp(word)}\\s*\\(([^)]*)\\)\\s*->\\s*([A-Za-z_][A-Za-z0-9_]*)`)
-  );
-  if (contract) detail = `검증된 순수 계약: (${contract[1] || "인자 없음"}) → ${contract[2]}`;
-  const state = source.match(
-    new RegExp(`\\bstate\\s+${escapeRegExp(word)}\\s*:\\s*([A-Za-z_][A-Za-z0-9_]*(?:<[^>]+>)?)`)
-  );
-  if (state) detail = `페이지 상태: ${state[1]}`;
+  const lineText = document.lineAt(position.line).text;
+  let detail = word === "->" ? explainLine(lineText) : hoverDocs.get(word);
+  const rule = document
+    .getText()
+    .match(new RegExp(`^${escapeRegExp(word)}\\s*\\(([^)]*)\\)\\s*$`, "m"));
+  if (rule) detail = `규칙: 입력 (${rule[1] || "없음"}) → 0 이상의 정수`;
+  if (!detail) detail = explainLine(lineText);
   if (!detail) return undefined;
   return new vscode.Hover(new vscode.MarkdownString(`**${word}**  \n${detail}`), range);
 }
@@ -313,26 +274,47 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/// Unindented headers, two-space bodies, and aligned `->` within each rule.
 function formatDocument(document) {
-  const edits = [];
-  let indent = 0;
+  const lines = [];
   for (let index = 0; index < document.lineCount; index += 1) {
-    const line = document.lineAt(index);
-    const trimmed = line.text.trim();
-    if (!trimmed) {
-      edits.push(vscode.TextEdit.replace(line.range, ""));
-      continue;
-    }
-    if (trimmed.startsWith("}")) indent = Math.max(0, indent - 1);
-    edits.push(
-      vscode.TextEdit.replace(
-        line.range,
-        `${"  ".repeat(indent)}${trimmed}`
-      )
-    );
-    if (trimmed.endsWith("{")) indent += 1;
+    lines.push(document.lineAt(index).text);
   }
-  return edits;
+  const formatted = formatSource(lines);
+  return formatted.map((text, index) =>
+    vscode.TextEdit.replace(document.lineAt(index).range, text)
+  );
+}
+
+function formatSource(lines) {
+  const out = lines.map((text) => {
+    const trimmed = text.trim();
+    if (!trimmed) return "";
+    return /^\s/.test(text) ? `  ${trimmed}` : trimmed;
+  });
+  const isRule = (line) =>
+    line.startsWith("  ") && !line.trim().startsWith("button") && line.includes("->");
+  const align = (indexes) => {
+    const parts = indexes.map((index) => {
+      const arrow = out[index].indexOf("->");
+      return [index, out[index].slice(0, arrow).trimEnd(), out[index].slice(arrow + 2).trim()];
+    });
+    const width = Math.max(...parts.map(([, left]) => left.length));
+    for (const [index, left, right] of parts) {
+      out[index] = `${left.trim() ? left.padEnd(width) : " ".repeat(width)} -> ${right}`;
+    }
+  };
+  let block = [];
+  for (let index = 0; index <= out.length; index += 1) {
+    const line = out[index];
+    if (line === undefined || (line && !line.startsWith("  "))) {
+      if (block.length) align(block);
+      block = [];
+    } else if (isRule(line)) {
+      block.push(index);
+    }
+  }
+  return out;
 }
 
 function validateDocument(document, diagnostics, output) {
@@ -628,4 +610,4 @@ function setDiagnostic(diagnostics, document, message) {
 
 function deactivate() {}
 
-module.exports = { activate, deactivate };
+module.exports = { activate, deactivate, formatSource, explainLine };

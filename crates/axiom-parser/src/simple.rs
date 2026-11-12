@@ -53,6 +53,19 @@ pub fn check_user_syntax(source: &str) -> Result<(), String> {
     )
 }
 
+/// Appends the source line an error points at (`line N: ...` or `N:C: ...`).
+pub fn show_source_line(error: String, source: &str) -> String {
+    let number = error
+        .strip_prefix("line ")
+        .and_then(|rest| rest.split(':').next())
+        .or_else(|| error.split(':').next())
+        .and_then(|text| text.trim().parse::<usize>().ok());
+    match number.and_then(|n| source.lines().nth(n.wrapping_sub(1)).map(|line| (n, line))) {
+        Some((n, line)) => format!("{error}\n  {n} | {}", line.trim_end()),
+        None => error,
+    }
+}
+
 enum Current {
     Rule(Block),
     Page { last_index: usize },
@@ -483,6 +496,20 @@ fn expression(text: &str, line_no: usize) -> Result<String, String> {
     if text.is_empty() {
         return Err(format!("line {line_no}: missing value"));
     }
+    let mut depth = 0i32;
+    for c in text.chars() {
+        depth += match c {
+            '(' => 1,
+            ')' => -1,
+            _ => 0,
+        };
+        if depth < 0 {
+            return Err(format!("line {line_no}: `)` has no matching `(`"));
+        }
+    }
+    if depth > 0 {
+        return Err(format!("line {line_no}: a `(` is not closed; add `)`"));
+    }
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::new();
     let mut index = 0;
@@ -807,5 +834,21 @@ mod tests {
     fn old_syntax_is_not_simple() {
         assert!(!is_simple("import { f } from \"./a.ax\";\npage P {\n}"));
         assert!(!is_simple("page P {\n  state x: number = 0;\n}"));
+    }
+
+    #[test]
+    fn errors_show_the_source_line() {
+        assert!(
+            translate("f(x)\n  -> (x\n")
+                .unwrap_err()
+                .contains("not closed")
+        );
+        assert!(
+            translate("f(x)\n  -> x)\n")
+                .unwrap_err()
+                .contains("no matching")
+        );
+        let error = crate::parse_module("f(x)\n  x = 1 -> 2\n  -> 0\n").unwrap_err();
+        assert!(error.ends_with("\n  2 |   x = 1 -> 2"), "{error}");
     }
 }
