@@ -24,7 +24,7 @@ rejected by scalar lowering.
 The `app-run` CLI command is the v5.0 executable vertical slice:
 
 ```sh
-cargo run -p axiom-cli -- app-run examples/basics/mul8.ax -- 5
+cargo run -p axiom-cli -- app-run tests/legacy/basics/mul8.ax -- 5
 ```
 
 It parses the contract, builds and proves the candidate, validates the

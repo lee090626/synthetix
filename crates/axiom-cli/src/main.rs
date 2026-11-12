@@ -521,6 +521,8 @@ fn synthesize(
 fn read_contract(input: &str) -> Result<axiom_parser::Contract, String> {
     let source =
         fs::read_to_string(input).map_err(|error| format!("cannot read {input}: {error}"))?;
+    axiom_parser::simple::check_user_syntax(&source)
+        .map_err(|error| format!("INVALID: {error}"))?;
     axiom_parser::parse(&source).map_err(|error| format!("INVALID: {error}"))
 }
 
@@ -1100,8 +1102,8 @@ mod tests {
             PathBuf::from("editors/out.wasm")
         );
         assert_eq!(
-            default_output_path("examples/basics/mul8.ax"),
-            PathBuf::from("examples/basics/mul8.wasm")
+            default_output_path("tests/legacy/basics/mul8.ax"),
+            PathBuf::from("tests/legacy/basics/mul8.wasm")
         );
     }
 

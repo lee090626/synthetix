@@ -451,6 +451,8 @@ fn visit_module(
     visiting.push(path.clone());
     let source = fs::read_to_string(&path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    axiom_parser::simple::check_user_syntax(&source)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
     let module = axiom_parser::parse_module(&source)
         .map_err(|error| format!("{}: {error}", path.display()))?;
     let source_contents = Arc::<[u8]>::from(source.as_bytes());
@@ -504,6 +506,8 @@ fn visit_module_retained(
         (cached.module.clone(), Arc::clone(&cached.source_contents))
     } else {
         stats.modules_parsed += 1;
+        axiom_parser::simple::check_user_syntax(&source)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
         let module = axiom_parser::parse_module(&source)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         (module, Arc::<[u8]>::from(source_bytes))

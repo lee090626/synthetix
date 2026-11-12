@@ -2,7 +2,7 @@ use std::{fs, path::Path, process::Command, time::SystemTime};
 
 fn mul8_fixture() -> String {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/basics/mul8.ax")
+        .join("../../tests/legacy/basics/mul8.ax")
         .display()
         .to_string()
 }
@@ -345,7 +345,7 @@ fn v6_release_path_runs_verified_array_loop_modular_wasm_and_static_application(
             .as_nanos()
     ));
     fs::create_dir_all(&root).unwrap();
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/v6-release");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/legacy/v6-release");
     let first = root.join("build-a");
     let second = root.join("build-b");
     for project in [&first, &second] {

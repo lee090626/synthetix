@@ -1,12 +1,10 @@
-# Writing specifications
+# Writing specs
 
-A Synthetix contract says *what* a result must satisfy, not *how* to compute
-it. Synthetix searches for an implementation, proves it with Z3 for every
-allowed input, and emits WASM. This guide shows how to write contracts that
-mean what you intend. Examples come from
-[`examples/policy-calculator`](../examples/policy-calculator).
+Synthetix files (`.ax`) hold two things: **rules** that compute numbers, and
+**pages** that use them. Synthetix proves every rule for every allowed input
+before it builds the app.
 
-## Simple syntax (recommended)
+## Rules
 
 ```
 # Keep the price between min and max.
@@ -27,105 +25,80 @@ fit_price(price, min, max)
 | Note | `# text` | Ignored by the computation |
 
 Rules are read top to bottom; the first one that matches gives the answer.
+A rule with only `-> value` always gives that value:
+
+```
+base_amount(price, quantity)
+  need price <= 10000
+  need quantity <= 100
+
+  -> price * quantity
+```
 
 - Operators: `+ - * ( )`, `< <= > >= = !=`, `and`, `or`.
 - Every value is a whole number from 0 to 4294967295.
-- `+` and `*` must not exceed that limit and `-` must not go below 0. Synthetix
-  checks this from `need name <= limit` lines and rejects the rule otherwise.
-  The `-` check uses only `need` bounds, not the rule's own condition.
-- A file may hold several rules, separated by unindented name lines. Pages
-  import them as before: `import { fit_price } from "./logic.ax";`.
+- A file may hold several rules, each starting with an unindented name line.
 
-The rest of this guide describes the full contract syntax, which also allows
-describing results by properties instead of formulas.
+### Numbers must stay in range
 
-## Shape of a contract
+`+` and `*` must not go above 4294967295, and `-` must not go below 0.
+Synthetix checks this before building and rejects the rule otherwise:
 
-```ax
-export contract capped(total: u32, cap: u32) -> u32 {
-    requires total <= 1000000;
-    requires cap <= 1000000;
-    ensures result <= total;
-    ensures result <= cap;
-    ensures result == total || result == cap;
-}
+- For `+` and `*`, add `need name <= limit` lines for the inputs.
+- For `a - b`, make sure `a` is at least `b`: a `need a >= b` line, number
+  bounds such as `need a >= 10` and `need b <= 10`, or the rule's own
+  condition (`a > b -> a - b`). On the default line, the failed conditions
+  above count too (`a > b -> ...` then `-> b - a` is fine).
+
+## Pages
+
+```
+from logic: fit_price
+
+page Shop
+  save price, min, max = 0
+  result = 0
+
+  ask price "Price"
+  ask min "Min"
+  ask max "Max"
+  show result
+  button "Fit" -> result = fit_price(price, min, max)
 ```
 
-- `requires` limits the inputs. Callers must respect it; the proof assumes it.
-- `ensures` describes `result`. Every clause must mention `result`, and all
-  clauses must hold together.
-- `export` makes the contract importable from pages
-  (`import { capped } from "./policy.ax";`).
-
-## Two ways to write `ensures`
-
-**Formula.** When you already know the calculation, state it directly:
-
-```ax
-ensures result == price *% quantity;
-```
-
-**Properties.** When you know the rule but not the formula, describe the
-result and let Synthetix find it. `capped` above never says `min`; it says the
-result is at most both inputs and is one of them.
-
-For rules with several cases, write one clause per case in the form
-"outside this case, or the result is X":
-
-```ax
-ensures total < floor || total > cap || result == total;
-ensures total >= floor || result == floor;
-ensures total <= cap || result == cap;
-```
-
-## Pin the result down completely
-
-Synthetix accepts any implementation that satisfies the clauses. If the
-clauses allow more than one answer, you may get an answer you did not intend,
-and it will still be reported as `VERIFIED`.
-
-```ax
-contract capped(total: u32, cap: u32) -> u32 {
-    ensures result <= cap;
-}
-```
-
-This verifies, but `axiom run ... -- 10 80` prints `result: 80`: returning
-`cap` always satisfies "at most cap". Adding `result <= total` alone would
-still allow `0`. Only `result == total || result == cap` fixes the answer.
-
-Check: for a few inputs, ask "is there any other value that satisfies every
-clause?" If yes, add a clause.
-
-## Arithmetic and ranges
-
-- Values are 32-bit. `+%`, `-%`, `*%` wrap around on overflow, so give inputs
-  `requires` bounds small enough that the real result fits (for example
-  `price <= 10000` and `quantity <= 100`).
-- `u32` (or `number`) compares unsigned; use `i32` for negative values.
-- See [semantics.md](semantics.md) for every operator.
+| Line | Meaning |
+| --- | --- |
+| `from logic: a, b` | Use rules `a` and `b` from `logic.ax` |
+| `page Name` | Start a page |
+| `save a, b = 0` | Values that start at 0 and are kept after reload |
+| `a, b = 0` | Values that start at 0 and reset on reload |
+| `ask a "Label"` | An input box for `a` |
+| `show a` | Show the value of `a` |
+| `button "Label" -> a = rule(...)` | On click, set `a` to the rule's answer |
 
 ## When it fails
 
-| Message | Meaning | What to do |
-| --- | --- | --- |
-| `UNSATISFIABLE_POSTCONDITION` | No result can satisfy all `ensures` (for example `result > x` and `result < x`). | Look for clauses that contradict each other or a `requires` that is too loose. |
-| `NOT_FOUND` | No implementation was found within the search budget. | Make the rule simpler or more direct, or raise `--max-candidates` / `--timeout-ms`. See [limitations.md](limitations.md). |
-| An `ensures` without `result` is rejected | The clause does not constrain the output. | Move input-only conditions to `requires`. |
+| Message | What to do |
+| --- | --- |
+| `the last line must be -> value` | Add a final `-> value` line for when no rule matches |
+| `may exceed 4294967295` | Add `need name <= limit` lines for the inputs |
+| `may go below 0` | Make the left side of `-` at least the right side (see above) |
+| `is a reserved word` | Rename the input |
+| `UNSATISFIABLE_PRECONDITION` | The `need` lines contradict each other |
+| `old syntax, which is no longer supported` | Rewrite the file in the forms above |
 
-On a failed build, earlier verified output is removed, so a broken
-specification never keeps serving an old result. Fix the contract and save;
-`axiom dev` rebuilds and reloads.
+On a failed build, earlier verified output is removed, so a broken rule never
+keeps serving an old result. Fix the file and save; `axiom dev` rebuilds and
+reloads.
 
 ## Workflow
 
 ```bash
 axiom new my-app
 cd my-app
-axiom check      # contracts are well-formed and satisfiable
+axiom check      # rules are valid and proven
 axiom dev        # live app; edits to .ax files rebuild it
 axiom build      # static output in dist/
 ```
 
-Use `axiom run file.ax -- <inputs>` to try a single contract on concrete
-inputs.
+Use `axiom run file.ax -- <inputs>` to try a single rule.
