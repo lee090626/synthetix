@@ -164,6 +164,144 @@ fn check_preconditions_inner(
     }
 }
 
+/// Finds rules in a `result == (if c1 { .. } else { if c2 { .. } else { .. } })`
+/// chain that no valid input can reach. Returns 1-based rule numbers; the
+/// final default is rule `n + 1`. Returns nothing when the chain uses calls or
+/// cannot be checked in isolation.
+pub fn unreachable_rules(contract: &Contract) -> Vec<usize> {
+    use axiom_parser::{BinaryOp, SpecExpr};
+    let Some(chain) = contract.ensures.iter().find_map(|clause| match clause {
+        SpecExpr::Binary(BinaryOp::Eq, left, right)
+            if matches!(left.as_ref(), SpecExpr::Ident(name) if name == "result") =>
+        {
+            Some(right.as_ref())
+        }
+        _ => None,
+    }) else {
+        return Vec::new();
+    };
+    let mut conditions = Vec::new();
+    let mut node = chain;
+    while let SpecExpr::If(condition, _, otherwise) = node {
+        conditions.push(condition.as_ref().clone());
+        node = otherwise;
+    }
+    if conditions.is_empty() {
+        return Vec::new();
+    }
+    let mut unreachable = Vec::new();
+    for rule in 0..=conditions.len() {
+        let mut probe = contract.clone();
+        probe.ensures.clear();
+        for earlier in &conditions[..rule] {
+            probe.requires.push(SpecExpr::Binary(
+                BinaryOp::Eq,
+                Box::new(earlier.clone()),
+                Box::new(SpecExpr::Bool(false)),
+            ));
+        }
+        if let Some(condition) = conditions.get(rule) {
+            probe.requires.push(condition.clone());
+        }
+        match check_preconditions(&probe) {
+            Ok(PreconditionResult::UnsatisfiablePrecondition) => unreachable.push(rule + 1),
+            Ok(_) => {}
+            Err(_) => return Vec::new(),
+        }
+    }
+    unreachable
+}
+
+/// One sample input per reachable rule of a `result == (if ..)` chain, with
+/// the answer, for people to compare against their intent. Inputs are drawn
+/// deterministically from small values and the numbers in the rule (and their
+/// neighbours), so boundaries show up. Returns `(rule, inputs, answer)`.
+pub fn rule_examples(contract: &Contract) -> Vec<(usize, Vec<u32>, u32)> {
+    use axiom_parser::{BinaryOp, SpecExpr};
+    let Some(chain) = contract.ensures.iter().find_map(|clause| match clause {
+        SpecExpr::Binary(BinaryOp::Eq, left, right)
+            if matches!(left.as_ref(), SpecExpr::Ident(name) if name == "result") =>
+        {
+            Some(right.as_ref())
+        }
+        _ => None,
+    }) else {
+        return Vec::new();
+    };
+    let mut rules = Vec::new();
+    let mut node = chain;
+    while let SpecExpr::If(condition, value, otherwise) = node {
+        rules.push((Some(condition.as_ref()), value.as_ref()));
+        node = otherwise;
+    }
+    rules.push((None, node));
+
+    let mut pool = vec![0u32, 1, 2, 3, 5, 10, 20, 50, 80, 100];
+    fn numbers(expr: &SpecExpr, out: &mut Vec<u32>) {
+        match expr {
+            SpecExpr::Number(n) => out.extend([n.saturating_sub(1), *n, n.saturating_add(1)]),
+            SpecExpr::Binary(_, l, r) => {
+                numbers(l, out);
+                numbers(r, out);
+            }
+            SpecExpr::If(c, t, e) => {
+                numbers(c, out);
+                numbers(t, out);
+                numbers(e, out);
+            }
+            _ => {}
+        }
+    }
+    for clause in contract.requires.iter().chain(&contract.ensures) {
+        numbers(clause, &mut pool);
+    }
+    pool.sort_unstable();
+    pool.dedup();
+
+    let truthy = |expr: &SpecExpr, args: &[u32]| {
+        reference::eval_spec(expr, contract, args, 0) == Ok(reference::Value::Bool(true))
+    };
+    let mut found: Vec<Option<(Vec<u32>, u32)>> = vec![None; rules.len()];
+    let mut seed: u64 = 0x9e37_79b9;
+    for _ in 0..20_000 {
+        if found.iter().all(Option::is_some) {
+            break;
+        }
+        let args: Vec<u32> = contract
+            .params
+            .iter()
+            .map(|_| {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                pool[((seed >> 33) as usize) % pool.len()]
+            })
+            .collect();
+        if !contract.requires.iter().all(|clause| truthy(clause, &args)) {
+            continue;
+        }
+        let Some(rule) = rules
+            .iter()
+            .position(|(condition, _)| condition.is_none_or(|c| truthy(c, &args)))
+        else {
+            continue;
+        };
+        if found[rule].is_some() {
+            continue;
+        }
+        if let Ok(reference::Value::U32(answer)) =
+            reference::eval_spec(rules[rule].1, contract, &args, 0)
+        {
+            found[rule] = Some((args, answer));
+        }
+    }
+    found
+        .into_iter()
+        .enumerate()
+        .filter_map(|(rule, example)| example.map(|(args, answer)| (rule + 1, args, answer)))
+        .collect()
+}
+
 /// Checks syntax/type validity and whether the contract has any model.
 pub fn check_contract(contract: &Contract) -> Result<ContractCheck, String> {
     check_contract_inner(contract, &mut None)
@@ -2669,5 +2807,39 @@ mod tests {
         assert!(candidate.try_eval(&[2, 3]).is_err());
         let module = axiom_wasm::emit(&candidate, 2).unwrap();
         assert!(axiom_wasm::run_with_args(&module, &[2, 3]).is_err());
+    }
+
+    #[test]
+    fn finds_rules_that_never_apply() {
+        let shadowed = parse("f(x)\n  x > 5 -> 1\n  x > 10 -> 2\n  -> 0\n").unwrap();
+        assert_eq!(unreachable_rules(&shadowed), vec![2]);
+        let covered = parse("g(x)\n  need x <= 3\n  x <= 3 -> 1\n  -> 0\n").unwrap();
+        assert_eq!(unreachable_rules(&covered), vec![2]);
+        let fine = parse("h(x, m)\n  x > m -> m\n  -> x\n").unwrap();
+        assert!(unreachable_rules(&fine).is_empty());
+    }
+
+    #[test]
+    fn gives_one_example_per_reachable_rule() {
+        let contract =
+            parse("fit(p, lo, hi)\n  need lo <= hi\n  p < lo -> lo\n  p > hi -> hi\n  -> p\n")
+                .unwrap();
+        let examples = rule_examples(&contract);
+        assert_eq!(
+            examples.iter().map(|e| e.0).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        for (rule, args, answer) in examples {
+            let (p, lo, hi) = (args[0], args[1], args[2]);
+            assert!(lo <= hi);
+            let expected = if p < lo {
+                lo
+            } else if p > hi {
+                hi
+            } else {
+                p
+            };
+            assert_eq!(answer, expected, "rule {rule} {args:?}");
+        }
     }
 }

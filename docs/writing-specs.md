@@ -96,6 +96,24 @@ On a failed build, earlier verified output is removed, so a broken rule never
 keeps serving an old result. Fix the file and save; `axiom dev` rebuilds and
 reloads.
 
+## Checking what a rule does
+
+`axiom check` prints one example per `->` line, counted from the top of the
+rule, so you can compare it with what you meant:
+
+```text
+example: fit_price(1, 20, 100) = 20   (`->` line 1)
+example: fit_price(50, 1, 5) = 5   (`->` line 2)
+example: fit_price(5, 0, 80) = 5   (`->` line 3)
+```
+
+It also warns when a `->` line can never apply because an earlier line or a
+`need` line always matches first:
+
+```text
+warning: f: `->` line 2 never applies; an earlier line or a `need` line always matches first
+```
+
 ## Workflow
 
 ```bash

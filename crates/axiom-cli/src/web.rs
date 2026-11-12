@@ -222,6 +222,9 @@ pub fn check(config_path: &Path) -> Result<(), String> {
     println!("files: {}", project.files.len());
     println!("contracts: {}", compiled.len());
     println!("pages: {}", project.pages.len());
+    for linked in &project.contracts {
+        crate::print_unreachable_rules(&linked.contract);
+    }
     println!("contract_check: VALID");
     println!("synthesis_result: FOUND");
     println!("proof_result: VERIFIED");
