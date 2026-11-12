@@ -36,6 +36,7 @@ base_amount(price, quantity)
 ```
 
 - Operators: `+ - * / ( )`, `< <= > >=`, `is`, `is not`, `and`, `or`.
+- `min(a, b)` and `max(a, b)` give the smaller and larger value: `-> max(lo, min(price, hi))`.
 - `/` divides and rounds down (`7 / 2` is 3). For a percent, write `price * rate / 100`.
 - `=` is never a comparison; it only sets values on pages. Write `x is 0`.
 - A rule can use another rule from the same file: `-> fit_price(base_amount(price, quantity), min, max)`.

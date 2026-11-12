@@ -35,6 +35,7 @@ fn oracle(name: &str, a: &[u32]) -> u32 {
         "gap" => a[0].abs_diff(a[1]),
         "discount" => a[0] - a[0] * a[1] / 100,
         "share" => a[0] / a[1],
+        "clamp_mm" => a[0].min(a[2]).max(a[1]),
         "is_check" => u32::from(a[0] == 3 && a[1] != 4),
         _ => panic!("no oracle for {name}"),
     }
@@ -125,6 +126,10 @@ discount(price, rate)
 share(total, people)
   need people >= 1
   -> total / people
+
+clamp_mm(t, lo, hi)
+  need lo <= hi
+  -> max(lo, min(t, hi))
 
 is_check(a, b)
   a is 3 and b is not 4 -> 1

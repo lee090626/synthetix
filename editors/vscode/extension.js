@@ -105,6 +105,8 @@ function completionItems(document) {
     completion("ask", vscode.CompletionItemKind.Keyword, 'ask a "Label"'),
     completion("show", vscode.CompletionItemKind.Keyword, "show a"),
     completion("button", vscode.CompletionItemKind.Keyword, 'button "Label" -> a = rule(...)'),
+    completion("min", vscode.CompletionItemKind.Function, "min(a, b): the smaller value"),
+    completion("max", vscode.CompletionItemKind.Function, "max(a, b): the larger value"),
   ];
   for (const operator of ["->", "+", "-", "*", "<", "<=", ">", ">="]) {
     items.push(
@@ -240,6 +242,8 @@ const hoverDocs = new Map([
   ["ask", "값을 입력받는 칸입니다."],
   ["show", "값이나 계산 결과를 화면에 보여줍니다."],
   ["button", "누르면 오른쪽 계산 결과를 값에 넣습니다."],
+  ["min", "`min(a, b)`: 둘 중 작은 값입니다."],
+  ["max", "`max(a, b)`: 둘 중 큰 값입니다."],
 ]);
 
 /// Explains a rule line in Korean, e.g. `price < min -> min`.

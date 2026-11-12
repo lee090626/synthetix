@@ -555,7 +555,65 @@ fn expression(text: &str, line_no: usize) -> Result<String, String> {
         }
         index += 1;
     }
+    expand_min_max(&out, line_no)
+}
+
+/// Rewrites `min(a, b)` and `max(a, b)` into conditionals.
+fn expand_min_max(text: &str, line_no: usize) -> Result<String, String> {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(position) = find_call(rest) {
+        let (before, call) = rest.split_at(position);
+        out.push_str(before);
+        let comparison = if call.starts_with("min") { "<=" } else { ">=" };
+        let open = call.find('(').unwrap_or_default();
+        let mut depth = 0;
+        let mut close = None;
+        let mut comma = None;
+        for (index, c) in call.char_indices().skip(open) {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(index);
+                        break;
+                    }
+                }
+                ',' if depth == 1 => {
+                    if comma.is_some() {
+                        return Err(format!("line {line_no}: min and max take two values"));
+                    }
+                    comma = Some(index);
+                }
+                _ => {}
+            }
+        }
+        let (Some(close), Some(comma)) = (close, comma) else {
+            return Err(format!(
+                "line {line_no}: min and max take two values, like `min(a, b)`"
+            ));
+        };
+        let first = expand_min_max(call[open + 1..comma].trim(), line_no)?;
+        let second = expand_min_max(call[comma + 1..close].trim(), line_no)?;
+        out.push_str(&format!(
+            "(if {first} {comparison} {second} {{ {first} }} else {{ {second} }})"
+        ));
+        rest = &call[close + 1..];
+    }
+    out.push_str(rest);
     Ok(out)
+}
+
+/// Finds `min(` or `max(` that starts a word.
+fn find_call(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    (0..text.len()).find(|&index| {
+        (text[index..].starts_with("min") || text[index..].starts_with("max"))
+            && (index == 0
+                || !(bytes[index - 1].is_ascii_alphanumeric() || bytes[index - 1] == b'_'))
+            && text[index + 3..].trim_start().starts_with('(')
+    })
 }
 
 fn negate(op: BinaryOp) -> BinaryOp {
@@ -738,6 +796,17 @@ mod tests {
                 .contains("divide by 0")
         );
         crate::parse_module("q(x, d)\n  need d >= 1\n  -> x / d\n").unwrap();
+        let out = translate("c(t, lo, hi)\n  -> max(lo, min(t, hi))\n").unwrap();
+        assert!(
+            out.contains("(if lo >= (if t <= hi { t } else { hi }) { lo } else { (if t <= hi { t } else { hi }) })"),
+            "{out}"
+        );
+        assert!(
+            translate("c(a)\n  -> min(a)\n")
+                .unwrap_err()
+                .contains("two values")
+        );
+        crate::parse_module("c(min, max)\n  -> min + max * 0\n").unwrap();
         crate::parse_module(
             "d(x)\n  need x <= 10\n  -> x + x\n\ng(x)\n  need x <= 5\n  -> d(x) + 1\n",
         )
