@@ -46,6 +46,14 @@ pub fn eval_ami(expr: &Expr, args: &[u32]) -> Result<u32, String> {
         Expr::Rem(lhs, rhs) => eval_ami(lhs, args)?
             .checked_rem(eval_ami(rhs, args)?)
             .ok_or_else(|| "division by zero".to_string()),
+        Expr::SDiv(lhs, rhs) => (eval_ami(lhs, args)? as i32)
+            .checked_div(eval_ami(rhs, args)? as i32)
+            .map(|value| value as u32)
+            .ok_or_else(|| "division by zero or overflow".to_string()),
+        Expr::SRem(lhs, rhs) => (eval_ami(lhs, args)? as i32)
+            .checked_rem(eval_ami(rhs, args)? as i32)
+            .map(|value| value as u32)
+            .ok_or_else(|| "division by zero or overflow".to_string()),
         Expr::Shl(lhs, rhs) => Ok(eval_ami(lhs, args)?.wrapping_shl(eval_ami(rhs, args)? & 31)),
         Expr::BitAnd(lhs, rhs) => Ok(eval_ami(lhs, args)? & eval_ami(rhs, args)?),
         Expr::BitOr(lhs, rhs) => Ok(eval_ami(lhs, args)? | eval_ami(rhs, args)?),
@@ -323,6 +331,18 @@ fn eval_binary(op: &BinaryOp, lhs: Value, rhs: Value) -> Result<Value, String> {
                 .checked_div(rhs)
                 .map(Value::U32)
                 .ok_or_else(|| "division by zero".to_string()),
+            (Value::I32(lhs), Value::I32(rhs)) => lhs
+                .checked_div(rhs)
+                .map(Value::I32)
+                .ok_or_else(|| "division by zero or overflow".to_string()),
+            (Value::I32(lhs), Value::U32(rhs)) => lhs
+                .checked_div(rhs as i32)
+                .map(Value::I32)
+                .ok_or_else(|| "division by zero or overflow".to_string()),
+            (Value::U32(lhs), Value::I32(rhs)) => (lhs as i32)
+                .checked_div(rhs)
+                .map(Value::I32)
+                .ok_or_else(|| "division by zero or overflow".to_string()),
             _ => Err("division is only supported for u32".to_string()),
         },
         BinaryOp::Rem => match (lhs, rhs) {
@@ -330,6 +350,18 @@ fn eval_binary(op: &BinaryOp, lhs: Value, rhs: Value) -> Result<Value, String> {
                 .checked_rem(rhs)
                 .map(Value::U32)
                 .ok_or_else(|| "division by zero".to_string()),
+            (Value::I32(lhs), Value::I32(rhs)) => lhs
+                .checked_rem(rhs)
+                .map(Value::I32)
+                .ok_or_else(|| "division by zero or overflow".to_string()),
+            (Value::I32(lhs), Value::U32(rhs)) => lhs
+                .checked_rem(rhs as i32)
+                .map(Value::I32)
+                .ok_or_else(|| "division by zero or overflow".to_string()),
+            (Value::U32(lhs), Value::I32(rhs)) => (lhs as i32)
+                .checked_rem(rhs)
+                .map(Value::I32)
+                .ok_or_else(|| "division by zero or overflow".to_string()),
             _ => Err("division is only supported for u32".to_string()),
         },
         BinaryOp::Shl => numeric(lhs, rhs, |lhs, rhs| lhs.wrapping_shl(rhs & 31)),

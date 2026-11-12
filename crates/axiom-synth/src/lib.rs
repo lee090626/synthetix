@@ -990,6 +990,8 @@ fn candidate_type(expr: &Expr, contract: &Contract) -> Option<Type> {
         | Expr::Mul(lhs, rhs)
         | Expr::Div(lhs, rhs)
         | Expr::Rem(lhs, rhs)
+        | Expr::SDiv(lhs, rhs)
+        | Expr::SRem(lhs, rhs)
         | Expr::Shl(lhs, rhs)
         | Expr::BitAnd(lhs, rhs)
         | Expr::BitOr(lhs, rhs)
@@ -1121,6 +1123,8 @@ fn estimated_candidate_bytes(expr: &Expr) -> usize {
         | Expr::Mul(lhs, rhs)
         | Expr::Div(lhs, rhs)
         | Expr::Rem(lhs, rhs)
+        | Expr::SDiv(lhs, rhs)
+        | Expr::SRem(lhs, rhs)
         | Expr::Shl(lhs, rhs)
         | Expr::BitAnd(lhs, rhs)
         | Expr::BitOr(lhs, rhs)
@@ -1757,6 +1761,22 @@ fn eval_spec(
                     .checked_rem(rhs)
                     .map(Value::U32)
                     .ok_or_else(|| "division by zero".to_string()),
+                (BinaryOp::Div, lhs @ Value::I32(_), rhs)
+                | (BinaryOp::Div, lhs, rhs @ Value::I32(_))
+                    if let (Some(lhs), Some(rhs)) = (signed_bits(&lhs), signed_bits(&rhs)) =>
+                {
+                    lhs.checked_div(rhs)
+                        .map(Value::I32)
+                        .ok_or_else(|| "division by zero or overflow".to_string())
+                }
+                (BinaryOp::Rem, lhs @ Value::I32(_), rhs)
+                | (BinaryOp::Rem, lhs, rhs @ Value::I32(_))
+                    if let (Some(lhs), Some(rhs)) = (signed_bits(&lhs), signed_bits(&rhs)) =>
+                {
+                    lhs.checked_rem(rhs)
+                        .map(Value::I32)
+                        .ok_or_else(|| "division by zero or overflow".to_string())
+                }
                 (BinaryOp::MulWrap, Value::I32(lhs), Value::I32(rhs)) => {
                     Ok(Value::I32(lhs.wrapping_mul(rhs)))
                 }
@@ -1975,7 +1995,12 @@ fn lower_spec_expr(
         SpecExpr::Binary(op, lhs, rhs) => {
             let signed = matches!(
                 op,
-                BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+                BinaryOp::Lt
+                    | BinaryOp::Le
+                    | BinaryOp::Gt
+                    | BinaryOp::Ge
+                    | BinaryOp::Div
+                    | BinaryOp::Rem
             ) && (is_i32_expr(lhs, contract) || is_i32_expr(rhs, contract));
             let lhs = Box::new(lower_spec_expr(lhs, contract, locals)?);
             let rhs = Box::new(lower_spec_expr(rhs, contract, locals)?);
@@ -1984,6 +2009,8 @@ fn lower_spec_expr(
                 BinaryOp::SubWrap => Expr::Sub(lhs, rhs),
                 BinaryOp::SubChecked => Expr::Sub(lhs, rhs),
                 BinaryOp::MulWrap => Expr::Mul(lhs, rhs),
+                BinaryOp::Div if signed => Expr::SDiv(lhs, rhs),
+                BinaryOp::Rem if signed => Expr::SRem(lhs, rhs),
                 BinaryOp::Div => Expr::Div(lhs, rhs),
                 BinaryOp::Rem => Expr::Rem(lhs, rhs),
                 BinaryOp::Shl => Expr::Shl(lhs, rhs),
@@ -2055,6 +2082,15 @@ fn lower_array_spec_expr(
             Ok((updated, and_expr(array_defined, in_bounds)))
         }
         _ => Err("expected a fixed verified array expression".to_string()),
+    }
+}
+
+/// A number as i32 bits, for signed division where one side is i32.
+fn signed_bits(value: &Value) -> Option<i32> {
+    match value {
+        Value::I32(value) => Some(*value),
+        Value::U32(value) => Some(*value as i32),
+        _ => None,
     }
 }
 

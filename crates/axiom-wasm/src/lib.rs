@@ -12,6 +12,8 @@ pub fn instruction_cost(expr: &Expr) -> usize {
         | Expr::Mul(lhs, rhs)
         | Expr::Div(lhs, rhs)
         | Expr::Rem(lhs, rhs)
+        | Expr::SDiv(lhs, rhs)
+        | Expr::SRem(lhs, rhs)
         | Expr::Shl(lhs, rhs)
         | Expr::BitAnd(lhs, rhs)
         | Expr::BitOr(lhs, rhs)
@@ -174,6 +176,16 @@ fn encode_expr(expr: &Expr, param_count: u32, output: &mut Vec<u8>) -> Result<()
             encode_expr(lhs, param_count, output)?;
             encode_expr(rhs, param_count, output)?;
             output.push(0x70); // i32.rem_u
+        }
+        Expr::SDiv(lhs, rhs) => {
+            encode_expr(lhs, param_count, output)?;
+            encode_expr(rhs, param_count, output)?;
+            output.push(0x6d); // i32.div_s
+        }
+        Expr::SRem(lhs, rhs) => {
+            encode_expr(lhs, param_count, output)?;
+            encode_expr(rhs, param_count, output)?;
+            output.push(0x6f); // i32.rem_s
         }
         Expr::Shl(lhs, rhs) => {
             encode_expr(lhs, param_count, output)?;

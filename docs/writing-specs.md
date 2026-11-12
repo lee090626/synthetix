@@ -68,8 +68,10 @@ change(now, before) can be negative
   -> now - before
 ```
 
-`/`, `mod`, and `round` work only in rules that cannot be negative. To write a
-negative number, subtract: `0 - 5`.
+Write negative numbers with a minus sign: `-5`, `x < -100`, `-x`. In these
+rules `/` and `mod` round toward 0 (`-7 / 2` is -3, `-7 mod 2` is -1), and the
+divisor must stay above 0 or below 0. `round` works only in rules that cannot
+be negative.
 
 ### Lists
 
@@ -99,7 +101,22 @@ vat(price) with 2 decimals
 ```
 
 `vat(12.50)` is `1.25`. A rule can only use rules with the same places, and
-`mod` and `round` work only in rules without decimals.
+`mod` and `round` work only in rules without decimals. A rule can be both:
+`drift(price) can be negative with 2 decimals`; then `*` and `/` round toward 0.
+
+### Text answers
+
+Put each answer in quotes to answer with text:
+
+```
+grade(score)
+  score >= 90 -> "A"
+  score >= 80 -> "B"
+  -> "C"
+```
+
+Every `->` line then needs a text answer. A page shows it (below); other rules
+cannot use it.
 
 ### Numbers must stay in range
 
@@ -144,12 +161,17 @@ page Shop
 | `ask prices "Price"` | One input box per item: "Price 1", "Price 2", ... |
 | `save diff = 0 can be negative` | Values that may go below 0 |
 | `save price = 0 with 2 decimals` | Values typed and shown with 2 decimal places |
+| `save d = 0 can be negative with 2 decimals` | Both |
+| `save grade = ""` | A text value, for a rule with text answers |
 | `button "Label" -> a = rule(...)` | On click, set `a` to the rule's answer |
 
 Pass a list to a rule by name: `button "Total" -> total = cart(prices)`.
-A value with decimals goes only into a rule with the same places, and is shown
-on its own (`show tax`). A whole number up to 2147483647 may go into a
-`can be negative` rule.
+A value with decimals goes only into a rule with the same places. On a page,
+values with the same places can be calculated and compared
+(`show price + tax`, `show "Pricey" if price > 10.5`); values that can be
+negative are only shown or compared, and calculated in a rule. A whole number
+up to 2147483647 may go into a `can be negative` rule. A rule with text answers
+sets a text value: `button "Grade" -> grade = grade_of(score)`.
 
 ## When it fails
 

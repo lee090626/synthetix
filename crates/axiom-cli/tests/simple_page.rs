@@ -1,5 +1,5 @@
-//! Builds a simple-syntax app with a list, a `can be negative` rule, and a
-//! conditional `show`, then clicks through the generated page in node.
+//! Builds a simple-syntax app with lists, negative and decimal values, text
+//! answers, and conditional `show`, then clicks through the page in node.
 
 use std::{fs, process::Command};
 
@@ -16,10 +16,20 @@ cart(prices[3])
 vat(price) with 2 decimals
   need price <= 100000
   -> price * 0.1
+
+grade_of(score)
+  score >= 90 -> \"A\"
+  score >= 80 -> \"B\"
+  -> \"C\"
+
+drift(price) can be negative with 2 decimals
+  need price >= -1000 and price <= 1000
+  price < -10 -> -10
+  -> price * -1.5
 ";
 
 const MAIN: &str = "\
-from logic: change, cart, vat
+from logic: change, cart, vat, grade_of, drift
 
 page Shop
   save prices[3] = 0
@@ -38,6 +48,19 @@ page Shop
   ask price \"Price\"
   button \"Tax\" -> tax = vat(price)
   show tax
+  show price + tax
+  show \"Pricey\" if price > 10.5
+
+  save score = 0
+  save grade = \"\"
+  ask score \"Score\"
+  button \"Grade\" -> grade = grade_of(score)
+  show grade
+
+  save delta, moved = 0 can be negative with 2 decimals
+  ask delta \"Delta\"
+  button \"Drift\" -> moved = drift(delta)
+  show moved
 ";
 
 const RUNTIME: &str = r#"
@@ -100,10 +123,24 @@ function type(values) {
   price.value = '12.5';
   price.dispatch('change');
   press('Tax');
-  lines.push(`${window.synthetix.state.price},${outputs().at(-1)}`);
+  lines.push(`${window.synthetix.state.price},${outputs()[2]}`);
+  lines.push(`${outputs().slice(2).join(',')}|${texts().includes('Pricey')}`);
   price.value = '1.234';
   price.dispatch('change');
   lines.push(`${window.synthetix.state.price}`);
+  const score = inputs()[5];
+  score.value = '85';
+  score.dispatch('change');
+  press('Grade');
+  const delta = inputs()[6];
+  delta.value = '-2.5';
+  delta.dispatch('change');
+  press('Drift');
+  lines.push(`${window.synthetix.state.grade},${window.synthetix.state.delta},${outputs().slice(4).join(',')}`);
+  delta.value = '-20';
+  delta.dispatch('change');
+  press('Drift');
+  lines.push(outputs().at(-1));
   process.stdout.write(lines.join('\n'));
 })().catch((failure) => { console.error(failure); process.exitCode = 1; });
 "#;
@@ -149,7 +186,7 @@ fn list_negative_and_conditional_show_work_in_the_page() {
     );
     assert_eq!(
         String::from_utf8(run.stdout).unwrap(),
-        "Price 1,Price 2,Price 3,Last,Price\n6000,-3000,0.00|false\n250000,250000,0.00|true\n1250,1.25\n1250"
+        "Price 1,Price 2,Price 3,Last,Price,Score,Delta\n6000,-3000,0.00,0.00,,0.00|false\n250000,250000,0.00,0.00,,0.00|true\n1250,1.25\n1.25,13.75,,0.00|true\n1250\nB,-250,B,3.75\n-10.00"
     );
     fs::remove_dir_all(dir).ok();
 }

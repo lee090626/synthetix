@@ -255,6 +255,13 @@ pub fn rule_examples(contract: &Contract) -> Vec<(usize, Vec<u32>, u32)> {
     for clause in contract.requires.iter().chain(&contract.ensures) {
         numbers(clause, &mut pool);
     }
+    if contract.params.iter().any(|param| param.ty == Type::I32) {
+        let negatives: Vec<u32> = pool
+            .iter()
+            .map(|n| (*n as i32).wrapping_neg() as u32)
+            .collect();
+        pool.extend(negatives);
+    }
     pool.sort_unstable();
     pool.dedup();
 
@@ -289,10 +296,10 @@ pub fn rule_examples(contract: &Contract) -> Vec<(usize, Vec<u32>, u32)> {
         if found[rule].is_some() {
             continue;
         }
-        if let Ok(reference::Value::U32(answer)) =
-            reference::eval_spec(rules[rule].1, contract, &args, 0)
-        {
-            found[rule] = Some((args, answer));
+        match reference::eval_spec(rules[rule].1, contract, &args, 0) {
+            Ok(reference::Value::U32(answer)) => found[rule] = Some((args, answer)),
+            Ok(reference::Value::I32(answer)) => found[rule] = Some((args, answer as u32)),
+            _ => {}
         }
     }
     found
@@ -739,6 +746,23 @@ fn lower_implementation_value(
                             and_expr(lhs_defined, rhs_defined),
                             Expr::Ge(Box::new(lhs.clone()), Box::new(rhs.clone())),
                         ),
+                        BinaryOp::Div | BinaryOp::Rem if lhs_type == Type::I32 => and_expr(
+                            and_expr(lhs_defined, rhs_defined),
+                            and_expr(
+                                Expr::Ne(Box::new(rhs.clone()), Box::new(Expr::Const(0))),
+                                Expr::Select {
+                                    condition: Box::new(Expr::Eq(
+                                        Box::new(lhs.clone()),
+                                        Box::new(Expr::Const(0x8000_0000)),
+                                    )),
+                                    then_branch: Box::new(Expr::Ne(
+                                        Box::new(rhs.clone()),
+                                        Box::new(Expr::Const(0xffff_ffff)),
+                                    )),
+                                    else_branch: Box::new(Expr::Const(1)),
+                                },
+                            ),
+                        ),
                         BinaryOp::Div | BinaryOp::Rem => and_expr(
                             and_expr(lhs_defined, rhs_defined),
                             Expr::Ne(Box::new(rhs.clone()), Box::new(Expr::Const(0))),
@@ -750,8 +774,11 @@ fn lower_implementation_value(
                         BinaryOp::SubWrap => Expr::Sub(Box::new(lhs), Box::new(rhs)),
                         BinaryOp::SubChecked => Expr::Sub(Box::new(lhs), Box::new(rhs)),
                         BinaryOp::MulWrap => Expr::Mul(Box::new(lhs), Box::new(rhs)),
-                        BinaryOp::Div | BinaryOp::Rem if lhs_type == Type::I32 => {
-                            return Err("division is only supported for u32".to_string());
+                        BinaryOp::Div if lhs_type == Type::I32 => {
+                            Expr::SDiv(Box::new(lhs), Box::new(rhs))
+                        }
+                        BinaryOp::Rem if lhs_type == Type::I32 => {
+                            Expr::SRem(Box::new(lhs), Box::new(rhs))
                         }
                         BinaryOp::Div => Expr::Div(Box::new(lhs), Box::new(rhs)),
                         BinaryOp::Rem => Expr::Rem(Box::new(lhs), Box::new(rhs)),
@@ -1592,6 +1619,8 @@ fn expr_to_bv(expr: &Expr, args: &[BV]) -> Result<BV, String> {
         Expr::Mul(lhs, rhs) => Ok(&expr_to_bv(lhs, args)? * &expr_to_bv(rhs, args)?),
         Expr::Div(lhs, rhs) => Ok(expr_to_bv(lhs, args)?.bvudiv(&expr_to_bv(rhs, args)?)),
         Expr::Rem(lhs, rhs) => Ok(expr_to_bv(lhs, args)?.bvurem(&expr_to_bv(rhs, args)?)),
+        Expr::SDiv(lhs, rhs) => Ok(expr_to_bv(lhs, args)?.bvsdiv(&expr_to_bv(rhs, args)?)),
+        Expr::SRem(lhs, rhs) => Ok(expr_to_bv(lhs, args)?.bvsrem(&expr_to_bv(rhs, args)?)),
         Expr::Shl(lhs, rhs) => {
             let lhs = expr_to_bv(lhs, args)?;
             let rhs = expr_to_bv(rhs, args)?;
@@ -1782,15 +1811,24 @@ fn spec_definedness(
             ]))
         }
         SpecExpr::Binary(BinaryOp::Div | BinaryOp::Rem, lhs, rhs) => {
-            let divisor = match spec_to_value(rhs, contract, args, result, locals)? {
-                Value::U32(value) => value,
-                _ => return Err("division is only supported for u32".to_string()),
-            };
-            Ok(and(vec![
+            let dividend = spec_to_value(lhs, contract, args, result, locals)?;
+            let divisor = spec_to_value(rhs, contract, args, result, locals)?;
+            let mut facts = vec![
                 spec_definedness(lhs, contract, args, result, locals)?,
                 spec_definedness(rhs, contract, args, result, locals)?,
-                divisor.eq(BV::from_u64(0, 32)).not(),
-            ]))
+            ];
+            match (dividend, divisor) {
+                (Value::U32(_), Value::U32(divisor)) => {
+                    facts.push(divisor.eq(BV::from_u64(0, 32)).not());
+                }
+                (Value::I32(dividend), Value::I32(divisor) | Value::U32(divisor))
+                | (Value::U32(dividend), Value::I32(divisor)) => {
+                    facts.push(divisor.eq(BV::from_u64(0, 32)).not());
+                    facts.push(signed_overflow(&dividend, &divisor).not());
+                }
+                _ => return Err("division needs two u32 or two i32 values".to_string()),
+            }
+            Ok(and(facts))
         }
         SpecExpr::Binary(_, lhs, rhs) => Ok(and(vec![
             spec_definedness(lhs, contract, args, result, locals)?,
@@ -1814,10 +1852,28 @@ fn spec_definedness(
     }
 }
 
+/// `i32::MIN / -1` does not fit in i32 (and traps in WebAssembly).
+fn signed_overflow(dividend: &BV, divisor: &BV) -> Bool {
+    Bool::and(&[
+        &dividend.eq(BV::from_u64(0x8000_0000, 32)),
+        &divisor.eq(BV::from_u64(0xffff_ffff, 32)),
+    ])
+}
+
 fn ami_definedness(expr: &Expr, args: &[BV]) -> Result<Bool, String> {
     let and = |values: Vec<Bool>| Bool::and(&values.iter().collect::<Vec<_>>());
     match expr {
         Expr::Arg(_) | Expr::Const(_) => Ok(Bool::from_bool(true)),
+        Expr::SDiv(lhs, rhs) | Expr::SRem(lhs, rhs) => {
+            let dividend = expr_to_bv(lhs, args)?;
+            let divisor = expr_to_bv(rhs, args)?;
+            Ok(and(vec![
+                ami_definedness(lhs, args)?,
+                ami_definedness(rhs, args)?,
+                divisor.ne(BV::from_u64(0, 32)),
+                signed_overflow(&dividend, &divisor).not(),
+            ]))
+        }
         Expr::Div(lhs, rhs) | Expr::Rem(lhs, rhs) => Ok(and(vec![
             ami_definedness(lhs, args)?,
             ami_definedness(rhs, args)?,
@@ -2010,7 +2066,8 @@ fn spec_to_value(
                 (Value::Bool(then_branch), Value::Bool(else_branch)) => {
                     Ok(Value::Bool(condition.ite(&then_branch, &else_branch)))
                 }
-                (Value::I32(then_branch), Value::I32(else_branch)) => {
+                (Value::I32(then_branch), Value::I32(else_branch) | Value::U32(else_branch))
+                | (Value::U32(then_branch), Value::I32(else_branch)) => {
                     Ok(Value::I32(condition.ite(&then_branch, &else_branch)))
                 }
                 (Value::Array(then_branch), Value::Array(else_branch))
@@ -2058,6 +2115,14 @@ fn spec_to_value(
                 }
                 (BinaryOp::Rem, Value::U32(lhs), Value::U32(rhs)) => {
                     Ok(Value::U32(lhs.bvurem(&rhs)))
+                }
+                (BinaryOp::Div, Value::I32(lhs), Value::I32(rhs) | Value::U32(rhs))
+                | (BinaryOp::Div, Value::U32(lhs), Value::I32(rhs)) => {
+                    Ok(Value::I32(lhs.bvsdiv(&rhs)))
+                }
+                (BinaryOp::Rem, Value::I32(lhs), Value::I32(rhs) | Value::U32(rhs))
+                | (BinaryOp::Rem, Value::U32(lhs), Value::I32(rhs)) => {
+                    Ok(Value::I32(lhs.bvsrem(&rhs)))
                 }
                 (BinaryOp::SubChecked, Value::U32(lhs), Value::U32(rhs)) => {
                     Ok(Value::U32(&lhs - &rhs))
@@ -2265,6 +2330,7 @@ mod tests {
             requires_spans: Vec::new(),
             ensures_spans: Vec::new(),
             decimals: 0,
+            labels: Vec::new(),
         };
         assert!(matches!(
             check_contract(&invalid).unwrap(),

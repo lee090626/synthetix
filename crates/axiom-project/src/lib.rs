@@ -945,6 +945,16 @@ fn verification_order(
                 ));
             }
             if let Some(callee) = definitions.get(target)
+                && !callee.contract.labels.is_empty()
+            {
+                return Err(format!(
+                    "{}: {} uses {}, which answers with text that only a page can show",
+                    key.0.display(),
+                    key.1,
+                    dependency.call_name
+                ));
+            }
+            if let Some(callee) = definitions.get(target)
                 && callee.contract.decimals != definition.contract.decimals
             {
                 return Err(format!(
@@ -1538,14 +1548,39 @@ fn validate_decimals(
         }
         walk(expr, &of_state)
     };
+    let mixes_places = |expr: &SpecExpr| {
+        fn collect(expr: &SpecExpr, out: &mut Vec<String>) {
+            match expr {
+                SpecExpr::Ident(name) => out.push(name.clone()),
+                SpecExpr::Binary(_, left, right) => {
+                    collect(left, out);
+                    collect(right, out);
+                }
+                SpecExpr::If(condition, then, otherwise) => {
+                    collect(condition, out);
+                    collect(then, out);
+                    collect(otherwise, out);
+                }
+                _ => {}
+            }
+        }
+        let mut names = Vec::new();
+        collect(expr, &mut names);
+        let used: Vec<u32> = names
+            .iter()
+            .filter(|name| places.contains_key(name.as_str()))
+            .map(|name| of_state(name))
+            .collect();
+        used.windows(2).any(|pair| pair[0] != pair[1])
+    };
     for element in &page.elements {
         match element {
             PageElement::ShowExpr { value: expr }
             | PageElement::WhenShow {
                 condition: expr, ..
-            } if uses_decimals(expr) => {
+            } if mixes_places(expr) => {
                 return Err(format!(
-                    "{}: a value with decimals can only be shown on its own, like `show price`",
+                    "{}: values with different decimal places cannot be used together",
                     source.display()
                 ));
             }
@@ -1780,8 +1815,8 @@ fn page_numeric_type(
     match (lhs_type, rhs_type) {
         (Type::U32, Type::U32) => Some(Type::U32),
         (Type::I32, Type::I32) => Some(Type::I32),
-        (Type::I32, Type::U32) if matches!(rhs, SpecExpr::Number(_)) => Some(Type::I32),
-        (Type::U32, Type::I32) if matches!(lhs, SpecExpr::Number(_)) => Some(Type::I32),
+        (Type::I32, Type::U32) if axiom_parser::is_literal(rhs) => Some(Type::I32),
+        (Type::U32, Type::I32) if axiom_parser::is_literal(lhs) => Some(Type::I32),
         _ => None,
     }
 }
@@ -1879,7 +1914,13 @@ fn validate_call(
             args.len()
         ));
     }
-    if !types_compatible(&definition.contract.return_type, &state_type) {
+    // A rule with text answers returns a position the runtime turns into text.
+    let return_type = if definition.contract.labels.is_empty() {
+        definition.contract.return_type.clone()
+    } else {
+        Type::Text
+    };
+    if !types_compatible(&return_type, &state_type) {
         return Err(format!(
             "{}: target {} and contract {} have different types",
             source.display(),

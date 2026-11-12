@@ -57,6 +57,17 @@ fn oracle(name: &str, a: &[u32]) -> u32 {
                 0
             }
         }
+        // Signed rules: inputs and answers are i32 bits.
+        "floor_at" => (a[0] as i32).max(-100) as u32,
+        "split" => ((a[0] as i32) / (a[1] as i32)) as u32,
+        "left" => ((a[0] as i32) % (a[1] as i32)) as u32,
+        "drift" => ((a[0] as i32) * -150 / 100) as u32,
+        // Text answers: the position of the text.
+        "grade" => match a[0] {
+            90.. => 0,
+            80.. => 1,
+            _ => 2,
+        },
         _ => panic!("no oracle for {name}"),
     }
 }
@@ -75,11 +86,13 @@ impl Rng {
     /// Mostly small values and edges, so `need` bounds are usually met.
     fn value(&mut self) -> u32 {
         const EDGES: [u32; 8] = [0, 1, 2, 99, 100, 250_000, 1_000_000, u32::MAX];
-        match self.next() % 4 {
+        match self.next() % 5 {
             0 => EDGES[(self.next() % 8) as usize],
             1 => self.next() % 128,
             2 => self.next() % 1_000_001,
-            _ => self.next() % 10_001,
+            3 => self.next() % 10_001,
+            // Negative values (as i32 bits) for `can be negative` rules.
+            _ => ((self.next() % 200_001) as i32 - 100_000) as u32,
         }
     }
 }
@@ -173,6 +186,36 @@ over(price) with 2 decimals
   -> 0
 ";
     check_file("inline-new", text);
+}
+
+#[test]
+fn negative_division_text_and_signed_decimals_match_oracles() {
+    let text = "\
+floor_at(x) can be negative
+  need x >= -1000 and x <= 1000
+  x < -100 -> -100
+  -> x
+
+split(total, people) can be negative
+  need total >= -100000 and total <= 100000
+  need people >= 1 and people <= 100
+  -> total / people
+
+left(total, people) can be negative
+  need total >= -100000 and total <= 100000
+  need people >= 1 and people <= 100
+  -> total mod people
+
+drift(price) can be negative with 2 decimals
+  need price >= -1000 and price <= 1000
+  -> price * -1.5
+
+grade(score)
+  score >= 90 -> \"A\"
+  score >= 80 -> \"B\"
+  -> \"C\"
+";
+    check_file("inline-signed", text);
 }
 
 #[test]
