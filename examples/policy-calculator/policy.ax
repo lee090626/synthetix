@@ -1,30 +1,33 @@
-export contract base_amount(price: u32, quantity: u32) -> u32 {
-    requires price <= 10000;
-    requires quantity <= 100;
-    ensures result == price *% quantity;
-}
+# Price times quantity.
+base_amount(price, quantity)
+  need price <= 10000
+  need quantity <= 100
 
-export contract items_total(a: u32, b: u32, c: u32, d: u32) -> u32 {
-    requires a <= 250000;
-    requires b <= 250000;
-    requires c <= 250000;
-    requires d <= 250000;
-    ensures result == a +% b +% c +% d;
-}
+  -> price * quantity
 
-export contract capped(total: u32, cap: u32) -> u32 {
-    requires total <= 1000000;
-    requires cap <= 1000000;
-    ensures result <= total;
-    ensures result <= cap;
-    ensures result == total || result == cap;
-}
+# Sum of four items.
+items_total(a, b, c, d)
+  need a <= 250000
+  need b <= 250000
+  need c <= 250000
+  need d <= 250000
 
-export contract floor_cap(total: u32, floor: u32, cap: u32) -> u32 {
-    requires total <= 1000000;
-    requires floor <= cap;
-    requires cap <= 1000000;
-    ensures total < floor || total > cap || result == total;
-    ensures total >= floor || result == floor;
-    ensures total <= cap || result == cap;
-}
+  -> a + b + c + d
+
+# Never go above the cap.
+capped(total, cap)
+  need total <= 1000000
+  need cap <= 1000000
+
+  total > cap -> cap
+  -> total
+
+# Keep the total between floor and cap.
+floor_cap(total, floor, cap)
+  need total <= 1000000
+  need floor <= cap
+  need cap <= 1000000
+
+  total < floor -> floor
+  total > cap -> cap
+  -> total

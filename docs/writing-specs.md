@@ -6,6 +6,39 @@ allowed input, and emits WASM. This guide shows how to write contracts that
 mean what you intend. Examples come from
 [`examples/policy-calculator`](../examples/policy-calculator).
 
+## Simple syntax (recommended)
+
+```
+# Keep the price between min and max.
+fit_price(price, min, max)
+  need min <= max
+
+  price < min -> min
+  price > max -> max
+  -> price
+```
+
+| Part | Form | Meaning |
+| --- | --- | --- |
+| Name | `fit_price(price, min, max)` | Rule name and its inputs |
+| Need | `need condition` | Only inputs that meet this are accepted |
+| Rule | `condition -> value` | If the condition holds, this value is the answer |
+| Default | `-> value` | The answer when no rule above matches; must be last |
+| Note | `# text` | Ignored by the computation |
+
+Rules are read top to bottom; the first one that matches gives the answer.
+
+- Operators: `+ - * ( )`, `< <= > >= = !=`, `and`, `or`.
+- Every value is a whole number from 0 to 4294967295.
+- `+` and `*` must not exceed that limit and `-` must not go below 0. Synthetix
+  checks this from `need name <= limit` lines and rejects the rule otherwise.
+  The `-` check uses only `need` bounds, not the rule's own condition.
+- A file may hold several rules, separated by unindented name lines. Pages
+  import them as before: `import { fit_price } from "./logic.ax";`.
+
+The rest of this guide describes the full contract syntax, which also allows
+describing results by properties instead of formulas.
+
 ## Shape of a contract
 
 ```ax
