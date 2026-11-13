@@ -225,6 +225,63 @@ jobs:
           name: synthetix-vscode
           path: release/*.vsix
 
+  publish-npm:
+    name: Publish npm packages
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [test, build-cli]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-*
+          path: release-artifacts
+          merge-multiple: true
+      - name: Publish synthetix-cli and platform packages
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$NODE_AUTH_TOKEN" ]]; then
+            echo "::error::NPM_TOKEN secret is not set"
+            exit 1
+          fi
+          node scripts/npm-packages.cjs release-artifacts npm-out "${GITHUB_REF_NAME#v}"
+          # Platform packages first, so the launcher's optional dependencies resolve.
+          for dir in npm-out/synthetix-cli-*/ npm-out/synthetix-cli/; do
+            npm publish "$dir" --access public --provenance
+          done
+
+  publish-vsix:
+    name: Publish VSCode extension
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [test, package-vsix]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: synthetix-vscode
+          path: vsix
+      - name: Publish to the VSCode Marketplace
+        shell: bash
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$VSCE_PAT" ]]; then
+            echo "::error::VSCE_PAT secret is not set"
+            exit 1
+          fi
+          npx --yes @vscode/vsce publish --packagePath vsix/*.vsix
+
   create-release:
     name: Create GitHub Release
     if: startsWith(github.ref, 'refs/tags/')
