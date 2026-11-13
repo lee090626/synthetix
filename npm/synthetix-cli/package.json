@@ -1,0 +1,25 @@
+{
+  "name": "synthetix-cli",
+  "version": "0.0.0",
+  "description": "Synthetix CLI (axiom): verified logic to web apps.",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lee090626/synthetix.git"
+  },
+  "bin": {
+    "axiom": "bin/axiom.js"
+  },
+  "files": [
+    "bin/axiom.js"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "synthetix-cli-darwin-arm64": "0.0.0",
+    "synthetix-cli-darwin-x64": "0.0.0",
+    "synthetix-cli-linux-x64": "0.0.0",
+    "synthetix-cli-win32-x64": "0.0.0"
+  }
+}
