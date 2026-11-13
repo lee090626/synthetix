@@ -77,6 +77,50 @@ struct PageInfo {
     lists: Vec<(String, usize)>,
     /// Every value: name, whether it can be negative, decimal places.
     values: Vec<(String, bool, u32)>,
+    /// The open `when "Label" is clicked` block.
+    click: Option<Click>,
+}
+
+/// `when "Label" is clicked` and the `name = rule(...)` lines below it.
+struct Click {
+    label: String,
+    indent: usize,
+    index: usize,
+    line_no: usize,
+    /// Value name and translated rule call, in order.
+    sets: Vec<(String, String)>,
+}
+
+impl Click {
+    /// One value becomes a button; several become a reducer that sets them in
+    /// order, each seeing the values set before it, or none if one fails.
+    fn finish(self, out: &mut [String]) -> Result<(), String> {
+        let Click {
+            label,
+            index,
+            line_no,
+            sets,
+            ..
+        } = self;
+        out[index] = match sets.as_slice() {
+            [] => {
+                return Err(format!(
+                    "line {line_no}: add the values to set on the lines below, like `    total = cart(prices)`"
+                ));
+            }
+            [(target, value)] => format!("    button {label} updates {target} with {value};"),
+            _ => {
+                let updates: String = sets
+                    .iter()
+                    .map(|(target, value)| format!(" updates {target} with {value};"))
+                    .collect();
+                format!(
+                    "    reducer click_{line_no} {{{updates} }}    button {label} runs click_{line_no};"
+                )
+            }
+        };
+        Ok(())
+    }
 }
 
 /// Decimal places declared with `with N decimals`, which the contract syntax
@@ -93,7 +137,10 @@ impl Current {
     fn finish(self, out: &mut [String], decimals: &mut Decimals) -> Result<(), String> {
         match self {
             Current::Rule(block) => block.finish(out, decimals),
-            Current::Page { last_index, .. } => {
+            Current::Page { last_index, page } => {
+                if let Some(click) = page.click {
+                    click.finish(out)?;
+                }
                 out[last_index].push_str("\n}");
                 Ok(())
             }
@@ -137,6 +184,7 @@ pub fn translate_with_decimals(source: &str) -> Result<(String, Decimals), Strin
                         name: name.to_string(),
                         lists: Vec::new(),
                         values: Vec::new(),
+                        click: None,
                     },
                 });
             } else {
@@ -161,7 +209,25 @@ pub fn translate_with_decimals(source: &str) -> Result<(String, Decimals), Strin
         match current.as_mut() {
             Some(Current::Rule(block)) => rule_line(block, &mut out, index, trimmed)?,
             Some(Current::Page { last_index, page }) => {
-                out[index] = page_line(trimmed, line_no, page, &mut decimals.states)?;
+                let indent = text.len() - text.trim_start().len();
+                let in_click = page
+                    .click
+                    .as_ref()
+                    .is_some_and(|click| indent > click.indent);
+                if !in_click && let Some(click) = page.click.take() {
+                    click.finish(&mut out)?;
+                }
+                out[index] = page_line(
+                    trimmed,
+                    Spot {
+                        line_no,
+                        index,
+                        indent,
+                        in_click,
+                    },
+                    page,
+                    &mut decimals.states,
+                )?;
                 *last_index = index;
             }
             None => {
@@ -335,12 +401,22 @@ fn names_list(text: &str, line_no: usize) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
+/// Where a page line is: its line number, output index, indentation, and
+/// whether it is inside a `when ... is clicked` block.
+struct Spot {
+    line_no: usize,
+    index: usize,
+    indent: usize,
+    in_click: bool,
+}
+
 fn page_line(
     trimmed: &str,
-    line_no: usize,
+    spot: Spot,
     page: &mut PageInfo,
     decimals: &mut Vec<(String, String, u32)>,
 ) -> Result<String, String> {
+    let line_no = spot.line_no;
     let (word, rest) = trimmed.split_once(' ').unwrap_or((trimmed, ""));
     let rest = rest.trim();
     let values = page.values.clone();
@@ -383,10 +459,24 @@ fn page_line(
     };
     match word {
         "save" => states(rest, true, line_no, lists),
+        _ if spot.in_click => {
+            let (target, value) = trimmed.split_once('=').ok_or_else(|| {
+                format!("line {line_no}: expected `name = rule(...)` under `when ... is clicked`")
+            })?;
+            let target = target.trim();
+            check_name(target, line_no)?;
+            let value = expression(value.trim(), line_no)?;
+            if let Some(click) = page.click.as_mut() {
+                click.sets.push((target.to_string(), value));
+            }
+            Ok(String::new())
+        }
         "ask" => {
-            let (name, label) = rest
-                .split_once(' ')
-                .ok_or_else(|| format!("line {line_no}: expected `ask name \"label\"`"))?;
+            let (label, name) = rest
+                .rsplit_once(" for ")
+                .filter(|(label, _)| label.starts_with('"'))
+                .ok_or_else(|| format!("line {line_no}: write `ask \"Label\" for name`"))?;
+            let name = name.trim();
             check_name(name, line_no)?;
             let label = quoted(label.trim(), line_no)?;
             if let Some((_, size)) = lists.iter().find(|(list, _)| list == name) {
@@ -410,32 +500,27 @@ fn page_line(
             "line {line_no}: only a text in quotes can be shown with `if`, like `show \"Too high\" if total > 100`"
         )),
         "show" => Ok(format!("    show {};", expression(rest, line_no)?)),
-        "button" => {
-            let label_end = rest
-                .get(1..)
-                .and_then(|tail| tail.find('"'))
-                .filter(|_| rest.starts_with('"'))
-                .ok_or_else(|| {
-                    format!("line {line_no}: expected `button \"label\" -> name = value`")
-                })?;
-            let label = &rest[..label_end + 2];
-            let action = rest[label_end + 2..].trim();
-            let assignment = action
-                .strip_prefix("->")
-                .ok_or_else(|| format!("line {line_no}: expected `->` after the button label"))?;
-            let (target, value) = assignment
-                .split_once('=')
-                .ok_or_else(|| format!("line {line_no}: expected `name = value` after `->`"))?;
-            let target = target.trim();
-            check_name(target, line_no)?;
-            Ok(format!(
-                "    button {label} updates {target} with {};",
-                expression(value.trim(), line_no)?
-            ))
+        "button" => Err(format!(
+            "line {line_no}: write `when \"Label\" is clicked` and the values to set on the lines below"
+        )),
+        "when" => {
+            let label = rest
+                .strip_suffix("is clicked")
+                .map(str::trim)
+                .filter(|label| label.starts_with('"'))
+                .ok_or_else(|| format!("line {line_no}: write `when \"Label\" is clicked`"))?;
+            page.click = Some(Click {
+                label: quoted(label, line_no)?.to_string(),
+                indent: spot.indent,
+                index: spot.index,
+                line_no,
+                sets: Vec::new(),
+            });
+            Ok(String::new())
         }
         _ if trimmed.contains('=') => states(trimmed, false, line_no, lists),
         _ => Err(format!(
-            "line {line_no}: expected `save`, `ask`, `show`, `button`, or `name = 0`"
+            "line {line_no}: expected `save`, `ask`, `show`, `when`, or `name = 0`"
         )),
     }
 }
@@ -1715,9 +1800,10 @@ mod tests {
         assert!(out.contains("-> i32") && out.contains("a -% b"), "{out}");
         let out = translate("f(a, b)\n  need b >= 1\n  -> round(a / b) + a mod b\n").unwrap();
         assert!(out.contains("(((a) +% (b) / 2) / (b)) +% a % b"), "{out}");
-        let out =
-            translate("page P\n  save p[2] = 0\n  ask p \"Price\"\n  show \"Big\" if p[1] > 9\n")
-                .unwrap();
+        let out = translate(
+            "page P\n  save p[2] = 0\n  ask \"Price\" for p\n  show \"Big\" if p[1] > 9\n",
+        )
+        .unwrap();
         assert!(
             out.contains("input p_1 placeholder \"Price 1\";    input p_2"),
             "{out}"
@@ -1850,7 +1936,7 @@ mod tests {
 
     #[test]
     fn translates_pages_and_imports() {
-        let source = "from logic: increment\n\npage Counter\n  save count = 0\n  shown, other = 1 # note\n  ask count \"Count #\"\n  show count\n  button \"Add\" -> count = increment(count + 1)\n";
+        let source = "from logic: increment\n\npage Counter\n  save count = 0\n  shown, other = 1 # note\n  ask \"Count #\" for count\n  show count\n  when \"Add\" is clicked\n    count = increment(count + 1)\n";
         assert!(is_simple(source));
         let out = translate(source).unwrap();
         let lines: Vec<&str> = out.lines().collect();
@@ -1877,9 +1963,37 @@ mod tests {
             lines[7],
             "    button \"Add\" updates count with increment(count +% 1);"
         );
-        assert_eq!(lines[8], "}");
+        assert_eq!(lines[8], "");
+        assert_eq!(lines[9], "}");
         let module = crate::parse_module(source).unwrap();
         assert_eq!(module.pages[0].persisted, vec!["count".to_string()]);
+    }
+
+    #[test]
+    fn click_block_sets_several_values_in_order() {
+        let source = "page P\n  save a, b = 0\n  when \"Go\" is clicked\n    a = f(a)\n    b = g(a)\n  show b\n";
+        let out = translate(source).unwrap();
+        assert!(
+            out.contains("reducer click_3 { updates a with f(a); updates b with g(a); }    button \"Go\" runs click_3;"),
+            "{out}"
+        );
+        let module = crate::parse_module(source).unwrap();
+        assert_eq!(module.pages[0].reducers[0].updates.len(), 2);
+        assert!(
+            translate("page P\n  when \"Go\" is clicked\n  show 1\n")
+                .unwrap_err()
+                .contains("values to set")
+        );
+        assert!(
+            translate("page P\n  when Go is clicked\n")
+                .unwrap_err()
+                .contains("is clicked")
+        );
+        assert!(
+            translate("page P\n  ask x \"X\"\n")
+                .unwrap_err()
+                .contains("for name")
+        );
     }
 
     #[test]
@@ -1887,12 +2001,12 @@ mod tests {
         assert!(
             translate("page P\n  ask x\n")
                 .unwrap_err()
-                .contains("ask name")
+                .contains("for name")
         );
         assert!(
             translate("page P\n  button Add -> x = 1\n")
                 .unwrap_err()
-                .contains("button")
+                .contains("is clicked")
         );
         assert!(
             translate("page P\n  save x = y\n")

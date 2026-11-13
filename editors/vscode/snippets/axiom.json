@@ -29,20 +29,21 @@
       "  save ${4:a} = 0",
       "  result = 0",
       "",
-      "  ask ${4} \"${5:A}\"",
+      "  ask \"${5:A}\" for ${4}",
       "  show result",
-      "  button \"${6:Go}\" -> result = ${2}(${4})"
+      "  when \"${6:Go}\" is clicked",
+      "    result = ${2}(${4})"
     ],
     "description": "A page that uses a rule"
   },
-  "button": {
-    "prefix": "button",
-    "body": "button \"${1:Label}\" -> ${2:target} = ${3:rule}(${4})",
+  "when": {
+    "prefix": "when",
+    "body": ["when \"${1:Label}\" is clicked", "  ${2:target} = ${3:rule}(${4})"],
     "description": "On click, set a value to a rule's answer"
   },
   "ask": {
     "prefix": "ask",
-    "body": "ask ${1:name} \"${2:Label}\"",
+    "body": "ask \"${2:Label}\" for ${1:name}",
     "description": "An input box"
   }
 }

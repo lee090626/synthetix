@@ -139,11 +139,12 @@ page Shop
   save price, min, max = 0
   result = 0
 
-  ask price "Price"
-  ask min "Min"
-  ask max "Max"
+  ask "Price" for price
+  ask "Min" for min
+  ask "Max" for max
   show result
-  button "Fit" -> result = fit_price(price, min, max)
+  when "Fit" is clicked
+    result = fit_price(price, min, max)
 ```
 
 See [writing specs](docs/writing-specs.md) for the full syntax and
