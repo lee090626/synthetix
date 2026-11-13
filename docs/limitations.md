@@ -30,10 +30,9 @@ does not. The detailed rules are in [semantics.md](semantics.md) and
 - **Old syntax removed from user files.** Loops, recursion, records,
   growable lists, text, and property-only results (`ensures`) exist in the
   engine but have no simple syntax yet.
-- **Number forms do not mix.** `round` is not available in `can be negative`
-  rules, and `mod` and `round` not in decimal rules; decimal values only meet
-  rules and values with the same places; pages calculate only with values that
-  cannot be negative.
+- **Some number forms do not mix.** A button passes values only to a rule with
+  the same decimal places, and a rule uses a rule from another file only with
+  the same places; pages calculate only with values that cannot be negative.
 - **Text answers are for pages.** A rule with text answers cannot be used by
   another rule, and `contracts.js` returns the answer's position, not the text.
 - **No published packages.** Releases are GitHub Release assets only; there is

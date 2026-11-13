@@ -359,19 +359,14 @@ fn page_line(
             }
             Ok::<_, String>(line)
         };
-    // Values with decimals are stored times 10^places and values that can be
-    // negative are calculated in rules, so a page expression uses one kind.
+    // Values that can be negative are calculated in rules.
     let expression = |text: &str, line_no: usize| {
         let (rewritten, _) = rewrite_lists(text, &list_names, None, line_no)?;
         let used: Vec<&(String, bool, u32)> = words(&rewritten)
             .filter_map(|word| values.iter().find(|(name, _, _)| name == word))
             .collect();
-        let places = used.first().map_or(0, |(_, _, places)| *places);
-        if used.iter().any(|(_, _, other)| *other != places) {
-            return Err(format!(
-                "line {line_no}: values with different decimal places cannot be used together"
-            ));
-        }
+        // Values with fewer places are raised to the most places used.
+        let places = used.iter().map(|(_, _, places)| *places).max().unwrap_or(0);
         let arithmetic =
             words(&rewritten).any(|word| word == "mod") || rewritten.contains(['+', '-', '*', '/']);
         if arithmetic && used.iter().any(|(_, signed, _)| *signed) {
@@ -552,7 +547,8 @@ fn quoted(text: &str, line_no: usize) -> Result<&str, String> {
 
 /// Records decimal places on rules and page values, and rescales `*` and `/`
 /// in decimal rules: with 2 places, `a * b` is `a * b / 100` and `a / b` is
-/// `a * 100 / b`. Rules may only call rules with the same places.
+/// `a * 100 / b`. A call to a rule with other places converts the inputs to
+/// its places and the answer back (`/` rounds down when places are dropped).
 pub fn apply_decimals(module: &mut crate::ast::Module, decimals: &Decimals) -> Result<(), String> {
     let places_of = |name: &str| {
         decimals
@@ -581,21 +577,24 @@ pub fn apply_decimals(module: &mut crate::ast::Module, decimals: &Decimals) -> R
             .iter_mut()
             .chain(contract.ensures.iter_mut())
         {
-            check_calls(expr, &contract.name, contract.decimals, &|callee: &str| {
+            check_calls(expr, &|callee: &str| {
                 if labeled.iter().any(|name| name == callee) {
                     return Err(format!(
                         "{}: {callee} answers with text, which only a page can show",
                         contract.name
                     ));
                 }
-                Ok(local
-                    .iter()
-                    .any(|name| name == callee)
-                    .then(|| places_of(callee)))
+                Ok(())
             })?;
             if scale > 1 {
                 *expr = rescale(expr.clone(), scale);
             }
+            *expr = convert_calls(expr.clone(), contract.decimals, &|callee: &str| {
+                local
+                    .iter()
+                    .any(|name| name == callee)
+                    .then(|| places_of(callee))
+            });
         }
     }
     for page in &mut module.pages {
@@ -628,7 +627,7 @@ pub fn apply_decimals(module: &mut crate::ast::Module, decimals: &Decimals) -> R
                 .max()
                 .unwrap_or(0);
             if used > 0 {
-                *expr = rescale(expr.clone(), 10u32.pow(used));
+                *expr = lift(rescale(expr.clone(), 10u32.pow(used)), used, &places);
             }
         }
     }
@@ -654,37 +653,80 @@ fn idents(expr: &SpecExpr) -> Vec<&str> {
     }
 }
 
-fn check_calls(
-    expr: &SpecExpr,
-    rule: &str,
-    places: u32,
-    places_of: &dyn Fn(&str) -> Result<Option<u32>, String>,
-) -> Result<(), String> {
+fn check_calls(expr: &SpecExpr, check: &dyn Fn(&str) -> Result<(), String>) -> Result<(), String> {
     match expr {
         SpecExpr::Call(callee, args) => {
-            if let Some(other) = places_of(callee)?
-                && other != places
-            {
-                return Err(format!(
-                    "{rule}: uses {callee}, which has {other} decimal places, but {rule} has {places}; give both the same `with N decimals`"
-                ));
-            }
+            check(callee)?;
             for arg in args {
-                check_calls(arg, rule, places, places_of)?;
+                check_calls(arg, check)?;
             }
         }
         SpecExpr::Binary(_, left, right) => {
-            check_calls(left, rule, places, places_of)?;
-            check_calls(right, rule, places, places_of)?;
+            check_calls(left, check)?;
+            check_calls(right, check)?;
         }
         SpecExpr::If(condition, then, otherwise) => {
-            check_calls(condition, rule, places, places_of)?;
-            check_calls(then, rule, places, places_of)?;
-            check_calls(otherwise, rule, places, places_of)?;
+            check_calls(condition, check)?;
+            check_calls(then, check)?;
+            check_calls(otherwise, check)?;
         }
         _ => {}
     }
     Ok(())
+}
+
+/// Moves a value stored with `from` decimal places to `to` places.
+fn change_places(expr: SpecExpr, from: u32, to: u32) -> SpecExpr {
+    let (op, factor) = match from.cmp(&to) {
+        std::cmp::Ordering::Equal => return expr,
+        std::cmp::Ordering::Less => (BinaryOp::MulWrap, 10u32.pow(to - from)),
+        std::cmp::Ordering::Greater => (BinaryOp::Div, 10u32.pow(from - to)),
+    };
+    SpecExpr::Binary(op, Box::new(expr), Box::new(SpecExpr::Number(factor)))
+}
+
+/// Wraps calls to rules with other places: inputs go to the callee's places,
+/// the answer comes back to `places`. Runs after [`rescale`].
+fn convert_calls(expr: SpecExpr, places: u32, places_of: &dyn Fn(&str) -> Option<u32>) -> SpecExpr {
+    let boxed = |expr: SpecExpr| Box::new(convert_calls(expr, places, places_of));
+    match expr {
+        SpecExpr::Call(callee, args) => {
+            let other = places_of(&callee).unwrap_or(places);
+            let args = args
+                .into_iter()
+                .map(|arg| change_places(convert_calls(arg, places, places_of), places, other))
+                .collect();
+            change_places(SpecExpr::Call(callee, args), other, places)
+        }
+        SpecExpr::Binary(op, left, right) => SpecExpr::Binary(op, boxed(*left), boxed(*right)),
+        SpecExpr::If(condition, then, otherwise) => {
+            SpecExpr::If(boxed(*condition), boxed(*then), boxed(*otherwise))
+        }
+        other => other,
+    }
+}
+
+/// Raises page values with fewer places to `places`. Runs after [`rescale`].
+fn lift(expr: SpecExpr, places: u32, of: &[(String, u32)]) -> SpecExpr {
+    let boxed = |expr: SpecExpr| Box::new(lift(expr, places, of));
+    match expr {
+        SpecExpr::Ident(name) => {
+            let own = of
+                .iter()
+                .find(|(state, _)| *state == name)
+                .map_or(places, |(_, own)| *own);
+            change_places(SpecExpr::Ident(name), own, places)
+        }
+        SpecExpr::Binary(op, left, right) => SpecExpr::Binary(op, boxed(*left), boxed(*right)),
+        SpecExpr::If(condition, then, otherwise) => {
+            SpecExpr::If(boxed(*condition), boxed(*then), boxed(*otherwise))
+        }
+        SpecExpr::Call(callee, args) => SpecExpr::Call(
+            callee,
+            args.into_iter().map(|arg| lift(arg, places, of)).collect(),
+        ),
+        other => other,
+    }
 }
 
 fn rescale(expr: SpecExpr, scale: u32) -> SpecExpr {
@@ -1073,12 +1115,7 @@ fn expression(text: &str, line_no: usize, ctx: &Ctx) -> Result<String, String> {
         return Err(format!("line {line_no}: a `(` is not closed; add `)`"));
     }
     let text = rewrite_lists(text, ctx.lists, None, line_no)?.0;
-    if ctx.decimals > 0 && find_word_call(&text, "round").is_some() {
-        return Err(format!(
-            "line {line_no}: `round` works only in rules without decimals"
-        ));
-    }
-    let text = expand_round(&text, ctx.signed, line_no)?;
+    let text = expand_round(&text, ctx.signed, ctx.decimals, line_no)?;
     let text = expand_negatives(&text, ctx.signed, line_no)?;
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::new();
@@ -1137,11 +1174,6 @@ fn expression(text: &str, line_no: usize, ctx: &Ctx) -> Result<String, String> {
                 let word: String = chars[start..=index].iter().collect();
                 match word.as_str() {
                     "and" => out.push_str("&&"),
-                    "mod" if ctx.decimals > 0 => {
-                        return Err(format!(
-                            "line {line_no}: `mod` works only in rules without decimals"
-                        ));
-                    }
                     "mod" => out.push('%'),
                     "or" => out.push_str("||"),
                     "is" => {
@@ -1244,10 +1276,6 @@ fn starts_value(before: &str) -> bool {
     }
 }
 
-fn no_signed(line_no: usize, op: &str) -> String {
-    format!("line {line_no}: `{op}` works only in rules that cannot be negative")
-}
-
 /// Rewrites list uses: `sum(p)`, `min(p)`, `max(p)`, `count(p)`, `p[2]`, and
 /// a bare `p` (all items as call arguments, or item `each` when given).
 /// Also reports whether a bare list name was seen.
@@ -1348,14 +1376,14 @@ fn each_item(condition: &str, lists: &[(String, usize)], line_no: usize) -> Resu
     Ok(parts.join(" and "))
 }
 
-/// Rewrites `round(a / b)` into `(a + b / 2) / b` (rounds half up).
-fn expand_round(text: &str, signed: bool, line_no: usize) -> Result<String, String> {
+/// Rewrites `round(a / b)` into `(a + b / 2) / b` (rounds half up). With
+/// decimals or negatives it rounds the last place from twice the quotient,
+/// `d = 2 * a / b`: `(d + 1) / 2`, or `(d + sign(d)) / 2` (half away from 0),
+/// where 1 is one unit of the last decimal place.
+fn expand_round(text: &str, signed: bool, decimals: u32, line_no: usize) -> Result<String, String> {
     let Some(start) = find_word_call(text, "round") else {
         return Ok(text.to_string());
     };
-    if signed {
-        return Err(no_signed(line_no, "round"));
-    }
     let open = start + text[start..].find('(').unwrap_or_default();
     let mut depth = 0;
     let mut close = None;
@@ -1379,12 +1407,27 @@ fn expand_round(text: &str, signed: bool, line_no: usize) -> Result<String, Stri
             "line {line_no}: round takes a division, like `round(price / 3)`"
         ));
     };
-    let top = expand_round(text[open + 1..slash].trim(), signed, line_no)?;
-    let bottom = expand_round(text[slash + 1..close].trim(), signed, line_no)?;
+    let top = expand_round(text[open + 1..slash].trim(), signed, decimals, line_no)?;
+    let bottom = expand_round(text[slash + 1..close].trim(), signed, decimals, line_no)?;
+    let rounded = if !signed && decimals == 0 {
+        format!("((({top}) + ({bottom}) / 2) / ({bottom}))")
+    } else {
+        let unit = if decimals == 0 {
+            "1".to_string()
+        } else {
+            format!("0.{}1", "0".repeat(decimals as usize - 1))
+        };
+        let twice = format!("(2 * ({top}) / ({bottom}))");
+        if signed {
+            format!("(({twice} + max(-{unit}, min({unit}, {twice}))) / 2)")
+        } else {
+            format!("(({twice} + {unit}) / 2)")
+        }
+    };
     Ok(format!(
-        "{}((({top}) + ({bottom}) / 2) / ({bottom})){}",
+        "{}{rounded}{}",
         &text[..start],
-        expand_round(&text[close + 1..], signed, line_no)?
+        expand_round(&text[close + 1..], signed, decimals, line_no)?
     ))
 }
 
@@ -1607,27 +1650,48 @@ mod tests {
     #[test]
     fn new_features_reject_misuse() {
         let err = |src: &str| crate::parse_module(src).unwrap_err();
-        assert!(err("f(a, b) can be negative\n  -> round(a / b)\n").contains("cannot be negative"));
         assert!(err("f(a, b) can be negative\n  -> a / b\n").contains("divide by 0"));
         assert!(err("f(a)\n  -> -5\n").contains("can be negative"));
         assert!(err("f(a)\n  a > 1 -> \"A\"\n  -> 2\n").contains("text answer"));
         assert!(err("f(a) can be negative\n  -> \"A\"\n").contains("text answers cannot"));
         assert!(err("g(a)\n  -> \"A\"\n\nf(a)\n  -> g(a)\n").contains("only a page"));
         assert!(err("page P\n  save a = 0 can be negative\n  show a + 1\n").contains("in a rule"));
-        assert!(
-            err("page P\n  save a = 0 with 2 decimals\n  save b = 0\n  show a + b\n")
-                .contains("different decimal places")
-        );
         assert!(err("f(a, b) can be negative\n  -> a + b\n").contains("may go outside"));
         assert!(err("f(a, b)\n  -> round(a + b)\n").contains("round takes a division"));
         assert!(err("f(a, b)\n  -> a mod b\n").contains("divide by 0"));
         assert!(err("f(p[3])\n  -> p[4]\n").contains("items 1 to 3"));
         assert!(err("f(p[0])\n  -> 1\n").contains("size from 1"));
         assert!(err("f(a) with 1 decimal\n  -> a * 1.25\n").contains("more than 1"));
-        assert!(
-            err("g(a) with 2 decimals\n  -> a\n\nf(a)\n  -> g(a)\n").contains("decimal places")
-        );
         assert!(err("page P\n  save a = 0\n  show a if a > 1\n").contains("only a text"));
+    }
+
+    #[test]
+    fn number_forms_mix() {
+        let out = translate("f(a, b) can be negative\n  need b >= 1\n  -> round(a / b)\n").unwrap();
+        assert!(out.contains("2 *% (a) / (b)"), "{out}");
+        let out = translate("f(a) with 2 decimals\n  -> round(a / 3) + a mod 2\n").unwrap();
+        assert!(
+            out.contains("+% 1) / 200") && out.contains("% 200"),
+            "{out}"
+        );
+        let module = crate::parse_module(
+            "g(a) with 2 decimals\n  need a <= 10\n  -> a\n\nf(a)\n  need a <= 10\n  -> g(a)\n",
+        )
+        .unwrap();
+        let answer = format!("{:?}", module.contracts[1].ensures);
+        assert!(
+            answer.contains("Div") && answer.contains("Number(100)"),
+            "{answer}"
+        );
+        let module = crate::parse_module(
+            "page P\n  save a = 0 with 2 decimals\n  save b = 0\n  show a + b\n",
+        )
+        .unwrap();
+        let shown = format!("{:?}", module.pages[0].elements);
+        assert!(
+            shown.contains("Binary(MulWrap, Ident(\"b\"), Number(100))"),
+            "{shown}"
+        );
     }
 
     #[test]
