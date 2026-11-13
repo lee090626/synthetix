@@ -6,21 +6,25 @@ page Policy
   save total, floor, cap = 0
   capped_result, floor_cap_result = 0
 
-  ask price "단가"
-  ask quantity "수량"
-  button "기본 금액 계산" -> total = base_amount(price, quantity)
+  ask "단가" for price
+  ask "수량" for quantity
+  when "기본 금액 계산" is clicked
+    total = base_amount(price, quantity)
 
-  ask item1 "항목 1"
-  ask item2 "항목 2"
-  ask item3 "항목 3"
-  ask item4 "항목 4"
-  button "네 항목 합계" -> total = items_total(item1, item2, item3, item4)
+  ask "항목 1" for item1
+  ask "항목 2" for item2
+  ask "항목 3" for item3
+  ask "항목 4" for item4
+  when "네 항목 합계" is clicked
+    total = items_total(item1, item2, item3, item4)
 
-  ask total "합계"
-  ask floor "하한"
-  ask cap "상한"
+  ask "합계" for total
+  ask "하한" for floor
+  ask "상한" for cap
 
   show capped_result
   show floor_cap_result
-  button "상한 정책 적용" -> capped_result = capped(total, cap)
-  button "최소 비용 정책 적용" -> floor_cap_result = floor_cap(total, floor, cap)
+  when "상한 정책 적용" is clicked
+    capped_result = capped(total, cap)
+  when "최소 비용 정책 적용" is clicked
+    floor_cap_result = floor_cap(total, floor, cap)

@@ -36,30 +36,35 @@ page Shop
   save total, last = 0
   save diff = 0 can be negative
 
-  ask prices \"Price\"
-  ask last \"Last\"
-  button \"Total\" -> total = cart(prices)
-  button \"Change\" -> diff = change(total, last)
+  ask \"Price\" for prices
+  ask \"Last\" for last
+  when \"Total\" is clicked
+    total = cart(prices)
+  when \"Change\" is clicked
+    diff = change(total, last)
   show total
   show diff
   show \"Over 200000\" if total > 200000
 
   save price, tax = 0 with 2 decimals
-  ask price \"Price\"
-  button \"Tax\" -> tax = vat(price)
+  ask \"Price\" for price
+  when \"Tax\" is clicked
+    tax = vat(price)
   show tax
   show price + tax
   show \"Pricey\" if price > 10.5
 
   save score = 0
   save grade = \"\"
-  ask score \"Score\"
-  button \"Grade\" -> grade = grade_of(score)
+  ask \"Score\" for score
+  when \"Grade\" is clicked
+    grade = grade_of(score)
   show grade
 
   save delta, moved = 0 can be negative with 2 decimals
-  ask delta \"Delta\"
-  button \"Drift\" -> moved = drift(delta)
+  ask \"Delta\" for delta
+  when \"Drift\" is clicked
+    moved = drift(delta)
   show moved
 ";
 

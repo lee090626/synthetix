@@ -143,11 +143,12 @@ page Shop
   save price, min, max = 0
   result = 0
 
-  ask price "Price"
-  ask min "Min"
-  ask max "Max"
+  ask "Price" for price
+  ask "Min" for min
+  ask "Max" for max
   show result
-  button "Fit" -> result = fit_price(price, min, max)
+  when "Fit" is clicked
+    result = fit_price(price, min, max)
 ```
 
 | Line | Meaning |
@@ -156,26 +157,36 @@ page Shop
 | `page Name` | Start a page |
 | `save a, b = 0` | Values that start at 0 and are kept after reload |
 | `a, b = 0` | Values that start at 0 and reset on reload |
-| `ask a "Label"` | An input box for `a` |
+| `ask "Label" for a` | An input box for `a` |
 | `show a` | Show the value of `a`; any calculation or rule works too (`show price * quantity`) |
 | `show "Text"` | Show fixed text |
 | `show "Text" if a > 100` | Show the text only while the condition holds |
 | `save prices[3] = 0` | A list of three values (`prices_1` to `prices_3`) |
-| `ask prices "Price"` | One input box per item: "Price 1", "Price 2", ... |
+| `ask "Price" for prices` | One input box per item: "Price 1", "Price 2", ... |
 | `save diff = 0 can be negative` | Values that may go below 0 |
 | `save price = 0 with 2 decimals` | Values typed and shown with 2 decimal places |
 | `save d = 0 can be negative with 2 decimals` | Both |
 | `save grade = ""` | A text value, for a rule with text answers |
-| `button "Label" -> a = rule(...)` | On click, set `a` to the rule's answer |
+| `when "Label" is clicked` | A button; on click, the lines below it run in order |
+| `    a = rule(...)` | (under `when`) Set `a` to the rule's answer |
 
-Pass a list to a rule by name: `button "Total" -> total = cart(prices)`.
+A `when` block may set several values; each line sees the values set above it,
+and if one rule fails, none of them change:
+
+```
+when "Calc" is clicked
+  total = cart(prices)
+  tax = vat(total)
+```
+
+Pass a list to a rule by name: `total = cart(prices)`.
 A value with decimals goes only into a rule with the same places. On a page,
 values can be calculated and compared (`show price + tax`,
 `show "Pricey" if price > 10.5`); values with fewer places are raised to the
 most places used (`1.5 + 0.25` is `1.75`). Values that can be
 negative are only shown or compared, and calculated in a rule. A whole number
 up to 2147483647 may go into a `can be negative` rule. A rule with text answers
-sets a text value: `button "Grade" -> grade = grade_of(score)`.
+sets a text value: `grade = grade_of(score)`.
 
 ## When it fails
 

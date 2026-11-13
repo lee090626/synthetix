@@ -1550,51 +1550,57 @@ fn validate_decimals(
         }
         walk(expr, &of_state)
     };
-    for element in &page.elements {
-        match element {
-            PageElement::Button {
-                state,
-                function,
-                args,
-                ..
-            } => {
-                let rule_places = scope
-                    .and_then(|scope| scope.get(function))
-                    .and_then(|key| definitions.get(key))
-                    .map_or(0, |definition| definition.contract.decimals);
-                let mismatch = |what: &str, found: u32| {
-                    format!(
-                        "{}: {what} has {found} decimal places but {function} has {rule_places}; use the same `with N decimals`",
-                        source.display()
-                    )
-                };
-                if of_state(state) != rule_places {
-                    return Err(mismatch(state, of_state(state)));
-                }
-                for arg in args {
-                    match arg {
-                        SpecExpr::Ident(name) if of_state(name) != rule_places => {
-                            return Err(mismatch(name, of_state(name)));
-                        }
-                        SpecExpr::Ident(_) => {}
-                        _ if rule_places > 0 => {
-                            return Err(format!(
-                                "{}: {function} has decimals; pass saved values by name",
-                                source.display()
-                            ));
-                        }
-                        other if uses_decimals(other) => {
-                            return Err(format!(
-                                "{}: {function} has no decimals but gets a value with decimals",
-                                source.display()
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            _ => {}
+    let check_call = |state: &str, function: &str, args: &[SpecExpr]| -> Result<(), String> {
+        let rule_places = scope
+            .and_then(|scope| scope.get(function))
+            .and_then(|key| definitions.get(key))
+            .map_or(0, |definition| definition.contract.decimals);
+        let mismatch = |what: &str, found: u32| {
+            format!(
+                "{}: {what} has {found} decimal places but {function} has {rule_places}; use the same `with N decimals`",
+                source.display()
+            )
+        };
+        if of_state(state) != rule_places {
+            return Err(mismatch(state, of_state(state)));
         }
+        for arg in args {
+            match arg {
+                SpecExpr::Ident(name) if of_state(name) != rule_places => {
+                    return Err(mismatch(name, of_state(name)));
+                }
+                SpecExpr::Ident(_) => {}
+                _ if rule_places > 0 => {
+                    return Err(format!(
+                        "{}: {function} has decimals; pass saved values by name",
+                        source.display()
+                    ));
+                }
+                other if uses_decimals(other) => {
+                    return Err(format!(
+                        "{}: {function} has no decimals but gets a value with decimals",
+                        source.display()
+                    ));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    };
+    // Buttons and `when ... is clicked` blocks (reducers) call rules alike.
+    for element in &page.elements {
+        if let PageElement::Button {
+            state,
+            function,
+            args,
+            ..
+        } = element
+        {
+            check_call(state, function, args)?;
+        }
+    }
+    for update in page.reducers.iter().flat_map(|reducer| &reducer.updates) {
+        check_call(&update.state, &update.function, &update.args)?;
     }
     Ok(())
 }
