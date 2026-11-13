@@ -1688,7 +1688,10 @@ mod tests {
         )
         .unwrap();
         let shown = format!("{:?}", module.pages[0].elements);
-        assert!(shown.contains("Binary(MulWrap, Ident(\"b\"), Number(100))"), "{shown}");
+        assert!(
+            shown.contains("Binary(MulWrap, Ident(\"b\"), Number(100))"),
+            "{shown}"
+        );
     }
 
     #[test]
