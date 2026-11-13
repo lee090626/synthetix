@@ -954,11 +954,13 @@ fn verification_order(
                     dependency.call_name
                 ));
             }
+            // Calls within one file convert between places when parsed.
             if let Some(callee) = definitions.get(target)
+                && target.0 != key.0
                 && callee.contract.decimals != definition.contract.decimals
             {
                 return Err(format!(
-                    "{}: {} has {} decimal places but uses {}, which has {}; give both the same `with N decimals`",
+                    "{}: {} has {} decimal places but uses {} from another file, which has {}; give both the same `with N decimals`",
                     key.0.display(),
                     key.1,
                     definition.contract.decimals,
@@ -1520,8 +1522,8 @@ fn validate_page(
     Ok(())
 }
 
-/// Values with decimals are stored times 10^places, so they may only meet
-/// values and rules with the same places, and are shown on their own.
+/// Values with decimals are stored times 10^places, so a button passes them
+/// only to rules with the same places.
 fn validate_decimals(
     page: &Page,
     scope: Option<&HashMap<String, ContractKey>>,
@@ -1548,42 +1550,8 @@ fn validate_decimals(
         }
         walk(expr, &of_state)
     };
-    let mixes_places = |expr: &SpecExpr| {
-        fn collect(expr: &SpecExpr, out: &mut Vec<String>) {
-            match expr {
-                SpecExpr::Ident(name) => out.push(name.clone()),
-                SpecExpr::Binary(_, left, right) => {
-                    collect(left, out);
-                    collect(right, out);
-                }
-                SpecExpr::If(condition, then, otherwise) => {
-                    collect(condition, out);
-                    collect(then, out);
-                    collect(otherwise, out);
-                }
-                _ => {}
-            }
-        }
-        let mut names = Vec::new();
-        collect(expr, &mut names);
-        let used: Vec<u32> = names
-            .iter()
-            .filter(|name| places.contains_key(name.as_str()))
-            .map(|name| of_state(name))
-            .collect();
-        used.windows(2).any(|pair| pair[0] != pair[1])
-    };
     for element in &page.elements {
         match element {
-            PageElement::ShowExpr { value: expr }
-            | PageElement::WhenShow {
-                condition: expr, ..
-            } if mixes_places(expr) => {
-                return Err(format!(
-                    "{}: values with different decimal places cannot be used together",
-                    source.display()
-                ));
-            }
             PageElement::Button {
                 state,
                 function,

@@ -70,8 +70,8 @@ change(now, before) can be negative
 
 Write negative numbers with a minus sign: `-5`, `x < -100`, `-x`. In these
 rules `/` and `mod` round toward 0 (`-7 / 2` is -3, `-7 mod 2` is -1), and the
-divisor must stay above 0 or below 0. `round` works only in rules that cannot
-be negative.
+divisor must stay above 0 or below 0. `round` rounds half away from 0
+(`round(-7 / 2)` is -4).
 
 ### Lists
 
@@ -100,8 +100,11 @@ vat(price) with 2 decimals
   -> price * 0.1
 ```
 
-`vat(12.50)` is `1.25`. A rule can only use rules with the same places, and
-`mod` and `round` work only in rules without decimals. A rule can be both:
+`vat(12.50)` is `1.25`. `round(a / b)` rounds half up to the last place
+(`round(10.01 / 3)` is `3.34`), and `a mod b` works on decimals (`7.50 mod 2` is
+`1.50`). A rule may use a rule from the same file with other places: the inputs
+are moved to its places and the answer back, rounding down when places are
+dropped (`0.135` into 2 places is `0.13`). A rule can be both:
 `drift(price) can be negative with 2 decimals`; then `*` and `/` round toward 0.
 
 ### Text answers
@@ -167,8 +170,9 @@ page Shop
 
 Pass a list to a rule by name: `button "Total" -> total = cart(prices)`.
 A value with decimals goes only into a rule with the same places. On a page,
-values with the same places can be calculated and compared
-(`show price + tax`, `show "Pricey" if price > 10.5`); values that can be
+values can be calculated and compared (`show price + tax`,
+`show "Pricey" if price > 10.5`); values with fewer places are raised to the
+most places used (`1.5 + 0.25` is `1.75`). Values that can be
 negative are only shown or compared, and calculated in a rule. A whole number
 up to 2147483647 may go into a `can be negative` rule. A rule with text answers
 sets a text value: `button "Grade" -> grade = grade_of(score)`.
@@ -182,7 +186,7 @@ sets a text value: `button "Grade" -> grade = grade_of(score)`.
 | `may divide by 0` | Add `need divisor >= 1` |
 | `is not defined for inputs [...]` | A `-` can go below 0 for those inputs; add a `need` line or a condition |
 | `is a reserved word` | Rename the input |
-| `has N decimal places but ...` | Give the rules and page values the same `with N decimals` |
+| `has N decimal places but ...` | A button, or a rule from another file, needs the same `with N decimals` |
 | `use is to compare` | Write `x is 1` / `x is not 1` instead of `=` / `!=` |
 | `call-site precondition ... is not established` | The values passed to another rule may break its `need` lines; add `need` lines or a condition |
 | `UNSATISFIABLE_PRECONDITION` | The `need` lines contradict each other |

@@ -1378,7 +1378,7 @@ fn page_json(linked: &LinkedPage, root: &Path, storage_schema_version: u32) -> S
     )
 }
 
-/// Decimal places of the values a page expression uses (they all match).
+/// Decimal places of a page expression: the most of the values it uses.
 fn expr_decimals(expr: &SpecExpr, states: &[axiom_parser::State]) -> u32 {
     match expr {
         SpecExpr::Ident(name) => states
