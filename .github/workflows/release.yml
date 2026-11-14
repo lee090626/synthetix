@@ -275,8 +275,8 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "$VSCE_PAT" ]]; then
-            echo "::error::VSCE_PAT secret is not set"
-            exit 1
+            echo "::notice::VSCE_PAT is not set; upload the .vsix from the release by hand"
+            exit 0
           fi
           npx --yes @vscode/vsce publish --packagePath vsix/*.vsix
 
