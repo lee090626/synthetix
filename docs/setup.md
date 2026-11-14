@@ -30,7 +30,9 @@ repository and `release.yml` as its trusted publisher on npmjs.com, so no npm
 token is stored. The Marketplace publishes only when the `VSCE_PAT` secret (an
 Azure DevOps token with Marketplace *Manage* scope for the `publisher` in
 `editors/vscode/package.json`) is set; without it, upload the release's `.vsix`
-at marketplace.visualstudio.com/manage for larger updates. The npm version comes from the tag
+at marketplace.visualstudio.com/manage for larger updates. Open VSX publishes
+every tag through its trusted publisher (`synthetix-lang` namespace, this
+repository, `release.yml`); its first version needs the `OVSX_PAT` secret. The npm version comes from the tag
 (`v0.15.0` → `0.15.0`); the extension version comes from its `package.json`.
 
 To use the VSCode play button, build the CLI first, then package and install
