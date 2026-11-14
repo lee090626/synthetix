@@ -244,20 +244,18 @@ jobs:
           pattern: cli-*
           path: release-artifacts
           merge-multiple: true
+      # Trusted publishing (OIDC): no token; each package on npmjs.com trusts
+      # this repository's release.yml. Needs npm 11.5.1 or later.
+      - name: Install npm with trusted publishing
+        run: npm install -g npm@11
       - name: Publish synthetix-cli and platform packages
         shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
-          if [[ -z "$NODE_AUTH_TOKEN" ]]; then
-            echo "::error::NPM_TOKEN secret is not set"
-            exit 1
-          fi
           node scripts/npm-packages.cjs release-artifacts npm-out "${GITHUB_REF_NAME#v}"
           # Platform packages first, so the launcher's optional dependencies resolve.
           for dir in npm-out/synthetix-cli-*/ npm-out/synthetix-cli/; do
-            npm publish "$dir" --access public --provenance
+            npm publish "$dir" --access public
           done
 
   publish-vsix:

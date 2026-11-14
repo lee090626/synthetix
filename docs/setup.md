@@ -24,9 +24,10 @@ GitHub Releases. The release workflow runs the workspace tests on Linux,
 Windows, and macOS before creating the release assets.
 
 A `v*` tag also publishes the CLI to npm (`npm install -g synthetix-cli`, then
-`axiom`) and the extension to the VSCode Marketplace. Both need repository
-secrets: `NPM_TOKEN` (an npm automation token allowed to publish
-`synthetix-cli` and `synthetix-cli-<platform>`) and `VSCE_PAT` (an Azure DevOps
+`axiom`) and the extension to the VSCode Marketplace. npm uses trusted
+publishing: each of `synthetix-cli` and `synthetix-cli-<platform>` names this
+repository and `release.yml` as its trusted publisher on npmjs.com, so no npm
+token is stored. The Marketplace needs the `VSCE_PAT` secret (an Azure DevOps
 token with Marketplace *Manage* scope for the `publisher` in
 `editors/vscode/package.json`). The npm version comes from the tag
 (`v0.15.0` → `0.15.0`); the extension version comes from its `package.json`.
