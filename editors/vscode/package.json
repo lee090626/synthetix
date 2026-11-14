@@ -3,7 +3,7 @@
   "displayName": "Synthetix",
   "description": "Build and run Synthetix .ax web projects with verified logic.",
   "version": "0.14.1",
-  "publisher": "synthetix",
+  "publisher": "synthetix-lang",
   "engines": {
     "vscode": "^1.85.0"
   },
