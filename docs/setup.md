@@ -27,9 +27,10 @@ A `v*` tag also publishes the CLI to npm (`npm install -g synthetix-cli`, then
 `axiom`) and the extension to the VSCode Marketplace. npm uses trusted
 publishing: each of `synthetix-cli` and `synthetix-cli-<platform>` (Windows: `@lee090626/synthetix-cli-win32-x64`) names this
 repository and `release.yml` as its trusted publisher on npmjs.com, so no npm
-token is stored. The Marketplace needs the `VSCE_PAT` secret (an Azure DevOps
-token with Marketplace *Manage* scope for the `publisher` in
-`editors/vscode/package.json`). The npm version comes from the tag
+token is stored. The Marketplace publishes only when the `VSCE_PAT` secret (an
+Azure DevOps token with Marketplace *Manage* scope for the `publisher` in
+`editors/vscode/package.json`) is set; without it, upload the release's `.vsix`
+at marketplace.visualstudio.com/manage for larger updates. The npm version comes from the tag
 (`v0.15.0` → `0.15.0`); the extension version comes from its `package.json`.
 
 To use the VSCode play button, build the CLI first, then package and install
