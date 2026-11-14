@@ -25,7 +25,7 @@ for (const [platform, [os, cpu]] of Object.entries(platforms)) {
   fs.copyFileSync(source, path.join(dir, 'bin', exe));
   fs.chmodSync(path.join(dir, 'bin', exe), 0o755);
   fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
-    name: `synthetix-cli-${platform}`,
+    name: Object.keys(launcher.optionalDependencies).find((n) => n.endsWith(`synthetix-cli-${platform}`)),
     version,
     description: `Synthetix CLI binary for ${platform}.`,
     license: launcher.license,

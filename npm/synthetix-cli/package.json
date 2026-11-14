@@ -20,6 +20,6 @@
     "synthetix-cli-darwin-arm64": "0.0.0",
     "synthetix-cli-darwin-x64": "0.0.0",
     "synthetix-cli-linux-x64": "0.0.0",
-    "synthetix-cli-win32-x64": "0.0.0"
+    "@lee090626/synthetix-cli-win32-x64": "0.0.0"
   }
 }
