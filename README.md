@@ -153,3 +153,7 @@ See [writing specs](docs/writing-specs.md) for the full syntax and
 
 The old contract syntax (`contract`, `ensures`, `{ }`) is no longer accepted in
 user files. It remains only as the internal format and in `tests/legacy`.
+
+## License
+
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.

@@ -2,7 +2,7 @@
   "name": "synthetix-cli",
   "version": "0.0.0",
   "description": "Synthetix CLI (axiom): verified logic to web apps.",
-  "license": "UNLICENSED",
+  "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/lee090626/synthetix.git"
