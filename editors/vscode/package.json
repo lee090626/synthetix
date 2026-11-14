@@ -4,6 +4,7 @@
   "description": "Build and run Synthetix .ax web projects with verified logic.",
   "version": "0.14.1",
   "publisher": "synthetix-lang",
+  "license": "MIT OR Apache-2.0",
   "engines": {
     "vscode": "^1.85.0"
   },
