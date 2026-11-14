@@ -4,9 +4,12 @@ const { spawnSync } = require('node:child_process');
 
 const platform = `${process.platform}-${process.arch}`;
 const exe = process.platform === 'win32' ? 'axiom.exe' : 'axiom';
+// Platform package names come from optionalDependencies (win32 is scoped).
+const { optionalDependencies } = require('../package.json');
+const name = Object.keys(optionalDependencies).find((n) => n.endsWith(`synthetix-cli-${platform}`));
 let binary;
 try {
-  binary = require.resolve(`synthetix-cli-${platform}/bin/${exe}`);
+  binary = require.resolve(`${name}/bin/${exe}`);
 } catch {
   console.error(`synthetix-cli: no binary for ${platform}; supported: darwin-arm64, darwin-x64, linux-x64, win32-x64`);
   process.exit(1);
