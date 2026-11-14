@@ -52,11 +52,11 @@ then executes its `run` export. For example,
 `examples/rules/fit_price.ax` produces
 `.synthetix/build/examples/rules/fit_price.wasm`.
 
-Typing in an `.ax` file opens completion suggestions for Axiom keywords,
-types, parameters, `result`, operators, records, lists, inputs, reducers,
-Todo snippets, and conditional web-state snippets. Hover explains common
-types, contracts, and page states, and the built-in formatter applies a small
-two-space indentation style.
+Typing in an `.ax` file suggests the simple-syntax words (`need`, `is`,
+`page`, `save`, `ask`, `show`, `button`), the rule's inputs, and snippets
+(`rule`, `page`, `button`, `ask`). Hovering over `->` or a rule line explains
+that line in Korean (for example "price < min 이면 답은 min 입니다"). Format
+Document indents bodies by two spaces and aligns the `->` arrows of a rule.
 
 If you run the binary manually from `editors`, use `../target/debug/axiom`; from
 the repository root, use `./target/debug/axiom`.

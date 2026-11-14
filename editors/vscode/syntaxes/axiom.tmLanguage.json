@@ -15,8 +15,12 @@
       "match": "^[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()"
     },
     {
+      "name": "support.function.axiom",
+      "match": "\\b(min|max|round|sum|count)(?=\\s*\\()"
+    },
+    {
       "name": "keyword.control.axiom",
-      "match": "\\bneed\\b"
+      "match": "\\b(need|is|not|save|ask|for|clicked|mod|can|be|negative|decimals?)\\b"
     },
     {
       "name": "keyword.control.axiom",
@@ -28,11 +32,11 @@
     },
     {
       "name": "constant.numeric.axiom",
-      "match": "\\b\\d+\\b"
+      "match": "\\b\\d+(\\.\\d+)?\\b"
     },
     {
       "name": "keyword.operator.axiom",
-      "match": "(-%|\\*%|\\+%|<<|==|!=|<=|>=|<|>|=|\\+|\\*|-|->|&|\\||\\^|plus|minus|times|shift_left|equals|not_equals|is_not|and|or)"
+      "match": "(-%|\\*%|\\+%|<<|==|!=|<=|>=|<|>|=|\\+|\\*|\\/|-|->|&|\\||\\^|plus|minus|times|shift_left|equals|not_equals|is_not|and|or)"
     },
     {
       "name": "variable.language.result.axiom",

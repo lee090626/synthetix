@@ -164,6 +164,151 @@ fn check_preconditions_inner(
     }
 }
 
+/// Finds rules in a `result == (if c1 { .. } else { if c2 { .. } else { .. } })`
+/// chain that no valid input can reach. Returns 1-based rule numbers; the
+/// final default is rule `n + 1`. Returns nothing when the chain uses calls or
+/// cannot be checked in isolation.
+pub fn unreachable_rules(contract: &Contract) -> Vec<usize> {
+    use axiom_parser::{BinaryOp, SpecExpr};
+    let Some(chain) = contract.ensures.iter().find_map(|clause| match clause {
+        SpecExpr::Binary(BinaryOp::Eq, left, right)
+            if matches!(left.as_ref(), SpecExpr::Ident(name) if name == "result") =>
+        {
+            Some(right.as_ref())
+        }
+        _ => None,
+    }) else {
+        return Vec::new();
+    };
+    let mut conditions = Vec::new();
+    let mut node = chain;
+    while let SpecExpr::If(condition, _, otherwise) = node {
+        conditions.push(condition.as_ref().clone());
+        node = otherwise;
+    }
+    if conditions.is_empty() {
+        return Vec::new();
+    }
+    let mut unreachable = Vec::new();
+    for rule in 0..=conditions.len() {
+        let mut probe = contract.clone();
+        probe.ensures.clear();
+        for earlier in &conditions[..rule] {
+            probe.requires.push(SpecExpr::Binary(
+                BinaryOp::Eq,
+                Box::new(earlier.clone()),
+                Box::new(SpecExpr::Bool(false)),
+            ));
+        }
+        if let Some(condition) = conditions.get(rule) {
+            probe.requires.push(condition.clone());
+        }
+        match check_preconditions(&probe) {
+            Ok(PreconditionResult::UnsatisfiablePrecondition) => unreachable.push(rule + 1),
+            Ok(_) => {}
+            Err(_) => return Vec::new(),
+        }
+    }
+    unreachable
+}
+
+/// One sample input per reachable rule of a `result == (if ..)` chain, with
+/// the answer, for people to compare against their intent. Inputs are drawn
+/// deterministically from small values and the numbers in the rule (and their
+/// neighbours), so boundaries show up. Returns `(rule, inputs, answer)`.
+pub fn rule_examples(contract: &Contract) -> Vec<(usize, Vec<u32>, u32)> {
+    use axiom_parser::{BinaryOp, SpecExpr};
+    let Some(chain) = contract.ensures.iter().find_map(|clause| match clause {
+        SpecExpr::Binary(BinaryOp::Eq, left, right)
+            if matches!(left.as_ref(), SpecExpr::Ident(name) if name == "result") =>
+        {
+            Some(right.as_ref())
+        }
+        _ => None,
+    }) else {
+        return Vec::new();
+    };
+    let mut rules = Vec::new();
+    let mut node = chain;
+    while let SpecExpr::If(condition, value, otherwise) = node {
+        rules.push((Some(condition.as_ref()), value.as_ref()));
+        node = otherwise;
+    }
+    rules.push((None, node));
+
+    let mut pool = vec![0u32, 1, 2, 3, 5, 10, 20, 50, 80, 100];
+    fn numbers(expr: &SpecExpr, out: &mut Vec<u32>) {
+        match expr {
+            SpecExpr::Number(n) => out.extend([n.saturating_sub(1), *n, n.saturating_add(1)]),
+            SpecExpr::Binary(_, l, r) => {
+                numbers(l, out);
+                numbers(r, out);
+            }
+            SpecExpr::If(c, t, e) => {
+                numbers(c, out);
+                numbers(t, out);
+                numbers(e, out);
+            }
+            _ => {}
+        }
+    }
+    for clause in contract.requires.iter().chain(&contract.ensures) {
+        numbers(clause, &mut pool);
+    }
+    if contract.params.iter().any(|param| param.ty == Type::I32) {
+        let negatives: Vec<u32> = pool
+            .iter()
+            .map(|n| (*n as i32).wrapping_neg() as u32)
+            .collect();
+        pool.extend(negatives);
+    }
+    pool.sort_unstable();
+    pool.dedup();
+
+    let truthy = |expr: &SpecExpr, args: &[u32]| {
+        reference::eval_spec(expr, contract, args, 0) == Ok(reference::Value::Bool(true))
+    };
+    let mut found: Vec<Option<(Vec<u32>, u32)>> = vec![None; rules.len()];
+    let mut seed: u64 = 0x9e37_79b9;
+    for _ in 0..20_000 {
+        if found.iter().all(Option::is_some) {
+            break;
+        }
+        let args: Vec<u32> = contract
+            .params
+            .iter()
+            .map(|_| {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                pool[((seed >> 33) as usize) % pool.len()]
+            })
+            .collect();
+        if !contract.requires.iter().all(|clause| truthy(clause, &args)) {
+            continue;
+        }
+        let Some(rule) = rules
+            .iter()
+            .position(|(condition, _)| condition.is_none_or(|c| truthy(c, &args)))
+        else {
+            continue;
+        };
+        if found[rule].is_some() {
+            continue;
+        }
+        match reference::eval_spec(rules[rule].1, contract, &args, 0) {
+            Ok(reference::Value::U32(answer)) => found[rule] = Some((args, answer)),
+            Ok(reference::Value::I32(answer)) => found[rule] = Some((args, answer as u32)),
+            _ => {}
+        }
+    }
+    found
+        .into_iter()
+        .enumerate()
+        .filter_map(|(rule, example)| example.map(|(args, answer)| (rule + 1, args, answer)))
+        .collect()
+}
+
 /// Checks syntax/type validity and whether the contract has any model.
 pub fn check_contract(contract: &Contract) -> Result<ContractCheck, String> {
     check_contract_inner(contract, &mut None)
@@ -597,12 +742,46 @@ fn lower_implementation_value(
                                 else_branch: Box::new(rhs_defined),
                             },
                         ),
+                        BinaryOp::SubChecked => and_expr(
+                            and_expr(lhs_defined, rhs_defined),
+                            Expr::Ge(Box::new(lhs.clone()), Box::new(rhs.clone())),
+                        ),
+                        BinaryOp::Div | BinaryOp::Rem if lhs_type == Type::I32 => and_expr(
+                            and_expr(lhs_defined, rhs_defined),
+                            and_expr(
+                                Expr::Ne(Box::new(rhs.clone()), Box::new(Expr::Const(0))),
+                                Expr::Select {
+                                    condition: Box::new(Expr::Eq(
+                                        Box::new(lhs.clone()),
+                                        Box::new(Expr::Const(0x8000_0000)),
+                                    )),
+                                    then_branch: Box::new(Expr::Ne(
+                                        Box::new(rhs.clone()),
+                                        Box::new(Expr::Const(0xffff_ffff)),
+                                    )),
+                                    else_branch: Box::new(Expr::Const(1)),
+                                },
+                            ),
+                        ),
+                        BinaryOp::Div | BinaryOp::Rem => and_expr(
+                            and_expr(lhs_defined, rhs_defined),
+                            Expr::Ne(Box::new(rhs.clone()), Box::new(Expr::Const(0))),
+                        ),
                         _ => and_expr(lhs_defined, rhs_defined),
                     };
                     let binary = match op {
                         BinaryOp::AddWrap => Expr::Add(Box::new(lhs), Box::new(rhs)),
                         BinaryOp::SubWrap => Expr::Sub(Box::new(lhs), Box::new(rhs)),
+                        BinaryOp::SubChecked => Expr::Sub(Box::new(lhs), Box::new(rhs)),
                         BinaryOp::MulWrap => Expr::Mul(Box::new(lhs), Box::new(rhs)),
+                        BinaryOp::Div if lhs_type == Type::I32 => {
+                            Expr::SDiv(Box::new(lhs), Box::new(rhs))
+                        }
+                        BinaryOp::Rem if lhs_type == Type::I32 => {
+                            Expr::SRem(Box::new(lhs), Box::new(rhs))
+                        }
+                        BinaryOp::Div => Expr::Div(Box::new(lhs), Box::new(rhs)),
+                        BinaryOp::Rem => Expr::Rem(Box::new(lhs), Box::new(rhs)),
                         BinaryOp::Shl => Expr::Shl(Box::new(lhs), Box::new(rhs)),
                         BinaryOp::BitAnd => Expr::BitAnd(Box::new(lhs), Box::new(rhs)),
                         BinaryOp::BitOr => Expr::BitOr(Box::new(lhs), Box::new(rhs)),
@@ -1438,6 +1617,10 @@ fn expr_to_bv(expr: &Expr, args: &[BV]) -> Result<BV, String> {
         Expr::Add(lhs, rhs) => Ok(&expr_to_bv(lhs, args)? + &expr_to_bv(rhs, args)?),
         Expr::Sub(lhs, rhs) => Ok(&expr_to_bv(lhs, args)? - &expr_to_bv(rhs, args)?),
         Expr::Mul(lhs, rhs) => Ok(&expr_to_bv(lhs, args)? * &expr_to_bv(rhs, args)?),
+        Expr::Div(lhs, rhs) => Ok(expr_to_bv(lhs, args)?.bvudiv(&expr_to_bv(rhs, args)?)),
+        Expr::Rem(lhs, rhs) => Ok(expr_to_bv(lhs, args)?.bvurem(&expr_to_bv(rhs, args)?)),
+        Expr::SDiv(lhs, rhs) => Ok(expr_to_bv(lhs, args)?.bvsdiv(&expr_to_bv(rhs, args)?)),
+        Expr::SRem(lhs, rhs) => Ok(expr_to_bv(lhs, args)?.bvsrem(&expr_to_bv(rhs, args)?)),
         Expr::Shl(lhs, rhs) => {
             let lhs = expr_to_bv(lhs, args)?;
             let rhs = expr_to_bv(rhs, args)?;
@@ -1522,7 +1705,7 @@ fn require_defined_when(
     match solver_check(&solver, metrics) {
         SatResult::Unsat => Ok(()),
         SatResult::Sat => Err(format!(
-            "{subject} has an unproven bounds, loop-invariant, or recursion-depth guard at {:?}",
+            "{subject} is not defined for inputs {:?}: a `-` may go below 0, a `/` may divide by 0, or an unproven bounds, loop-invariant, or recursion-depth guard fails; add `need` lines or a condition",
             model_inputs(&solver, args)?
         )),
         SatResult::Unknown => Err(format!(
@@ -1614,6 +1797,39 @@ fn spec_definedness(
                 Bool::or(&[&lhs_value, &rhs_defined]),
             ]))
         }
+        SpecExpr::Binary(BinaryOp::SubChecked, lhs, rhs) => {
+            let (Value::U32(left), Value::U32(right)) = (
+                spec_to_value(lhs, contract, args, result, locals)?,
+                spec_to_value(rhs, contract, args, result, locals)?,
+            ) else {
+                return Err("checked subtraction is only supported for u32".to_string());
+            };
+            Ok(and(vec![
+                spec_definedness(lhs, contract, args, result, locals)?,
+                spec_definedness(rhs, contract, args, result, locals)?,
+                left.bvuge(&right),
+            ]))
+        }
+        SpecExpr::Binary(BinaryOp::Div | BinaryOp::Rem, lhs, rhs) => {
+            let dividend = spec_to_value(lhs, contract, args, result, locals)?;
+            let divisor = spec_to_value(rhs, contract, args, result, locals)?;
+            let mut facts = vec![
+                spec_definedness(lhs, contract, args, result, locals)?,
+                spec_definedness(rhs, contract, args, result, locals)?,
+            ];
+            match (dividend, divisor) {
+                (Value::U32(_), Value::U32(divisor)) => {
+                    facts.push(divisor.eq(BV::from_u64(0, 32)).not());
+                }
+                (Value::I32(dividend), Value::I32(divisor) | Value::U32(divisor))
+                | (Value::U32(dividend), Value::I32(divisor)) => {
+                    facts.push(divisor.eq(BV::from_u64(0, 32)).not());
+                    facts.push(signed_overflow(&dividend, &divisor).not());
+                }
+                _ => return Err("division needs two u32 or two i32 values".to_string()),
+            }
+            Ok(and(facts))
+        }
         SpecExpr::Binary(_, lhs, rhs) => Ok(and(vec![
             spec_definedness(lhs, contract, args, result, locals)?,
             spec_definedness(rhs, contract, args, result, locals)?,
@@ -1636,10 +1852,33 @@ fn spec_definedness(
     }
 }
 
+/// `i32::MIN / -1` does not fit in i32 (and traps in WebAssembly).
+fn signed_overflow(dividend: &BV, divisor: &BV) -> Bool {
+    Bool::and(&[
+        &dividend.eq(BV::from_u64(0x8000_0000, 32)),
+        &divisor.eq(BV::from_u64(0xffff_ffff, 32)),
+    ])
+}
+
 fn ami_definedness(expr: &Expr, args: &[BV]) -> Result<Bool, String> {
     let and = |values: Vec<Bool>| Bool::and(&values.iter().collect::<Vec<_>>());
     match expr {
         Expr::Arg(_) | Expr::Const(_) => Ok(Bool::from_bool(true)),
+        Expr::SDiv(lhs, rhs) | Expr::SRem(lhs, rhs) => {
+            let dividend = expr_to_bv(lhs, args)?;
+            let divisor = expr_to_bv(rhs, args)?;
+            Ok(and(vec![
+                ami_definedness(lhs, args)?,
+                ami_definedness(rhs, args)?,
+                divisor.ne(BV::from_u64(0, 32)),
+                signed_overflow(&dividend, &divisor).not(),
+            ]))
+        }
+        Expr::Div(lhs, rhs) | Expr::Rem(lhs, rhs) => Ok(and(vec![
+            ami_definedness(lhs, args)?,
+            ami_definedness(rhs, args)?,
+            expr_to_bv(rhs, args)?.ne(BV::from_u64(0, 32)),
+        ])),
         Expr::ArrayGet { elements, index } => {
             let index_value = expr_to_bv(index, args)?;
             let index_defined = ami_definedness(index, args)?;
@@ -1827,7 +2066,8 @@ fn spec_to_value(
                 (Value::Bool(then_branch), Value::Bool(else_branch)) => {
                     Ok(Value::Bool(condition.ite(&then_branch, &else_branch)))
                 }
-                (Value::I32(then_branch), Value::I32(else_branch)) => {
+                (Value::I32(then_branch), Value::I32(else_branch) | Value::U32(else_branch))
+                | (Value::U32(then_branch), Value::I32(else_branch)) => {
                     Ok(Value::I32(condition.ite(&then_branch, &else_branch)))
                 }
                 (Value::Array(then_branch), Value::Array(else_branch))
@@ -1869,6 +2109,23 @@ fn spec_to_value(
                 }
                 (BinaryOp::MulWrap, Value::U32(lhs), Value::U32(rhs)) => {
                     Ok(Value::U32(&lhs * &rhs))
+                }
+                (BinaryOp::Div, Value::U32(lhs), Value::U32(rhs)) => {
+                    Ok(Value::U32(lhs.bvudiv(&rhs)))
+                }
+                (BinaryOp::Rem, Value::U32(lhs), Value::U32(rhs)) => {
+                    Ok(Value::U32(lhs.bvurem(&rhs)))
+                }
+                (BinaryOp::Div, Value::I32(lhs), Value::I32(rhs) | Value::U32(rhs))
+                | (BinaryOp::Div, Value::U32(lhs), Value::I32(rhs)) => {
+                    Ok(Value::I32(lhs.bvsdiv(&rhs)))
+                }
+                (BinaryOp::Rem, Value::I32(lhs), Value::I32(rhs) | Value::U32(rhs))
+                | (BinaryOp::Rem, Value::U32(lhs), Value::I32(rhs)) => {
+                    Ok(Value::I32(lhs.bvsrem(&rhs)))
+                }
+                (BinaryOp::SubChecked, Value::U32(lhs), Value::U32(rhs)) => {
+                    Ok(Value::U32(&lhs - &rhs))
                 }
                 (BinaryOp::MulWrap, Value::I32(lhs), Value::I32(rhs))
                 | (BinaryOp::MulWrap, Value::I32(lhs), Value::U32(rhs))
@@ -2072,6 +2329,8 @@ mod tests {
             ensures: vec![SpecExpr::Bool(true)],
             requires_spans: Vec::new(),
             ensures_spans: Vec::new(),
+            decimals: 0,
+            labels: Vec::new(),
         };
         assert!(matches!(
             check_contract(&invalid).unwrap(),
@@ -2669,5 +2928,56 @@ mod tests {
         assert!(candidate.try_eval(&[2, 3]).is_err());
         let module = axiom_wasm::emit(&candidate, 2).unwrap();
         assert!(axiom_wasm::run_with_args(&module, &[2, 3]).is_err());
+    }
+
+    #[test]
+    fn finds_rules_that_never_apply() {
+        let shadowed = parse("f(x)\n  x > 5 -> 1\n  x > 10 -> 2\n  -> 0\n").unwrap();
+        assert_eq!(unreachable_rules(&shadowed), vec![2]);
+        let covered = parse("g(x)\n  need x <= 3\n  x <= 3 -> 1\n  -> 0\n").unwrap();
+        assert_eq!(unreachable_rules(&covered), vec![2]);
+        let fine = parse("h(x, m)\n  x > m -> m\n  -> x\n").unwrap();
+        assert!(unreachable_rules(&fine).is_empty());
+    }
+
+    #[test]
+    fn gives_one_example_per_reachable_rule() {
+        let contract =
+            parse("fit(p, lo, hi)\n  need lo <= hi\n  p < lo -> lo\n  p > hi -> hi\n  -> p\n")
+                .unwrap();
+        let examples = rule_examples(&contract);
+        assert_eq!(
+            examples.iter().map(|e| e.0).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        for (rule, args, answer) in examples {
+            let (p, lo, hi) = (args[0], args[1], args[2]);
+            assert!(lo <= hi);
+            let expected = if p < lo {
+                lo
+            } else if p > hi {
+                hi
+            } else {
+                p
+            };
+            assert_eq!(answer, expected, "rule {rule} {args:?}");
+        }
+    }
+
+    #[test]
+    fn checked_subtraction_and_division_are_proven_safe() {
+        let valid = |source: &str| {
+            matches!(
+                check_contract(&parse(source).unwrap()).unwrap(),
+                ContractCheck::Valid
+            )
+        };
+        assert!(valid(
+            "d(price, rate)\n  need price <= 1000000\n  need rate <= 100\n  -> price - price * rate / 100\n"
+        ));
+        assert!(valid("g(a, b)\n  a > b -> a - b\n  -> b - a\n"));
+        assert!(!valid("f(a, b)\n  -> a - b\n"));
+        assert!(!valid("f(a, b)\n  a > b -> b - a\n  -> 0\n"));
+        assert!(!valid("f(a, b)\n  a > b or a > 3 -> a - b\n  -> 0\n"));
     }
 }

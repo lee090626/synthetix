@@ -26,11 +26,15 @@ pub fn parse(input: &str) -> Result<Contract, String> {
 
 pub fn parse_module(input: &str) -> Result<Module, String> {
     if simple::is_simple(input) {
-        let translated = simple::translate(input)?;
-        let mut parser = Parser::new(Lexer::new(&translated))?;
-        let module = parser.parse_module()?;
+        let with_line = |error: String| simple::show_source_line(error, input);
+        let (translated, decimals) = simple::translate_with_decimals(input).map_err(with_line)?;
+        let mut parser = Parser::new(Lexer::new(&translated)).map_err(with_line)?;
+        let mut module = parser.parse_module().map_err(with_line)?;
+        simple::apply_decimals(&mut module, &decimals)?;
+        let mut known = Vec::new();
         for contract in &module.contracts {
-            simple::check_ranges(contract)?;
+            let (low, high) = simple::check_ranges(contract, &known)?;
+            known.push((contract.name.clone(), low, high));
         }
         return Ok(module);
     }
@@ -475,9 +479,27 @@ fn numeric_type(lhs: &SpecExpr, lhs_type: &Type, rhs: &SpecExpr, rhs_type: &Type
     match (lhs_type, rhs_type) {
         (Type::U32, Type::U32) => Some(Type::U32),
         (Type::I32, Type::I32) => Some(Type::I32),
-        (Type::I32, Type::U32) if matches!(rhs, SpecExpr::Number(_)) => Some(Type::I32),
-        (Type::U32, Type::I32) if matches!(lhs, SpecExpr::Number(_)) => Some(Type::I32),
+        (Type::I32, Type::U32) if is_literal(rhs) => Some(Type::I32),
+        (Type::U32, Type::I32) if is_literal(lhs) => Some(Type::I32),
         _ => None,
+    }
+}
+
+/// A number, or arithmetic on numbers only (`0 -% 5` is a written `-5`); it
+/// takes the type of the value it meets.
+pub fn is_literal(expr: &SpecExpr) -> bool {
+    match expr {
+        SpecExpr::Number(_) => true,
+        SpecExpr::Binary(
+            BinaryOp::AddWrap
+            | BinaryOp::SubWrap
+            | BinaryOp::SubChecked
+            | BinaryOp::MulWrap
+            | BinaryOp::Div,
+            lhs,
+            rhs,
+        ) => is_literal(lhs) && is_literal(rhs),
+        _ => false,
     }
 }
 
@@ -639,10 +661,13 @@ pub fn type_of_expr(
             }
             let then_type = type_of_expr(then_branch, names, result_type)?;
             let else_type = type_of_expr(else_branch, names, result_type)?;
-            if then_type != else_type {
-                return Err("if branches must have the same type".to_string());
+            if then_type == else_type {
+                return Ok(then_type);
             }
-            Ok(then_type)
+            match numeric_type(then_branch, &then_type, else_branch, &else_type) {
+                Some(ty) => Ok(ty),
+                None => Err("if branches must have the same type".to_string()),
+            }
         }
         SpecExpr::Call(name, _) => Err(format!(
             "unresolved contract call: {name}; use project mode"
@@ -653,7 +678,10 @@ pub fn type_of_expr(
             match op {
                 BinaryOp::AddWrap
                 | BinaryOp::SubWrap
+                | BinaryOp::SubChecked
                 | BinaryOp::MulWrap
+                | BinaryOp::Div
+                | BinaryOp::Rem
                 | BinaryOp::Shl
                 | BinaryOp::BitAnd
                 | BinaryOp::BitOr

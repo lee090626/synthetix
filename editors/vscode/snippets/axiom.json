@@ -1,110 +1,49 @@
 {
-  "program": {
-    "prefix": "program",
+  "rule": {
+    "prefix": "rule",
     "body": [
-      "program ${1:name}(${2:x}: number) -> number {",
-      "\tgives answer equals ${2} plus ${3:1};",
-      "}"
+      "${1:name}(${2:x})",
+      "  need ${2} <= ${3:1000}",
+      "",
+      "  ${4:condition} -> ${5:value}",
+      "  -> ${6:value}"
     ],
-    "description": "Create an easy-word Axiom program"
+    "description": "A rule: need lines, condition -> value lines, and a final -> value"
   },
-  "contract": {
-    "prefix": "contract",
+  "need": {
+    "prefix": "need",
+    "body": "need ${1:x} <= ${2:1000}",
+    "description": "Only accept inputs that meet this"
+  },
+  "case": {
+    "prefix": "->",
+    "body": "${1:condition} -> ${2:value}",
+    "description": "If the condition holds, this value is the answer"
+  },
+  "page": {
+    "prefix": "page",
     "body": [
-      "contract ${1:name}(${2:x: u32}) -> u32 {",
-      "\tensures result == ${3}${2/(.*):.*/$1/};",
-      "}"
+      "from ${1:logic}: ${2:rule}",
+      "",
+      "page ${3:Main}",
+      "  save ${4:a} = 0",
+      "  result = 0",
+      "",
+      "  ask \"${5:A}\" for ${4}",
+      "  show result",
+      "  when \"${6:Go}\" is clicked",
+      "    result = ${2}(${4})"
     ],
-    "description": "Create an Axiom contract"
-  },
-  "ensures": {
-    "prefix": "ensures",
-    "body": "ensures result == ${1:x};",
-    "description": "Add an ensures clause"
-  },
-  "requires": {
-    "prefix": "requires",
-    "body": "requires ${1:x != 0};",
-    "description": "Add a requires clause"
+    "description": "A page that uses a rule"
   },
   "when": {
     "prefix": "when",
-    "body": "when ${1:x is_not 0};",
-    "description": "Add an easy-word precondition"
+    "body": ["when \"${1:Label}\" is clicked", "  ${2:target} = ${3:rule}(${4})"],
+    "description": "On click, set a value to a rule's answer"
   },
-  "gives": {
-    "prefix": "gives",
-    "body": "gives answer equals ${1:x};",
-    "description": "Add an easy-word result clause"
-  },
-  "minimum": {
-    "prefix": "minimum",
-    "body": "gives answer equals if ${1:a} < ${2:b} { ${1} } else { ${2} };",
-    "description": "Add a conditional result expression"
-  },
-  "let": {
-    "prefix": "let",
-    "body": "gives answer equals let ${1:value} = ${2:x} in ${1};",
-    "description": "Add a named intermediate expression"
-  },
-  "web-counter": {
-    "prefix": "web-counter",
-    "body": [
-      "import { ${1:increment} } from \"./${2:logic.ax}\";",
-      "",
-      "page ${3:Counter} {",
-      "\tstate ${4:count}: number = 0;",
-      "\tshow ${4};",
-      "\tbutton \"${5:더하기}\" updates ${4} with ${1}(${4});",
-      "}"
-    ],
-    "description": "Create a small Synthetix web page"
-  },
-  "web-conditional": {
-    "prefix": "web-conditional",
-    "body": [
-      "state ${1:ready}: bool = false;",
-      "when ${1} show \"${2:준비됨}\";"
-    ],
-    "description": "Show text when a verified boolean state is true"
-  },
-  "record": {
-    "prefix": "record",
-    "body": [
-      "record ${1:Todo} {",
-      "\t${2:title}: text;",
-      "\t${3:done}: bool;",
-      "}"
-    ],
-    "description": "Define a small web data record"
-  },
-  "web-todo": {
-    "prefix": "web-todo",
-    "body": [
-      "state ${1:todos}: list<${2:Todo}> = [];",
-      "state ${3:draft}: text = \"\";",
-      "persist ${1};",
-      "input ${3} placeholder \"${4:할 일을 입력하세요}\";",
-      "button \"${5:추가}\" adds ${1} with ${2} { title: ${3}, done: false };",
-      "list ${1} as ${6:todo} {",
-      "\tshow ${6}.title;",
-      "\twhen ${6}.done show \"완료됨\";",
-      "}"
-    ],
-    "description": "Create a dynamic Todo list page"
-  },
-  "web-input": {
-    "prefix": "web-input",
-    "body": "input ${1:draft} placeholder \"${2:입력하세요}\";",
-    "description": "Connect a text state to an input"
-  },
-  "reducer": {
-    "prefix": "reducer",
-    "body": [
-      "reducer ${1:refresh} {",
-      "\tupdates ${2:count} with ${3:increment}(${2});",
-      "}"
-    ],
-    "description": "Group verified updates into one button action"
+  "ask": {
+    "prefix": "ask",
+    "body": "ask \"${2:Label}\" for ${1:name}",
+    "description": "An input box"
   }
 }

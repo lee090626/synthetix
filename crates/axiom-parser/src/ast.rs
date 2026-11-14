@@ -40,21 +40,24 @@ pub struct Span {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BinaryOp {
-    AddWrap, // +%
-    SubWrap, // -%
-    MulWrap, // *%
-    Shl,     // <<
-    BitAnd,  // &
-    BitOr,   // |
-    BitXor,  // ^
-    Eq,      // ==
-    Ne,      // !=
-    Lt,      // <
-    Le,      // <=
-    Gt,      // >
-    Ge,      // >=
-    And,     // &&
-    Or,      // ||
+    AddWrap,    // +%
+    SubWrap,    // -%
+    SubChecked, // -! (must not go below 0; proven by the verifier)
+    MulWrap,    // *%
+    Div,        // / (unsigned, rounds down; divisor must be non-zero)
+    Rem,        // % (unsigned remainder; divisor must be non-zero)
+    Shl,        // <<
+    BitAnd,     // &
+    BitOr,      // |
+    BitXor,     // ^
+    Eq,         // ==
+    Ne,         // !=
+    Lt,         // <
+    Le,         // <=
+    Gt,         // >
+    Ge,         // >=
+    And,        // &&
+    Or,         // ||
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +101,11 @@ pub struct Contract {
     pub ensures: Vec<SpecExpr>,
     pub requires_spans: Vec<Span>,
     pub ensures_spans: Vec<Span>,
+    /// Decimal places of every number (`with 2 decimals`); values are stored
+    /// as whole numbers times 10^decimals. 0 means whole numbers.
+    pub decimals: u32,
+    /// Text answers: the rule returns `n` for `labels[n]`. Empty for numbers.
+    pub labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +120,8 @@ pub struct State {
     pub name: String,
     pub ty: Type,
     pub initial: SpecExpr,
+    /// Decimal places shown and typed for this value (see `Contract::decimals`).
+    pub decimals: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

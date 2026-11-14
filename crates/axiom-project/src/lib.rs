@@ -944,6 +944,30 @@ fn verification_order(
                     dependency.call_name
                 ));
             }
+            if let Some(callee) = definitions.get(target)
+                && !callee.contract.labels.is_empty()
+            {
+                return Err(format!(
+                    "{}: {} uses {}, which answers with text that only a page can show",
+                    key.0.display(),
+                    key.1,
+                    dependency.call_name
+                ));
+            }
+            // Calls within one file convert between places when parsed.
+            if let Some(callee) = definitions.get(target)
+                && target.0 != key.0
+                && callee.contract.decimals != definition.contract.decimals
+            {
+                return Err(format!(
+                    "{}: {} has {} decimal places but uses {} from another file, which has {}; give both the same `with N decimals`",
+                    key.0.display(),
+                    key.1,
+                    definition.contract.decimals,
+                    dependency.call_name,
+                    callee.contract.decimals
+                ));
+            }
             visit(target, definitions, scopes, visiting, visited, ordered)?;
         }
         visiting.pop();
@@ -1440,7 +1464,7 @@ fn validate_page(
     for state in &page.states {
         let initial_type =
             page_expr_type(&state.initial, &states, records, &HashMap::new(), source)?;
-        if !types_compatible(&initial_type, &state.ty) {
+        if !types_compatible_expr(&initial_type, &state.ty, &state.initial) {
             return Err(format!(
                 "{}: state {} initial value has type {:?}, expected {:?}",
                 source.display(),
@@ -1494,6 +1518,90 @@ fn validate_page(
         &page.reducers,
         source,
     )?;
+    validate_decimals(page, scope, definitions, source)?;
+    Ok(())
+}
+
+/// Values with decimals are stored times 10^places, so a button passes them
+/// only to rules with the same places.
+fn validate_decimals(
+    page: &Page,
+    scope: Option<&HashMap<String, ContractKey>>,
+    definitions: &HashMap<ContractKey, Definition>,
+    source: &Path,
+) -> Result<(), String> {
+    let places: HashMap<&str, u32> = page
+        .states
+        .iter()
+        .map(|state| (state.name.as_str(), state.decimals))
+        .collect();
+    let of_state = |name: &str| places.get(name).copied().unwrap_or(0);
+    let uses_decimals = |expr: &SpecExpr| {
+        fn walk(expr: &SpecExpr, of_state: &dyn Fn(&str) -> u32) -> bool {
+            match expr {
+                SpecExpr::Ident(name) => of_state(name) > 0,
+                SpecExpr::Binary(_, left, right) => walk(left, of_state) || walk(right, of_state),
+                SpecExpr::If(condition, then, otherwise) => {
+                    walk(condition, of_state) || walk(then, of_state) || walk(otherwise, of_state)
+                }
+                SpecExpr::Call(_, args) => args.iter().any(|arg| walk(arg, of_state)),
+                _ => false,
+            }
+        }
+        walk(expr, &of_state)
+    };
+    let check_call = |state: &str, function: &str, args: &[SpecExpr]| -> Result<(), String> {
+        let rule_places = scope
+            .and_then(|scope| scope.get(function))
+            .and_then(|key| definitions.get(key))
+            .map_or(0, |definition| definition.contract.decimals);
+        let mismatch = |what: &str, found: u32| {
+            format!(
+                "{}: {what} has {found} decimal places but {function} has {rule_places}; use the same `with N decimals`",
+                source.display()
+            )
+        };
+        if of_state(state) != rule_places {
+            return Err(mismatch(state, of_state(state)));
+        }
+        for arg in args {
+            match arg {
+                SpecExpr::Ident(name) if of_state(name) != rule_places => {
+                    return Err(mismatch(name, of_state(name)));
+                }
+                SpecExpr::Ident(_) => {}
+                _ if rule_places > 0 => {
+                    return Err(format!(
+                        "{}: {function} has decimals; pass saved values by name",
+                        source.display()
+                    ));
+                }
+                other if uses_decimals(other) => {
+                    return Err(format!(
+                        "{}: {function} has no decimals but gets a value with decimals",
+                        source.display()
+                    ));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    };
+    // Buttons and `when ... is clicked` blocks (reducers) call rules alike.
+    for element in &page.elements {
+        if let PageElement::Button {
+            state,
+            function,
+            args,
+            ..
+        } = element
+        {
+            check_call(state, function, args)?;
+        }
+    }
+    for update in page.reducers.iter().flat_map(|reducer| &reducer.updates) {
+        check_call(&update.state, &update.function, &update.args)?;
+    }
     Ok(())
 }
 
@@ -1639,7 +1747,10 @@ fn page_expr_type(
                 }
                 axiom_parser::BinaryOp::AddWrap
                 | axiom_parser::BinaryOp::SubWrap
+                | axiom_parser::BinaryOp::SubChecked
                 | axiom_parser::BinaryOp::MulWrap
+                | axiom_parser::BinaryOp::Div
+                | axiom_parser::BinaryOp::Rem
                 | axiom_parser::BinaryOp::Shl
                 | axiom_parser::BinaryOp::BitAnd
                 | axiom_parser::BinaryOp::BitOr
@@ -1678,8 +1789,8 @@ fn page_numeric_type(
     match (lhs_type, rhs_type) {
         (Type::U32, Type::U32) => Some(Type::U32),
         (Type::I32, Type::I32) => Some(Type::I32),
-        (Type::I32, Type::U32) if matches!(rhs, SpecExpr::Number(_)) => Some(Type::I32),
-        (Type::U32, Type::I32) if matches!(lhs, SpecExpr::Number(_)) => Some(Type::I32),
+        (Type::I32, Type::U32) if axiom_parser::is_literal(rhs) => Some(Type::I32),
+        (Type::U32, Type::I32) if axiom_parser::is_literal(lhs) => Some(Type::I32),
         _ => None,
     }
 }
@@ -1777,7 +1888,13 @@ fn validate_call(
             args.len()
         ));
     }
-    if !types_compatible(&definition.contract.return_type, &state_type) {
+    // A rule with text answers returns a position the runtime turns into text.
+    let return_type = if definition.contract.labels.is_empty() {
+        definition.contract.return_type.clone()
+    } else {
+        Type::Text
+    };
+    if !types_compatible(&return_type, &state_type) {
         return Err(format!(
             "{}: target {} and contract {} have different types",
             source.display(),
@@ -1788,7 +1905,10 @@ fn validate_call(
     for (index, arg) in args.iter().enumerate() {
         let actual_type = page_expr_type(arg, states, records, locals, source)?;
         let expected_type = &definition.contract.params[index].ty;
-        if !types_compatible_expr(&actual_type, expected_type, arg) {
+        // A whole number may go into a `can be negative` rule; the runtime
+        // rejects values above i32::MAX before the call.
+        let widens = actual_type == Type::U32 && expected_type == &Type::I32;
+        if !widens && !types_compatible_expr(&actual_type, expected_type, arg) {
             return Err(format!(
                 "{}: argument {} of {} has type {:?}, expected {:?}",
                 source.display(),

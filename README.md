@@ -139,11 +139,12 @@ page Shop
   save price, min, max = 0
   result = 0
 
-  ask price "Price"
-  ask min "Min"
-  ask max "Max"
+  ask "Price" for price
+  ask "Min" for min
+  ask "Max" for max
   show result
-  button "Fit" -> result = fit_price(price, min, max)
+  when "Fit" is clicked
+    result = fit_price(price, min, max)
 ```
 
 See [writing specs](docs/writing-specs.md) for the full syntax and
@@ -152,3 +153,7 @@ See [writing specs](docs/writing-specs.md) for the full syntax and
 
 The old contract syntax (`contract`, `ensures`, `{ }`) is no longer accepted in
 user files. It remains only as the internal format and in `tests/legacy`.
+
+## License
+
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.

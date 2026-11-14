@@ -14,6 +14,14 @@ pub enum Expr {
     Sub(Box<Expr>, Box<Expr>),
     /// Multiplication with wrap-around (modulo 2^32)
     Mul(Box<Expr>, Box<Expr>),
+    /// Unsigned division rounding down; a zero divisor is an error
+    Div(Box<Expr>, Box<Expr>),
+    /// Unsigned remainder; a zero divisor is an error
+    Rem(Box<Expr>, Box<Expr>),
+    /// Signed division rounding toward 0; a zero divisor or i32::MIN / -1 is an error
+    SDiv(Box<Expr>, Box<Expr>),
+    /// Signed remainder (sign of the dividend); same errors as `SDiv`
+    SRem(Box<Expr>, Box<Expr>),
     /// Left shift (masked by 31 in standard bit-vector / WASM semantics)
     Shl(Box<Expr>, Box<Expr>),
     /// Bitwise AND
@@ -69,6 +77,22 @@ impl Expr {
             Expr::Add(lhs, rhs) => Ok(lhs.try_eval(args)?.wrapping_add(rhs.try_eval(args)?)),
             Expr::Sub(lhs, rhs) => Ok(lhs.try_eval(args)?.wrapping_sub(rhs.try_eval(args)?)),
             Expr::Mul(lhs, rhs) => Ok(lhs.try_eval(args)?.wrapping_mul(rhs.try_eval(args)?)),
+            Expr::Div(lhs, rhs) => lhs
+                .try_eval(args)?
+                .checked_div(rhs.try_eval(args)?)
+                .ok_or_else(|| "division by zero".to_string()),
+            Expr::Rem(lhs, rhs) => lhs
+                .try_eval(args)?
+                .checked_rem(rhs.try_eval(args)?)
+                .ok_or_else(|| "division by zero".to_string()),
+            Expr::SDiv(lhs, rhs) => (lhs.try_eval(args)? as i32)
+                .checked_div(rhs.try_eval(args)? as i32)
+                .map(|value| value as u32)
+                .ok_or_else(|| "division by zero or overflow".to_string()),
+            Expr::SRem(lhs, rhs) => (lhs.try_eval(args)? as i32)
+                .checked_rem(rhs.try_eval(args)? as i32)
+                .map(|value| value as u32)
+                .ok_or_else(|| "division by zero or overflow".to_string()),
             Expr::Shl(lhs, rhs) => {
                 let shift = rhs.try_eval(args)? & 31;
                 Ok(lhs.try_eval(args)?.wrapping_shl(shift))
