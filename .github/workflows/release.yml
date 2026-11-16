@@ -2,6 +2,11 @@ name: Release
 
 on:
   push:
+    # Builds on main keep a build cache that tag runs can read (a tag cannot
+    # read another tag's cache), so a release skips recompiling Z3 on Windows.
+    # Publishing stays limited to tags.
+    branches:
+      - main
     tags:
       - "v*"
   workflow_dispatch:
