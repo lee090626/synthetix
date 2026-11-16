@@ -15,6 +15,9 @@ concurrency:
 env:
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
+  # z3-sys downloads Z3's release through the GitHub API; a token avoids the
+  # shared runner IP's anonymous rate limit.
+  READ_ONLY_GITHUB_TOKEN: ${{ github.token }}
 
 jobs:
   test:
@@ -27,7 +30,9 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
+          # One copy on the default branch, which every branch and PR can read;
+          # per-branch copies pushed the repository past its 10GB cache limit.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
       - name: Run tests

@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write
 
+env:
+  # z3-sys downloads Z3's release through the GitHub API (Linux and macOS).
+  READ_ONLY_GITHUB_TOKEN: ${{ github.token }}
+
 jobs:
   test:
     name: Workspace tests
