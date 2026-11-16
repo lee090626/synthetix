@@ -594,6 +594,8 @@ const __externs = __EXTERNS__;
 let __exports = null;
 let __state = {};
 let __lastError = null;
+// Dev server build error; while set it owns the error overlay over application errors.
+let __buildError = null;
 // Set to the load error when stored state cannot be loaded; saving would overwrite the user's data.
 let __persistenceBlocked = null;
 let __lastTransition = null;
@@ -705,13 +707,31 @@ function applicationError(error, functionName = null, sourceOverride = null) {
   return wrapped;
 }
 
+// The overlay shows one error, by priority: build error, then the last application
+// error (a blocked store re-reports itself on clear), then nothing.
+function renderErrorOverlay() {
+  const node = document.querySelector('#synthetix-error');
+  delete node.dataset.dev;
+  delete node.dataset.category;
+  delete node.dataset.source;
+  if (__buildError) {
+    node.hidden = false;
+    node.textContent = __buildError;
+    node.dataset.dev = 'build';
+  } else if (__lastError) {
+    node.hidden = false;
+    node.textContent = __lastError.message;
+    node.dataset.category = __lastError.category;
+    node.dataset.source = __lastError.source;
+  } else {
+    node.hidden = true;
+    node.textContent = '';
+  }
+}
+
 function reportApplicationError(error, functionName = null, sourceOverride = null) {
   __lastError = applicationError(error, functionName, sourceOverride);
-  const node = document.querySelector('#synthetix-error');
-  node.hidden = false;
-  node.dataset.category = __lastError.category;
-  node.dataset.source = __lastError.source;
-  node.textContent = __lastError.message;
+  renderErrorOverlay();
   return __lastError;
 }
 
@@ -721,11 +741,7 @@ function clearApplicationError() {
     return;
   }
   __lastError = null;
-  const node = document.querySelector('#synthetix-error');
-  node.hidden = true;
-  node.textContent = '';
-  delete node.dataset.category;
-  delete node.dataset.source;
+  renderErrorOverlay();
 }
 
 function runApplicationAction(action) {
@@ -1264,12 +1280,16 @@ async function boot() {
     get lastError() { return __lastError; },
     get lastTransition() { return __lastTransition; },
     get lastEffect() { return __lastEffect; },
+    // 'BLOCKED' while stored data could not be loaded and saving is paused.
+    get persistence() { return __persistenceBlocked ? 'BLOCKED' : 'OK'; },
   };
   render();
+  return window.synthetix;
 }
 
-boot().catch((error) => {
-  const node = document.querySelector('#synthetix-error');
+// Resolves with window.synthetix once the app runs; rejects if it failed to start.
+window.synthetixReady = boot();
+window.synthetixReady.catch((error) => {
   reportApplicationError(error);
 });
 
@@ -1282,23 +1302,15 @@ boot().catch((error) => {
 let __devVersion = null;
 setInterval(async () => {
   try {
-    const response = await fetch('/__synthetix/version', { cache: 'no-store' });
+    const response = await fetch('/__synthetix/status', { cache: 'no-store' });
     if (!response.ok) return;
-    const next = await response.text();
-    if (__devVersion === null) __devVersion = next;
-    else if (next !== __devVersion) location.reload();
-    const errorResponse = await fetch('/__synthetix/error', { cache: 'no-store' });
-    const errorNode = document.querySelector('#synthetix-error');
-    const error = await errorResponse.text();
-    // Only own the overlay for build errors; application errors stay until the app clears them.
-    if (error) {
-      errorNode.hidden = false;
-      errorNode.textContent = error;
-      errorNode.dataset.dev = 'build';
-    } else if (errorNode.dataset.dev === 'build') {
-      errorNode.hidden = true;
-      errorNode.textContent = '';
-      delete errorNode.dataset.dev;
+    const { version, error } = await response.json();
+    if (__devVersion === null) __devVersion = version;
+    else if (version !== __devVersion) location.reload();
+    // Application errors stay underneath and return once the build error clears.
+    if ((error ?? null) !== __buildError) {
+      __buildError = error ?? null;
+      renderErrorOverlay();
     }
   } catch (_) {}
 }, 500);
@@ -1923,6 +1935,20 @@ fn handle_request(mut stream: TcpStream, output_dir: &Path, state: &Arc<Mutex<De
         );
         return;
     }
+    // One snapshot of both, so a rebuild between two requests cannot mix them.
+    if path == "/__synthetix/status" {
+        let (version, error) = state
+            .lock()
+            .map(|state| (state.version, state.error.clone()))
+            .unwrap_or_default();
+        let error = error.map_or_else(|| "null".to_string(), |error| json_string(&error));
+        respond(
+            &mut stream,
+            "application/json; charset=utf-8",
+            &format!("{{\"version\":{version},\"error\":{error}}}"),
+        );
+        return;
+    }
     if path == "/__synthetix/error" {
         let error = state
             .lock()
@@ -2408,6 +2434,7 @@ mod tests {
         assert!(javascript.contains("fetch('./app.wasm')"));
         assert!(!javascript.contains("/__synthetix/version"));
         assert!(!javascript.contains("/__synthetix/error"));
+        assert!(!javascript.contains("/__synthetix/status"));
         assert!(!javascript.contains("setInterval("));
     }
 
@@ -2588,8 +2615,7 @@ mod tests {
         let mut cache = VerificationCache::default();
         build_with_cache(&config, &output_dir, &mut cache, true).unwrap();
         let dev_javascript = std::fs::read_to_string(output_dir.join("app.js")).unwrap();
-        assert!(dev_javascript.contains("/__synthetix/version"));
-        assert!(dev_javascript.contains("/__synthetix/error"));
+        assert!(dev_javascript.contains("/__synthetix/status"));
         assert!(dev_javascript.contains("}, 500);"));
         let project = axiom_project::load(&config).unwrap();
         let mut watched_files = project.files;
@@ -2676,7 +2702,7 @@ mod tests {
         let server_state = Arc::clone(&state);
         let server_output = output_dir.clone();
         let server = thread::spawn(move || {
-            for _ in 0..6 {
+            for _ in 0..8 {
                 let (stream, _) = listener.accept().unwrap();
                 handle_request(stream, &server_output, &server_state);
             }
@@ -2686,6 +2712,11 @@ mod tests {
         assert_eq!(failed_version.split("\r\n\r\n").nth(1), Some("2"));
         let failed_error = get(address, "/__synthetix/error");
         assert!(failed_error.contains("main.ax"));
+        let failed_status = get(address, "/__synthetix/status");
+        let failed_status: serde_json::Value =
+            serde_json::from_str(failed_status.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(failed_status["version"], 2);
+        assert!(failed_status["error"].as_str().unwrap().contains("main.ax"));
 
         std::fs::write(
             &source,
@@ -2709,6 +2740,11 @@ mod tests {
         assert_eq!(recovered_version.split("\r\n\r\n").nth(1), Some("3"));
         let recovered_error = get(address, "/__synthetix/error");
         assert_eq!(recovered_error.split("\r\n\r\n").nth(1), Some(""));
+        let recovered_status = get(address, "/__synthetix/status");
+        assert_eq!(
+            recovered_status.split("\r\n\r\n").nth(1),
+            Some("{\"version\":3,\"error\":null}")
+        );
         let bundle = get(address, "/app.js");
         assert!(bundle.contains("200 OK"));
         assert!(bundle.contains("WebAssembly.instantiate"));
@@ -3272,8 +3308,7 @@ global.document = {{
 global.setInterval = (callback) => {{ poll = callback; return 0; }};
 global.fetch = async (url) => {{
   if (url === './app.wasm') return {{ ok: true, arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) }};
-  if (url === '/__synthetix/version') return {{ ok: true, text: async () => devVersion }};
-  if (url === '/__synthetix/error') return {{ ok: true, text: async () => devError }};
+  if (url === '/__synthetix/status') return {{ ok: true, json: async () => ({{ version: devVersion, error: devError || null }}) }};
   return {{ ok: false, text: async () => '' }};
 }};
 vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
@@ -3324,13 +3359,18 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
   const effectFailureLine = [effectFailure?.category, effectFailure?.source, window.synthetix.state.result, String(error.textContent.includes('COUNTEREXAMPLE'))].join('|');
   devError = 'main.ax:3:1: rebuild failed';
   await poll();
-  const reloadErrorLine = [reloadCount, String(error.hidden), error.textContent].join('|');
-  devVersion = '2';
+  const reloadErrorLine = [reloadCount, String(error.hidden), error.textContent, error.dataset.dev,
+    String(error.dataset.category)].join('|');
   devError = '';
   await poll();
-  const reloadLine = [reloadCount, String(error.hidden), error.textContent].join('|');
+  const underneathLine = [String(error.hidden), String(error.dataset.dev), error.dataset.category,
+    String(error.textContent === window.synthetix.lastError.message)].join('|');
+  devVersion = '2';
+  await poll();
+  const reloadLine = [reloadCount, window.synthetix.persistence,
+    String(await window.synthetixReady === window.synthetix)].join('|');
   process.stdout.write([output.join(','), invalidLine, flowLine, effectLine, callErrorLine,
-    effectFailureLine, reloadErrorLine, reloadLine].join('\n'));
+    effectFailureLine, reloadErrorLine, underneathLine, reloadLine].join('\n'));
 }})().catch((error) => {{ console.error(error); process.exitCode = 1; }});
 "#
         );
@@ -3373,8 +3413,17 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
             lines.next(),
             Some("APPLICATION_RUNTIME_ERROR|main.ax|6|false")
         );
-        assert_eq!(lines.next(), Some("0|false|main.ax:3:1: rebuild failed"));
-        assert_eq!(lines.next(), Some("1|true|"));
+        // A build error covers the application error and clears its category.
+        assert_eq!(
+            lines.next(),
+            Some("0|false|main.ax:3:1: rebuild failed|build|undefined")
+        );
+        // Once the build error clears, the application error underneath returns.
+        assert_eq!(
+            lines.next(),
+            Some("false|undefined|APPLICATION_RUNTIME_ERROR|true")
+        );
+        assert_eq!(lines.next(), Some("1|OK|true"));
         assert!(lines.next().is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -3711,7 +3760,7 @@ async function launch(storage, migration = null) {
   const renamedInput = renamed.root.children.find((node) => node.tagName === 'input');
   renamedInput.value = 'overwrite';
   renamedInput.dispatch('change');
-  const renamedResult = [renamed.window.synthetix.lastError?.category,
+  const renamedResult = [renamed.window.synthetix.persistence, renamed.window.synthetix.lastError?.category,
     String(renamed.error.textContent.includes('stored data was kept')),
     String(renamedStorage.values.get(key) === renamedValue)].join('|');
 
@@ -3737,7 +3786,7 @@ async function launch(storage, migration = null) {
   const retry = await launch(retryStorage);
   retry.window.synthetix.registerStorageMigration(({ values }) => ({ draft: `${values.draft} migrated` }));
   await retry.window.synthetix.restore();
-  const retryResult = [retry.window.synthetix.state.draft,
+  const retryResult = [retry.window.synthetix.persistence, retry.window.synthetix.state.draft,
     JSON.parse(retryStorage.values.get(key)).version,
     retry.window.synthetix.lastError?.category ?? 'none'].join('|');
 
@@ -3791,12 +3840,15 @@ async function launch(storage, migration = null) {
         assert_eq!(lines.next(), Some("APPLICATION_RUNTIME_ERROR|0"));
         assert_eq!(lines.next(), Some("APPLICATION_RUNTIME_ERROR||99"));
         assert_eq!(lines.next(), Some("Legacy|old|2|1"));
-        assert_eq!(lines.next(), Some("Retry migrated|2|none"));
+        assert_eq!(lines.next(), Some("OK|Retry migrated|2|none"));
         assert_eq!(lines.next(), Some("APPLICATION_RUNTIME_ERROR||1"));
         assert_eq!(lines.next(), Some("Legacy|Legacy todo|2"));
         assert_eq!(lines.next(), Some("APPLICATION_RUNTIME_ERROR|0"));
         assert_eq!(lines.next(), Some("APPLICATION_RUNTIME_ERROR|false"));
-        assert_eq!(lines.next(), Some("APPLICATION_RUNTIME_ERROR|true|true"));
+        assert_eq!(
+            lines.next(),
+            Some("BLOCKED|APPLICATION_RUNTIME_ERROR|true|true")
+        );
         assert!(lines.next().is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
