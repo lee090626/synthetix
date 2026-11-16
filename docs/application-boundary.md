@@ -196,6 +196,38 @@ errors. The generated-runtime test covers late stale responses, explicit cancel,
 retry after a transient failure, and partial success/failure with real generated
 WASM.
 
+Each request moves through these states:
+
+| From | To | When |
+|---|---|---|
+| (new) | `LOADING` | `requestEffect` or `requestExtern` starts |
+| `LOADING` | `SUCCEEDED` | the adapter returns a valid response |
+| `LOADING` | `ERROR` | the adapter fails or the response is invalid; `retryEffect` can repeat it |
+| `LOADING` | `CANCELLED` | `cancelEffect` matches it, or its signal aborts |
+| `LOADING` | `STALE` | a newer request for the same target starts |
+
+`STALE` is internal: a superseded request never becomes `lastEffect` again, so
+`lastEffect` shows only the other four.
+
+## Runtime status
+
+`window.synthetixReady` is a promise that resolves with `window.synthetix` once
+the app has started, or rejects with the startup error. Wait on it instead of
+polling for `window.synthetix`.
+
+`window.synthetix.persistence` is `'OK'`, or `'BLOCKED'` while stored data could
+not be loaded. While blocked, nothing is saved, so the stored data is never
+overwritten; a successful `restore()` returns it to `'OK'`.
+
+The error overlay shows one error, by priority: a dev build error, then the last
+application error, then nothing. A blocked store re-reports itself when an error
+is cleared. A build error hides the application error underneath, which returns
+once the build is fixed.
+
+`axiom dev` serves `/__synthetix/status` as `{"version": n, "error": string |
+null}`: one snapshot of the build version and error. The older
+`/__synthetix/version` and `/__synthetix/error` endpoints remain.
+
 ## v5.7 Web Integration
 
 The Node integration tests instantiate generated `app.wasm` through generated

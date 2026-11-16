@@ -2,12 +2,21 @@ name: Release
 
 on:
   push:
+    # Builds on main keep a build cache that tag runs can read (a tag cannot
+    # read another tag's cache), so a release skips recompiling Z3 on Windows.
+    # Publishing stays limited to tags.
+    branches:
+      - main
     tags:
       - "v*"
   workflow_dispatch:
 
 permissions:
   contents: write
+
+env:
+  # z3-sys downloads Z3's release through the GitHub API (Linux and macOS).
+  READ_ONLY_GITHUB_TOKEN: ${{ github.token }}
 
 jobs:
   test:

@@ -7,7 +7,15 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 axiom-ami = { path = "../axiom-ami" }
 axiom-parser = { path = "../axiom-parser" }
-z3 = { version = "0.21", features = ["bundled"] }
+
+# Linux and macOS link Z3's official static release instead of compiling it
+# (minutes instead of ~20). Its Windows archive has no static library, so
+# Windows still builds Z3 from source to keep axiom.exe self-contained.
+[target.'cfg(not(windows))'.dependencies]
+z3 = { version = "0.21", features = ["gh-release"] }
+
+[target.'cfg(windows)'.dependencies]
+z3 = { version = "0.21", features = ["vendored"] }
 
 [dev-dependencies]
 axiom-wasm = { path = "../axiom-wasm" }

@@ -1,7 +1,9 @@
 # Fresh checkout setup
 
-Synthetix needs Rust and the bundled Z3 build; no system Z3 installation is
-required.
+Synthetix needs Rust; no system Z3 installation is required. On Linux and
+macOS the first build downloads Z3's official static release (network needed
+once); on Windows it compiles Z3 from source, which takes a while the first
+time.
 
 ```bash
 git clone <repository-url> synthetix
