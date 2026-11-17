@@ -92,6 +92,19 @@ cart(prices[3])
 
 A list has a fixed size from 1 to 16.
 
+Calculating with a whole list works item by item, and the answer is a list of
+the same size. Lists used together must have the same size:
+
+```
+# What each person still has to pay
+to_pay(paid[3], share[3]) can be negative
+  need paid >= 0 and paid <= 1000000
+  need share >= 0 and share <= 1000000
+  always -> share - paid
+```
+
+A page stores such an answer in a list: `owe = to_pay(paid, share)`.
+
 ### Decimals
 
 Add `with 2 decimals` (1 to 6 places) to the name line. Every value in the rule,

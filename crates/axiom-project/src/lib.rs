@@ -733,7 +733,28 @@ fn link_project_retained(
                     target.display()
                 ));
             }
-            for name in &import.names {
+            // A rule with an answer per item (`to_pay`) is `to_pay_1` .. `to_pay_N`.
+            let names: Vec<String> = import
+                .names
+                .iter()
+                .flat_map(|name| {
+                    if definitions.contains_key(&(target.clone(), name.clone())) {
+                        return vec![name.clone()];
+                    }
+                    let items: Vec<String> = (1..)
+                        .map(|item| format!("{name}_{item}"))
+                        .take_while(|item| {
+                            definitions.contains_key(&(target.clone(), item.clone()))
+                        })
+                        .collect();
+                    if items.is_empty() {
+                        vec![name.clone()]
+                    } else {
+                        items
+                    }
+                })
+                .collect();
+            for name in &names {
                 let key = (target.clone(), name.clone());
                 let Some(definition) = definitions.get(&key) else {
                     return Err(format!(

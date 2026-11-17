@@ -523,8 +523,25 @@ fn page_line(
             let target = target.trim();
             check_name(target, line_no)?;
             let value = expression(value.trim(), line_no)?;
-            if let Some(click) = page.click.as_mut() {
-                click.sets.push((target.to_string(), value));
+            let Some(click) = page.click.as_mut() else {
+                return Ok(String::new());
+            };
+            // `balances = to_pay(paid, share)`: a list takes a rule's answer per item.
+            match (
+                lists.iter().find(|(list, _)| list == target),
+                value.split_once('('),
+            ) {
+                (Some((_, size)), Some((rule, args)))
+                    if check_name(rule.trim(), line_no).is_ok() =>
+                {
+                    for item in 1..=*size {
+                        click.sets.push((
+                            format!("{target}_{item}"),
+                            format!("{}_{item}({args}", rule.trim()),
+                        ));
+                    }
+                }
+                _ => click.sets.push((target.to_string(), value)),
             }
             Ok(String::new())
         }
@@ -1093,7 +1110,76 @@ impl Block {
             let condition = rule.condition.as_deref().unwrap_or_default();
             chain = format!("if {condition} {{ {} }} else {{ {chain} }}", rule.value);
         }
-        out[last.index] = format!("    ensures result == ({chain}); }}");
+        let mut size = None;
+        for rule in &self.rules {
+            let text = format!(
+                "{} {}",
+                rule.condition.as_deref().unwrap_or_default(),
+                rule.value
+            );
+            if let Some(n) = item_size(&text, &self.lists, rule.line_no)? {
+                if size.is_some_and(|size| size != n) {
+                    return Err(format!(
+                        "line {}: lists calculated together must have the same size",
+                        rule.line_no
+                    ));
+                }
+                size = Some(n);
+            }
+        }
+        let Some(size) = size else {
+            out[last.index] = format!("    ensures result == ({chain}); }}");
+            return Ok(());
+        };
+        // An answer per item: rule `name` becomes `name_1` .. `name_N`, each
+        // with the same inputs and `need` lines.
+        let head = self.name_line - 1;
+        let header = out[head].clone();
+        let needs: Vec<String> = out[head + 1..last.index]
+            .iter()
+            .filter(|line| !line.is_empty())
+            .cloned()
+            .collect();
+        let contract = |item: usize| {
+            header.replacen(
+                &format!("contract {}(", self.name),
+                &format!("contract {}_{item}(", self.name),
+                1,
+            )
+        };
+        out[head] = contract(1);
+        let mut last_line = format!(
+            "    ensures result == ({}); }}",
+            pick_item(&chain, &self.lists, 1)
+        );
+        for item in 2..=size {
+            last_line.push_str(&format!(
+                " {} {} ensures result == ({}); }}",
+                contract(item),
+                needs.join(" "),
+                pick_item(&chain, &self.lists, item)
+            ));
+        }
+        out[last.index] = last_line;
+        let places = decimals
+            .rules
+            .iter()
+            .find(|(rule, _)| rule == &self.name)
+            .map(|(_, p)| *p);
+        let labels = decimals
+            .labels
+            .iter()
+            .find(|(rule, _)| rule == &self.name)
+            .map(|(_, l)| l.clone());
+        for item in 1..=size {
+            let name = format!("{}_{item}", self.name);
+            if let Some(places) = places {
+                decimals.rules.push((name.clone(), places));
+            }
+            if let Some(labels) = labels.clone() {
+                decimals.labels.push((name, labels));
+            }
+        }
         Ok(())
     }
 }
@@ -1496,12 +1582,75 @@ fn rewrite_lists(
                     "line {line_no}: lists in one `need` line must have the same size"
                 ));
             }
-            None => out.push_str(&items(word, n).join(", ")),
+            // A whole list passed to another rule fills its list input;
+            // anywhere else it means "for each item" (see `ITEM`).
+            None if passes_whole(&out, tail) => out.push_str(&items(word, n).join(", ")),
+            None => out.push_str(&format!("{word}{ITEM}")),
         }
         rest = tail;
     }
     out.push_str(rest);
     Ok((out, bare))
+}
+
+/// Marks a list used item by item (`share - paid`); a rule whose answer uses
+/// one becomes one rule per item, with the mark replaced by `_1`, `_2`, ...
+const ITEM: &str = "_0";
+
+/// True when a list name stands alone as an argument of a rule call
+/// (`total(prices)`), not of `min`, `max`, `up`, or `round`.
+fn passes_whole(before: &str, after: &str) -> bool {
+    let prev = before.trim_end().chars().last();
+    let next = after.trim_start().chars().next();
+    if !matches!(prev, Some('(' | ',')) || !matches!(next, Some(')' | ',')) {
+        return false;
+    }
+    let mut depth = 0;
+    for (index, c) in before.char_indices().rev() {
+        match c {
+            ')' => depth += 1,
+            '(' if depth > 0 => depth -= 1,
+            '(' => {
+                let name = before[..index]
+                    .trim_end()
+                    .rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .next()
+                    .unwrap_or_default();
+                return !name.is_empty() && !matches!(name, "min" | "max" | "up" | "round");
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Replaces each `list_0` mark with item `item` of that list.
+fn pick_item(text: &str, lists: &[(String, usize)], item: usize) -> String {
+    let marked: Vec<(String, String)> = lists
+        .iter()
+        .map(|(list, _)| (format!("{list}{ITEM}"), format!("{list}_{item}")))
+        .collect();
+    substitute(text, &marked)
+}
+
+/// The size of the lists a translated line uses item by item, if any.
+fn item_size(
+    text: &str,
+    lists: &[(String, usize)],
+    line_no: usize,
+) -> Result<Option<usize>, String> {
+    let mut size = None;
+    for (list, n) in lists {
+        if substitute(text, &[(format!("{list}{ITEM}"), String::new())]) != text {
+            if size.is_some_and(|size| size != *n) {
+                return Err(format!(
+                    "line {line_no}: lists calculated together must have the same size"
+                ));
+            }
+            size = Some(*n);
+        }
+    }
+    Ok(size)
 }
 
 /// `need prices <= 100` holds for every item: one condition per item.
@@ -1831,8 +1980,27 @@ mod tests {
         assert!(err("f(a, b)\n  always -> a mod b\n").contains("divide by 0"));
         assert!(err("f(p[3])\n  always -> p[4]\n").contains("items 1 to 3"));
         assert!(err("f(p[0])\n  always -> 1\n").contains("size from 1"));
+        assert!(err("f(a[2], b[3])\n  always -> a + b\n").contains("same size"));
         assert!(err("f(a) with 1 decimal\n  always -> a * 1.25\n").contains("more than 1"));
         assert!(err("page P\n  save a = 0\n  show a if a > 1\n").contains("only a text"));
+    }
+
+    #[test]
+    fn list_answer_becomes_one_rule_per_item() {
+        let out = translate("f(a[2], b[2])\n  need a <= 9\n  always -> a + b + sum(b)\n").unwrap();
+        assert!(
+            out.contains("contract f_1(a_1: u32, a_2: u32, b_1: u32, b_2: u32)"),
+            "{out}"
+        );
+        assert!(out.contains("contract f_2("), "{out}");
+        assert!(
+            out.contains("ensures result == (a_2 +% b_2 +% (b_1 +% b_2))"),
+            "{out}"
+        );
+        let page =
+            translate("page P\n  save x[2], y[2] = 0\n  when \"Go\" is clicked\n    y = f(x)\n")
+                .unwrap();
+        assert!(page.contains("updates y_2 with f_2(x_1, x_2)"), "{page}");
     }
 
     #[test]
