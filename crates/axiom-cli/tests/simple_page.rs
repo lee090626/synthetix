@@ -7,25 +7,25 @@ const LOGIC: &str = "\
 change(now, before) can be negative
   need now <= 1000000 and now >= 0
   need before <= 1000000 and before >= 0
-  -> now - before
+  always -> now - before
 
 cart(prices[3])
   need prices <= 100000
-  -> sum(prices)
+  always -> sum(prices)
 
 vat(price) with 2 decimals
   need price <= 100000
-  -> price * 0.1
+  always -> price * 0.1
 
 grade_of(score)
   score >= 90 -> \"A\"
   score >= 80 -> \"B\"
-  -> \"C\"
+  else -> \"C\"
 
 drift(price) can be negative with 2 decimals
   need price >= -1000 and price <= 1000
   price < -10 -> -10
-  -> price * -1.5
+  else -> price * -1.5
 ";
 
 const MAIN: &str = "\

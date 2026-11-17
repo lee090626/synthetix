@@ -2932,18 +2932,18 @@ mod tests {
 
     #[test]
     fn finds_rules_that_never_apply() {
-        let shadowed = parse("f(x)\n  x > 5 -> 1\n  x > 10 -> 2\n  -> 0\n").unwrap();
+        let shadowed = parse("f(x)\n  x > 5 -> 1\n  x > 10 -> 2\n  else -> 0\n").unwrap();
         assert_eq!(unreachable_rules(&shadowed), vec![2]);
-        let covered = parse("g(x)\n  need x <= 3\n  x <= 3 -> 1\n  -> 0\n").unwrap();
+        let covered = parse("g(x)\n  need x <= 3\n  x <= 3 -> 1\n  else -> 0\n").unwrap();
         assert_eq!(unreachable_rules(&covered), vec![2]);
-        let fine = parse("h(x, m)\n  x > m -> m\n  -> x\n").unwrap();
+        let fine = parse("h(x, m)\n  x > m -> m\n  else -> x\n").unwrap();
         assert!(unreachable_rules(&fine).is_empty());
     }
 
     #[test]
     fn gives_one_example_per_reachable_rule() {
         let contract =
-            parse("fit(p, lo, hi)\n  need lo <= hi\n  p < lo -> lo\n  p > hi -> hi\n  -> p\n")
+            parse("fit(p, lo, hi)\n  need lo <= hi\n  p < lo -> lo\n  p > hi -> hi\n  else -> p\n")
                 .unwrap();
         let examples = rule_examples(&contract);
         assert_eq!(
@@ -2973,11 +2973,11 @@ mod tests {
             )
         };
         assert!(valid(
-            "d(price, rate)\n  need price <= 1000000\n  need rate <= 100\n  -> price - price * rate / 100\n"
+            "d(price, rate)\n  need price <= 1000000\n  need rate <= 100\n  always -> price - price * rate / 100\n"
         ));
-        assert!(valid("g(a, b)\n  a > b -> a - b\n  -> b - a\n"));
-        assert!(!valid("f(a, b)\n  -> a - b\n"));
-        assert!(!valid("f(a, b)\n  a > b -> b - a\n  -> 0\n"));
-        assert!(!valid("f(a, b)\n  a > b or a > 3 -> a - b\n  -> 0\n"));
+        assert!(valid("g(a, b)\n  a > b -> a - b\n  else -> b - a\n"));
+        assert!(!valid("f(a, b)\n  always -> a - b\n"));
+        assert!(!valid("f(a, b)\n  a > b -> b - a\n  else -> 0\n"));
+        assert!(!valid("f(a, b)\n  a > b or a > 3 -> a - b\n  else -> 0\n"));
     }
 }

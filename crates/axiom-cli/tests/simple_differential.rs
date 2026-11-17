@@ -151,40 +151,40 @@ fn negatives_mod_round_and_lists_match_oracles() {
 change(now, before) can be negative
   need now <= 1000000 and now >= 0
   need before <= 1000000 and before >= 0
-  -> now - before
+  always -> now - before
 
 leftover_share(total, people)
   need people >= 1
-  -> total mod people
+  always -> total mod people
 
 fair_share(total, people)
   need total <= 1000000
   need people >= 1
-  -> round(total / people)
+  always -> round(total / people)
 
 cart(prices[3])
   need prices <= 100000
   sum(prices) > 200000 -> 200000
-  -> sum(prices)
+  else -> sum(prices)
 
 spread(prices[3])
-  -> max(prices) - min(prices)
+  always -> max(prices) - min(prices)
 
 first(prices[3])
-  -> prices[1]
+  always -> prices[1]
 
 vat(price) with 2 decimals
   need price <= 100000
-  -> price * 0.1
+  always -> price * 0.1
 
 per(total, people) with 1 decimal
   need total <= 100000
   need people >= 1
-  -> total / people
+  always -> total / people
 
 over(price) with 2 decimals
   price > 9.99 -> 1
-  -> 0
+  else -> 0
 ";
     check_file("inline-new", text);
 }
@@ -195,26 +195,26 @@ fn negative_division_text_and_signed_decimals_match_oracles() {
 floor_at(x) can be negative
   need x >= -1000 and x <= 1000
   x < -100 -> -100
-  -> x
+  else -> x
 
 split(total, people) can be negative
   need total >= -100000 and total <= 100000
   need people >= 1 and people <= 100
-  -> total / people
+  always -> total / people
 
 left(total, people) can be negative
   need total >= -100000 and total <= 100000
   need people >= 1 and people <= 100
-  -> total mod people
+  always -> total mod people
 
 drift(price) can be negative with 2 decimals
   need price >= -1000 and price <= 1000
-  -> price * -1.5
+  always -> price * -1.5
 
 grade(score)
   score >= 90 -> \"A\"
   score >= 80 -> \"B\"
-  -> \"C\"
+  else -> \"C\"
 ";
     check_file("inline-signed", text);
 }
@@ -224,31 +224,31 @@ fn subtraction_and_is_match_oracles() {
     let text = "\
 gap(a, b)
   a > b -> a - b
-  -> b - a
+  else -> b - a
 
 discount(price, rate)
   need price <= 1000000
   need rate <= 100
-  -> price - price * rate / 100
+  always -> price - price * rate / 100
 
 share(total, people)
   need people >= 1
-  -> total / people
+  always -> total / people
 
 clamp_mm(t, lo, hi)
   need lo <= hi
-  -> max(lo, min(t, hi))
+  always -> max(lo, min(t, hi))
 
 is_check(a, b)
   a is 3 and b is not 4 -> 1
-  -> 0
+  else -> 0
 
 leftover(total, used)
   need used <= total
   need total <= 1000000
   left = total - used
   left > 10 -> left * 2
-  -> left
+  else -> left
 ";
     check_file("inline", text);
 }

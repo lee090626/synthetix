@@ -13,7 +13,7 @@ does not. The detailed rules are in [semantics.md](semantics.md) and
   fixed-size lists up to 16 items (`prices[3]`), and text answers. Arithmetic must be provably
   in range (see [writing-specs.md](writing-specs.md)).
 - **Rules:** `need` lines, `condition -> value` lines read top to bottom, and a
-  final `-> value`.
+  final `else -> value` (or `always -> value` for a rule with one answer).
 - **Web target:** `synthetix.toml` projects with pages, state, buttons,
   persisted state with schema migration, and adapters through the application
   boundary. Start one with `axiom new <dir>`.
