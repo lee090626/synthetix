@@ -1,0 +1,13 @@
+from split: per_person, leftover
+
+page Split
+  save total, people = 0
+  each, extra = 0
+
+  ask "총 금액" for total
+  ask "인원" for people
+  show each
+  show extra
+  when "나누기" is clicked
+    each = per_person(total, people)
+    extra = leftover(total, people)

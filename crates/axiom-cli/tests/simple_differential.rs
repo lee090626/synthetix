@@ -37,7 +37,7 @@ fn oracle(name: &str, a: &[u32]) -> u32 {
         "share" => a[0] / a[1],
         "clamp_mm" => a[0].min(a[2]).max(a[1]),
         "is_check" => u32::from(a[0] == 3 && a[1] != 4),
-        "leftover" => {
+        "double_left" => {
             let left = a[0] - a[1];
             if left > 10 { left * 2 } else { left }
         }
@@ -45,6 +45,7 @@ fn oracle(name: &str, a: &[u32]) -> u32 {
         "leftover_share" => a[0] % a[1],
         "fair_share" => (a[0] + a[1] / 2) / a[1],
         "per_person" => a[0].div_ceil(a[1]).div_ceil(100) * 100,
+        "leftover" => a[0].div_ceil(a[1]).div_ceil(100) * 100 * a[1] - a[0],
         "cart" => (a[0] + a[1] + a[2]).min(200_000),
         "spread" => a.iter().max().unwrap() - a.iter().min().unwrap(),
         "first" => a[0],
@@ -99,9 +100,15 @@ impl Rng {
 }
 
 fn check_file(path: &str, text: &str) {
-    let module = parse_module(text).unwrap();
+    check_contracts(path, &parse_module(text).unwrap().contracts);
+}
+
+fn check_contracts<'a>(
+    path: &str,
+    contracts: impl IntoIterator<Item = &'a axiom_parser::Contract>,
+) {
     let mut rng = Rng(0x5eed);
-    for contract in &module.contracts {
+    for contract in contracts {
         let options = SynthesisOptions {
             // Generous: CI runners are slower and run these tests in parallel.
             timeout: Some(Duration::from_secs(120)),
@@ -138,6 +145,22 @@ fn check_file(path: &str, text: &str) {
 fn policy_calculator_rules_match_oracles() {
     let path = "examples/policy-calculator/policy.ax";
     check_file(path, &source(path));
+}
+
+#[test]
+fn split_bill_rules_match_oracles() {
+    // `leftover` uses `per_person`, so check the rules as the project links them.
+    let path = "examples/split-bill/synthetix.toml";
+    let project = axiom_project::load(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(path),
+    )
+    .unwrap();
+    check_contracts(
+        path,
+        project.contracts.iter().map(|linked| &linked.contract),
+    );
 }
 
 #[test]
@@ -250,7 +273,7 @@ is_check(a, b)
   a is 3 and b is not 4 -> 1
   else -> 0
 
-leftover(total, used)
+double_left(total, used)
   need used <= total
   need total <= 1000000
   left = total - used
