@@ -813,8 +813,11 @@ fn link_project_retained(
                 let linked =
                     expand_contract(&key, &definitions, &scopes, &mut cache, &mut Vec::new())
                         .map_err(|error| format!("{}: {error}", module.path.display()))?;
-                axiom_parser::validate(&linked)
-                    .map_err(|error| format!("{}: {error}", module.path.display()))?;
+                axiom_parser::validate_source(
+                    &linked,
+                    &String::from_utf8_lossy(&module.source_contents),
+                )
+                .map_err(|error| format!("{}: {error}", module.path.display()))?;
                 linked
             };
             contracts.push(LinkedContract {

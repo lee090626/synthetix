@@ -616,13 +616,14 @@ function statusFromMessage(message) {
 
 function setDiagnostic(diagnostics, document, message) {
   const cleanMessage = message.replace(/^error:\s*/, "");
-  const match = cleanMessage.match(/(?:^|\n).*?(\d+):(\d+):\s*(.*)/);
+  // `N:C: message` or, for simple syntax, `line N: message`.
+  const match = cleanMessage.match(/(?:^|\n).*?(?:line (\d+)|(\d+):\d+):\s*(.*)/);
   let range;
   let diagnosticMessage = cleanMessage;
   if (match) {
     const line = Math.min(
       document.lineCount - 1,
-      Math.max(0, Number(match[1]) - 1)
+      Math.max(0, Number(match[1] ?? match[2]) - 1)
     );
     const lineEnd = document.lineAt(line).range.end.character;
     range = new vscode.Range(

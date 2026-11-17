@@ -117,6 +117,10 @@ async function validate(stderr) {
   assert.equal(parserDiagnostic.message, "expected expression");
   assert.deepEqual(parserDiagnostic.range, new Range(new Position(1, 0), new Position(1, lines[1].length)));
 
+  const simpleDiagnostic = await validate("error: INVALID: line 2: type error: requires clause must be boolean\n  2 |   ensures result == ;");
+  assert.equal(simpleDiagnostic.message, "type error: requires clause must be boolean");
+  assert.deepEqual(simpleDiagnostic.range, new Range(new Position(1, 0), new Position(1, lines[1].length)));
+
   const preconditionError = "UNSATISFIABLE_PRECONDITION: requires clauses are contradictory";
   const preconditionDiagnostic = await validate(preconditionError);
   assert.ok(outputLines.includes("contract_check: UNSATISFIABLE_PRECONDITION"));
