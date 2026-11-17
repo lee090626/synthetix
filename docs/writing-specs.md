@@ -205,7 +205,8 @@ sets a text value: `grade = grade_of(score)`.
 
 On a failed build, earlier verified output is removed, so a broken rule never
 keeps serving an old result. Fix the file and save; `axiom dev` rebuilds and
-reloads.
+reloads. It starts even when the first build fails and shows the error in the
+browser until then.
 
 ## Checking what a rule does
 

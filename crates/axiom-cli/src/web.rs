@@ -239,8 +239,21 @@ pub fn dev(config_path: &Path, port: u16, open_browser: bool, once: bool) -> Res
     let output_dir = root.join(".synthetix").join("dev");
     let mut cache = VerificationCache::default();
     let mut retained_loader = RetainedProjectLoader::default();
-    let (project, _) = retained_loader.load(config_path)?;
-    let initial = build_project(&project, &output_dir, &mut cache, true, false)?;
+    // The server also starts on a failed first build and shows the error until a
+    // fix rebuilds, the same as a failed rebuild; `--once` still reports it.
+    let initial = retained_loader.load(config_path).and_then(|(project, _)| {
+        build_project(&project, &output_dir, &mut cache, true, false).map(|result| result.files)
+    });
+    let (mut watched_files, error) = match initial {
+        Ok(files) => (files, None),
+        Err(error) if !once => {
+            eprintln!("build error: {error}");
+            let mut files = retained_loader.watch_paths().to_vec();
+            files.retain(|path| path != config_path);
+            (files, Some(error))
+        }
+        Err(error) => return Err(error),
+    };
     if once {
         return Ok(());
     }
@@ -256,16 +269,12 @@ pub fn dev(config_path: &Path, port: u16, open_browser: bool, once: bool) -> Res
         .map_err(|error| format!("cannot start localhost server on port {port}: {error}"))?;
     let address = format!("http://127.0.0.1:{port}/");
     println!("dev server: {address}");
-    println!("watching: {} file(s)", initial.files.len());
+    println!("watching: {} file(s)", watched_files.len());
 
-    let state = Arc::new(Mutex::new(DevState {
-        version: 1,
-        error: None,
-    }));
+    let state = Arc::new(Mutex::new(DevState { version: 1, error }));
     let watcher_state = Arc::clone(&state);
     let watcher_config = config_path.to_path_buf();
     let watcher_output = output_dir.clone();
-    let mut watched_files = initial.files;
     watched_files.push(config_path.to_path_buf());
     thread::spawn(move || {
         watch_project(
@@ -1919,6 +1928,23 @@ fn file_snapshot_for(files: &[PathBuf]) -> HashMap<PathBuf, Option<Vec<u8>>> {
         .collect()
 }
 
+const BUILD_ERROR_PAGE: &str = r#"<!doctype html>
+<meta charset="utf-8">
+<title>Build error</title>
+<pre id="error" role="alert" style="white-space:pre-wrap;font:14px monospace;color:#b00020;padding:16px">Building...</pre>
+<script>
+let version = null;
+setInterval(async () => {
+  try {
+    const status = await (await fetch('/__synthetix/status', { cache: 'no-store' })).json();
+    if (version === null) version = status.version;
+    else if (status.version !== version) location.reload();
+    document.getElementById('error').textContent = status.error ?? 'Building...';
+  } catch (_) {}
+}, 500);
+</script>
+"#;
+
 fn handle_request(mut stream: TcpStream, output_dir: &Path, state: &Arc<Mutex<DevState>>) {
     let mut request = [0_u8; 8192];
     let Ok(size) = stream.read(&mut request) else {
@@ -1979,6 +2005,10 @@ fn handle_request(mut stream: TcpStream, output_dir: &Path, state: &Arc<Mutex<De
     let file = output_dir.join(relative);
     match fs::read(&file) {
         Ok(contents) => respond_bytes(&mut stream, content_type(&file), &contents),
+        // No page was ever built: show the build error and reload once one is.
+        Err(_) if relative == "index.html" => {
+            respond(&mut stream, "text/html; charset=utf-8", BUILD_ERROR_PAGE)
+        }
         Err(_) => respond_status(&mut stream, 404, "Not Found"),
     }
 }
@@ -2582,6 +2612,39 @@ mod tests {
         assert!(!output.join("app.wasm").exists());
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dev_without_a_built_page_serves_the_build_error_page() {
+        use std::io::{Read, Write};
+
+        let output = std::env::temp_dir().join(format!("axiom-dev-unbuilt-{}", std::process::id()));
+        let state = Arc::new(Mutex::new(DevState {
+            version: 1,
+            error: Some("main.ax: line 2: broken".to_string()),
+        }));
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().unwrap();
+                handle_request(stream, &output, &state);
+            }
+        });
+        let get = |path: &str| {
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream
+                .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+                .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            response
+        };
+        let page = get("/");
+        assert!(page.starts_with("HTTP/1.1 200 OK"), "{page}");
+        assert!(page.contains("/__synthetix/status"));
+        assert!(get("/app.wasm").starts_with("HTTP/1.1 404"));
+        server.join().unwrap();
     }
 
     #[test]
