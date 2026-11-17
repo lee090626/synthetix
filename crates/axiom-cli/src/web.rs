@@ -245,6 +245,13 @@ pub fn dev(config_path: &Path, port: u16, open_browser: bool, once: bool) -> Res
         return Ok(());
     }
 
+    // Binding 127.0.0.1 succeeds even while another server holds the port on
+    // every address, which would leave localhost pointing at that server.
+    if TcpStream::connect(("localhost", port)).is_ok() {
+        return Err(format!(
+            "cannot start localhost server on port {port}: another server is using it; pick another with --port"
+        ));
+    }
     let listener = TcpListener::bind(("127.0.0.1", port))
         .map_err(|error| format!("cannot start localhost server on port {port}: {error}"))?;
     let address = format!("http://127.0.0.1:{port}/");
