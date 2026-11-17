@@ -9,6 +9,7 @@ use z3::{
     ast::{BV, Bool},
 };
 
+mod int_check;
 pub mod reference;
 pub mod uniqueness;
 
@@ -93,11 +94,18 @@ impl VerificationMetrics {
 }
 
 fn solver_check(solver: &Solver, metrics: &mut Option<&mut VerificationMetrics>) -> SatResult {
+    let check = || {
+        if int_check::proves_unsat(solver) {
+            SatResult::Unsat
+        } else {
+            solver.check()
+        }
+    };
     let Some(metrics) = metrics.as_deref_mut() else {
-        return solver.check();
+        return check();
     };
     let started = Instant::now();
-    let result = solver.check();
+    let result = check();
     metrics.solver_invocations += 1;
     metrics.solver_time_ns += started.elapsed().as_nanos();
     result

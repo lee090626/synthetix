@@ -42,6 +42,9 @@ base_amount(price, quantity)
 - `/` divides and rounds down (`7 / 2` is 3). For a percent, write `price * rate / 100`.
 - `a mod b` is what is left after dividing (`7 mod 2` is 1).
 - `round(a / b)` divides and rounds half up (`round(7 / 2)` is 4).
+- `up(a / b)` divides and rounds up (`up(7 / 2)` is 4, `up(6 / 2)` is 3). For
+  steps of 100, write `up(price / 100) * 100`. It works in rules without
+  `can be negative` or decimals.
 - `=` is never a comparison. It names a value in a rule (`left = total - used`) or sets values on pages. Write `x is 0` to compare.
 - A named value is used by its name in later lines:
 
