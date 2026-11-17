@@ -4,6 +4,13 @@ const path = require("path");
 const vscode = require("vscode");
 
 let devTerminal;
+// Latest `axiom check` per document; older runs are killed and their results ignored.
+const validationRuns = new Map();
+
+function stopValidation(key) {
+  validationRuns.get(key)?.kill();
+  validationRuns.delete(key);
+}
 
 function activate(context) {
   const diagnostics = vscode.languages.createDiagnosticCollection("synthetix");
@@ -86,6 +93,7 @@ function activate(context) {
       const key = document.uri.toString();
       clearTimeout(validationTimers.get(key));
       validationTimers.delete(key);
+      stopValidation(key);
       diagnostics.delete(document.uri);
     })
   );
@@ -347,15 +355,21 @@ function validateDocument(document, diagnostics, output) {
   const projectConfig = findProjectConfig(workspacePath);
   const cwd = projectConfig ? path.dirname(projectConfig) : workspacePath;
   const args = projectConfig ? ["check"] : ["check", document.uri.fsPath];
+  const key = document.uri.toString();
+  stopValidation(key);
   const child = cp.spawn(command, args, {
     cwd,
     shell: false,
   });
+  validationRuns.set(key, child);
+  const current = () => validationRuns.get(key) === child;
   let stderr = "";
   child.stderr.on("data", (data) => {
     stderr += data.toString();
   });
   child.on("error", (error) => {
+    if (!current()) return;
+    validationRuns.delete(key);
     setDiagnostic(
       diagnostics,
       document,
@@ -363,6 +377,8 @@ function validateDocument(document, diagnostics, output) {
     );
   });
   child.on("close", (code) => {
+    if (!current()) return;
+    validationRuns.delete(key);
     if (code === 0) {
       diagnostics.delete(document.uri);
       output.appendLine(
