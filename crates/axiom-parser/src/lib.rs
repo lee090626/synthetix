@@ -14,7 +14,7 @@ pub fn parse(input: &str) -> Result<Contract, String> {
         let module = parse_module(input)?;
         let [contract] = <[Contract; 1]>::try_from(module.contracts)
             .map_err(|_| "expected exactly one rule in this file".to_string())?;
-        validate(&contract)?;
+        validate_source(&contract, input)?;
         return Ok(contract);
     }
     let lexer = Lexer::new(input);
@@ -42,6 +42,18 @@ pub fn parse_module(input: &str) -> Result<Module, String> {
     let lexer = Lexer::new(input);
     let mut parser = Parser::new(lexer)?;
     parser.parse_module()
+}
+
+/// Like [`validate`], but on simple syntax the error names the user's line
+/// instead of a column in the internal translation.
+pub fn validate_source(contract: &Contract, source: &str) -> Result<(), String> {
+    validate(contract).map_err(|error| {
+        if simple::is_simple(source) {
+            simple::show_source_line(simple::user_error(error), source)
+        } else {
+            error
+        }
+    })
 }
 
 /// Validates the subset supported by the first end-to-end pipeline.

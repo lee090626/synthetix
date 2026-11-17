@@ -345,6 +345,20 @@ pub fn find_config(start: impl AsRef<Path>) -> Result<PathBuf, String> {
     ))
 }
 
+/// Drops a `#` comment, keeping `#` inside quoted values.
+fn strip_comment(line: &str) -> &str {
+    let mut quote = None;
+    for (index, ch) in line.char_indices() {
+        match (ch, quote) {
+            ('"' | '\'', None) => quote = Some(ch),
+            (c, Some(q)) if c == q => quote = None,
+            ('#', None) => return &line[..index],
+            _ => {}
+        }
+    }
+    line
+}
+
 fn parse_config(path: &Path) -> Result<ProjectConfig, String> {
     let contents = fs::read_to_string(path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
@@ -358,7 +372,7 @@ fn parse_config(path: &Path) -> Result<ProjectConfig, String> {
     let mut storage_schema_version = 1;
 
     for (index, raw_line) in contents.lines().enumerate() {
-        let line = raw_line.split('#').next().unwrap_or_default().trim();
+        let line = strip_comment(raw_line).trim();
         if line.is_empty() {
             continue;
         }
@@ -813,8 +827,11 @@ fn link_project_retained(
                 let linked =
                     expand_contract(&key, &definitions, &scopes, &mut cache, &mut Vec::new())
                         .map_err(|error| format!("{}: {error}", module.path.display()))?;
-                axiom_parser::validate(&linked)
-                    .map_err(|error| format!("{}: {error}", module.path.display()))?;
+                axiom_parser::validate_source(
+                    &linked,
+                    &String::from_utf8_lossy(&module.source_contents),
+                )
+                .map_err(|error| format!("{}: {error}", module.path.display()))?;
                 linked
             };
             contracts.push(LinkedContract {
@@ -2046,6 +2063,17 @@ fn validate_elements(
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn config_comments_skip_quoted_hashes() {
+        assert_eq!(
+            strip_comment("entry = \"a#b.ax\" # main"),
+            "entry = \"a#b.ax\" "
+        );
+        assert_eq!(strip_comment("entry = 'c#.ax'"), "entry = 'c#.ax'");
+        assert_eq!(strip_comment("entry = main.ax # note"), "entry = main.ax ");
+        assert_eq!(strip_comment("# only a comment"), "");
+    }
 
     fn assert_same_project(left: &Project, right: &Project) {
         assert_eq!(left.config, right.config);

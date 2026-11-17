@@ -2089,5 +2089,10 @@ mod tests {
             error.starts_with("line 2: Unexpected character: '$'"),
             "{error}"
         );
+        let error = crate::parse("f(a)\n  need a + 1\n  -> a\n").unwrap_err();
+        assert!(
+            error.starts_with("line 2: type error: requires clause must be boolean"),
+            "{error}"
+        );
     }
 }
