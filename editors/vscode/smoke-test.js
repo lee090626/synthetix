@@ -56,7 +56,7 @@ const vscode = {
   workspace: {
     onDidOpenTextDocument(callback) { events.open = callback; return disposable(); },
     onDidSaveTextDocument(callback) { events.save = callback; return disposable(); },
-    onDidCloseTextDocument: disposable,
+    onDidCloseTextDocument(callback) { events.close = callback; return disposable(); },
     getWorkspaceFolder: () => undefined,
     getConfiguration: () => ({ get: (_key, fallback) => fallback }),
   },
@@ -71,6 +71,7 @@ Module._load = function (request, parent, isMain) {
       const child = new EventEmitter();
       child.stdout = new EventEmitter();
       child.stderr = new EventEmitter();
+      child.kill = () => { child.killed = true; };
       children.push(child);
       return child;
     } };
@@ -121,6 +122,28 @@ async function validate(stderr) {
   assert.ok(outputLines.includes("contract_check: UNSATISFIABLE_PRECONDITION"));
   assert.equal(preconditionDiagnostic.message, preconditionError);
   assert.deepEqual(preconditionDiagnostic.range, new Range(new Position(0, 0), new Position(lines.length - 1, 0)));
+  // An older check that finishes after a newer one must not overwrite its result.
+  events.save(document);
+  await wait(225);
+  const older = children.at(-1);
+  events.save(document);
+  await wait(225);
+  const newer = children.at(-1);
+  assert.ok(older.killed);
+  newer.emit("close", 0);
+  older.stderr.emit("data", Buffer.from(parserError));
+  older.emit("close", 1);
+  assert.equal(diagnosticsByUri.has(document.uri.toString()), false);
+
+  // Closing the document stops its check and its late result is dropped.
+  events.save(document);
+  await wait(225);
+  const closing = children.at(-1);
+  events.close(document);
+  assert.ok(closing.killed);
+  closing.emit("close", 1);
+  assert.equal(diagnosticsByUri.has(document.uri.toString()), false);
+
   process.stdout.write("VS Code extension preserves parser and precondition diagnostic handoff\n");
 })().catch((error) => {
   console.error(error);
