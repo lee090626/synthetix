@@ -127,7 +127,7 @@ fit_price(price, min, max)
 
   price < min -> min
   price > max -> max
-  -> price
+  else -> price
 ```
 
 A page uses the rules:

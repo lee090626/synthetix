@@ -3,7 +3,7 @@ base_amount(price, quantity)
   need price <= 10000
   need quantity <= 100
 
-  -> price * quantity
+  always -> price * quantity
 
 # Sum of four items.
 items_total(a, b, c, d)
@@ -12,7 +12,7 @@ items_total(a, b, c, d)
   need c <= 250000
   need d <= 250000
 
-  -> a + b + c + d
+  always -> a + b + c + d
 
 # Never go above the cap.
 capped(total, cap)
@@ -20,7 +20,7 @@ capped(total, cap)
   need cap <= 1000000
 
   total > cap -> cap
-  -> total
+  else -> total
 
 # Keep the total between floor and cap.
 floor_cap(total, floor, cap)
@@ -30,4 +30,4 @@ floor_cap(total, floor, cap)
 
   total < floor -> floor
   total > cap -> cap
-  -> total
+  else -> total
