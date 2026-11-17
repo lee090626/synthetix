@@ -23,26 +23,34 @@ type SynthesisOutput = (
 mod js;
 mod web;
 
+const USAGE: &str = "\
+usage:
+  axiom new <directory>
+  axiom dev [--port N] [--no-open] [--once]
+  axiom check <contract.ax>
+  axiom analyze <contract.ax> [--timeout-ms N] [--report report.json]
+  axiom check
+  axiom build <contract.ax> [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N] [--max-memory-bytes N] [--emit js]
+  axiom build [--emit js]
+  axiom run <contract.ax> [--] [<value>...] [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N] [--max-memory-bytes N]
+  axiom app-run <contract.ax> [--] [<application-value>...]
+  axiom <contract.ax> [-o output.wasm]
+";
+
 fn main() -> ExitCode {
-    match run(env::args().skip(1).collect()) {
+    let args: Vec<String> = env::args().skip(1).collect();
+    if matches!(
+        args.first().map(String::as_str),
+        Some("-h" | "--help" | "help")
+    ) {
+        print!("{USAGE}");
+        return ExitCode::SUCCESS;
+    }
+    match run(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error}");
-            eprintln!("usage:");
-            eprintln!("  axiom new <directory>");
-            eprintln!("  axiom dev [--port N] [--no-open] [--once]");
-            eprintln!("  axiom check <contract.ax>");
-            eprintln!("  axiom analyze <contract.ax> [--timeout-ms N] [--report report.json]");
-            eprintln!("  axiom check");
-            eprintln!(
-                "  axiom build <contract.ax> [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N] [--max-memory-bytes N] [--emit js]"
-            );
-            eprintln!("  axiom build [--emit js]");
-            eprintln!(
-                "  axiom run <contract.ax> [--] [<value>...] [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N] [--max-memory-bytes N]"
-            );
-            eprintln!("  axiom app-run <contract.ax> [--] [<application-value>...]");
-            eprintln!("  axiom <contract.ax> [-o output.wasm]");
+            eprintln!("run `axiom --help` for usage");
             ExitCode::FAILURE
         }
     }

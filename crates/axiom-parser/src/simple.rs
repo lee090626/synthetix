@@ -53,6 +53,33 @@ pub fn check_user_syntax(source: &str) -> Result<(), String> {
     )
 }
 
+/// The part of a lexer or parser error (`N:C: message`) worth showing for
+/// simple syntax: none when it names internal tokens of the translated text.
+fn user_message(error: &str) -> Option<String> {
+    let message = error.splitn(3, ':').nth(2).map_or(error, str::trim);
+    if message.starts_with("Unexpected token") || message.starts_with("Expected") {
+        None
+    } else {
+        Some(message.to_string())
+    }
+}
+
+/// Rewrites a lexer or parser error on translated simple syntax as
+/// `line N: ...`: its column and token names describe the translation.
+pub fn user_error(error: String) -> String {
+    let mut parts = error.splitn(3, ':');
+    let (Some(line), Some(column), Some(_)) = (parts.next(), parts.next(), parts.next()) else {
+        return error;
+    };
+    if line.parse::<usize>().is_err() || column.parse::<usize>().is_err() {
+        return error;
+    }
+    let message = user_message(&error).unwrap_or_else(|| {
+        "this line is incomplete or has a symbol in the wrong place".to_string()
+    });
+    format!("line {line}: {message}")
+}
+
 /// Appends the source line an error points at (`line N: ...` or `N:C: ...`).
 pub fn show_source_line(error: String, source: &str) -> String {
     let number = error
@@ -261,7 +288,15 @@ fn rule_line(
         lists: &block.lists,
     };
     let expr = |text: &str| -> Result<String, String> {
-        Ok(substitute(&expression(text, line_no, &ctx)?, &block.names))
+        let translated = substitute(&expression(text, line_no, &ctx)?, &block.names);
+        // Rules are joined onto the block's last line, so check each here
+        // where the line number is still the user's.
+        crate::parser::Parser::check_expression(&translated).map_err(|error| {
+            let message = user_message(&error)
+                .unwrap_or_else(|| format!("`{}` is not a complete expression", text.trim()));
+            format!("line {line_no}: {message}")
+        })?;
+        Ok(translated)
     };
     if let Some((name, value)) = named_value(trimmed) {
         if !block.rules.is_empty() {
@@ -2040,5 +2075,19 @@ mod tests {
         );
         let error = crate::parse_module("f(x)\n  x = 1 -> 2\n  -> 0\n").unwrap_err();
         assert!(error.ends_with("\n  2 |   x = 1 -> 2"), "{error}");
+    }
+
+    #[test]
+    fn expression_errors_name_the_users_line() {
+        let error = crate::parse_module("f(a)\n  a > -> 1\n  -> a +\n").unwrap_err();
+        assert!(
+            error.starts_with("line 2: `a >` is not a complete expression"),
+            "{error}"
+        );
+        let error = crate::parse_module("f(a)\n  -> a $ 2\n").unwrap_err();
+        assert!(
+            error.starts_with("line 2: Unexpected character: '$'"),
+            "{error}"
+        );
     }
 }
