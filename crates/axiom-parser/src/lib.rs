@@ -28,8 +28,9 @@ pub fn parse_module(input: &str) -> Result<Module, String> {
     if simple::is_simple(input) {
         let with_line = |error: String| simple::show_source_line(error, input);
         let (translated, decimals) = simple::translate_with_decimals(input).map_err(with_line)?;
-        let mut parser = Parser::new(Lexer::new(&translated)).map_err(with_line)?;
-        let mut module = parser.parse_module().map_err(with_line)?;
+        let parse_error = |error: String| with_line(simple::user_error(error));
+        let mut parser = Parser::new(Lexer::new(&translated)).map_err(parse_error)?;
+        let mut module = parser.parse_module().map_err(parse_error)?;
         simple::apply_decimals(&mut module, &decimals)?;
         let mut known = Vec::new();
         for contract in &module.contracts {
@@ -670,7 +671,7 @@ pub fn type_of_expr(
             }
         }
         SpecExpr::Call(name, _) => Err(format!(
-            "unresolved contract call: {name}; use project mode"
+            "`{name}` is not defined in this file; if it comes from another file, run `axiom check` in the project folder"
         )),
         SpecExpr::Binary(op, lhs, rhs) => {
             let lhs_type = type_of_expr(lhs, names, result_type)?;
