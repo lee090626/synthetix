@@ -25,6 +25,19 @@ impl<'a> Parser<'a> {
         Ok(std::mem::replace(&mut self.current, next))
     }
 
+    /// Parses `text` as one whole expression.
+    pub(crate) fn check_expression(text: &str) -> Result<(), String> {
+        let mut parser = Parser::new(Lexer::new(text))?;
+        parser.parse_expr(0)?;
+        if parser.current != Token::Eof {
+            return Err(parser.error(format!(
+                "Unexpected token after expression: {:?}",
+                parser.current
+            )));
+        }
+        Ok(())
+    }
+
     fn error(&self, message: impl std::fmt::Display) -> String {
         self.error_at(self.current_position, message)
     }
