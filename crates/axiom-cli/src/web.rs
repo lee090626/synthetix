@@ -888,6 +888,16 @@ fn contracts_json(project: &Project) -> String {
             } else {
                 json_string(&requires_export_name(&linked.contract.name))
             };
+            // The user's `need` lines, shown when an input breaks one.
+            let source = fs::read_to_string(&linked.source).unwrap_or_default();
+            let needs = linked
+                .contract
+                .requires_spans
+                .iter()
+                .filter_map(|span| source.lines().nth(span.line.checked_sub(1)?))
+                .map(|line| json_string(line.trim()))
+                .collect::<Vec<_>>()
+                .join(",");
             let labels = if linked.contract.labels.is_empty() {
                 String::new()
             } else {
@@ -903,7 +913,7 @@ fn contracts_json(project: &Project) -> String {
                 )
             };
             format!(
-                "{}:{{\"source\":{},\"params\":[{}],\"result\":{},\"requires\":{}{labels}}}",
+                "{}:{{\"source\":{},\"params\":[{}],\"result\":{},\"requires\":{},\"needs\":[{needs}]{labels}}}",
                 json_string(&linked.contract.name),
                 json_string(&source_label(&project.config.root, &linked.source)),
                 params,
@@ -1374,7 +1384,7 @@ button { border: 0; border-radius: .5rem; padding: .7rem 1rem; color: white; bac
 button:hover { background: #1d4ed8; }
 #synthetix-provenance { margin: 2rem auto 1rem; max-width: 48rem; padding: 0 1rem; font-size: .8rem; color: #9ca3af; }
 #synthetix-provenance a { color: inherit; }
-#synthetix-error { position: fixed; inset: 1rem; padding: 1rem; white-space: pre-wrap; color: #fecaca; background: #450a0a; border: 1px solid #ef4444; border-radius: .5rem; }
+#synthetix-error { position: fixed; inset: auto 1rem 1rem; max-height: 50vh; overflow: auto; padding: 1rem; white-space: pre-wrap; color: #fecaca; background: #450a0a; border: 1px solid #ef4444; border-radius: .5rem; }
 "#;
 
 #[cfg(test)]

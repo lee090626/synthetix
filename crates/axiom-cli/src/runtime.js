@@ -111,7 +111,7 @@ function applicationError(error, functionName = null, sourceOverride = null) {
   const source = sourceOverride ?? contract?.source ?? __page.source;
   const message = error instanceof Error ? error.message : String(error);
   const location = functionName ? `${source}:${functionName}` : source;
-  const wrapped = new Error(`${location}: application runtime error: ${message}`);
+  const wrapped = new Error(`${location}: ${message}`);
   wrapped.category = 'APPLICATION_RUNTIME_ERROR';
   wrapped.source = source;
   wrapped.contract = functionName;
@@ -232,7 +232,8 @@ function callContract(name, args) {
     if (contract.requires) {
       const check = __exports?.[contract.requires];
       if (typeof check !== 'function') throw new Error(`Missing WASM precondition check: ${name}`);
-      if (check(...lowered) !== 1) throw new Error(`${name}: input violates a requires clause`);
+      if (check(...lowered) !== 1)
+        throw new Error(['입력이 이 조건에 맞지 않습니다:', ...(contract.needs ?? [])].join('\n  '));
     }
     const result = liftResult(fn(...lowered), contract.result);
     if (!contract.labels) return result;
@@ -376,7 +377,7 @@ function applyReducerTransition(element) {
     saveState(nextState);
   } catch (error) {
     const cause = applicationError(error, functionName);
-    const failure = new Error(`${cause.message}; transition ${element.event} failed at update ${updateIndex + 1}`);
+    const failure = new Error(cause.message);
     failure.category = 'APPLICATION_TRANSITION_FAILURE';
     failure.source = cause.source;
     failure.contract = cause.contract;
