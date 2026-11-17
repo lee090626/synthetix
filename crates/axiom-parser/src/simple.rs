@@ -168,7 +168,7 @@ impl Current {
                 if let Some(click) = page.click {
                     click.finish(out)?;
                 }
-                out[last_index].push_str("\n}");
+                out[last_index].push_str(" }");
                 Ok(())
             }
         }
@@ -1093,7 +1093,7 @@ impl Block {
             let condition = rule.condition.as_deref().unwrap_or_default();
             chain = format!("if {condition} {{ {} }} else {{ {chain} }}", rule.value);
         }
-        out[last.index] = format!("    ensures result == ({chain});\n}}");
+        out[last.index] = format!("    ensures result == ({chain}); }}");
         Ok(())
     }
 }
@@ -1941,7 +1941,9 @@ mod tests {
         assert!(lines[6].contains(
             "ensures result == (if price < min { min } else { if price > max { max } else { price } });"
         ));
-        assert_eq!(lines[7], "}");
+        assert!(lines[6].ends_with("; }"));
+        // Line for line, so errors name the user's line.
+        assert_eq!(lines.len(), FIT.lines().count());
         crate::parse_module(FIT).unwrap();
     }
 
@@ -2077,8 +2079,8 @@ mod tests {
             lines[7],
             "    button \"Add\" updates count with increment(count +% 1);"
         );
-        assert_eq!(lines[8], "");
-        assert_eq!(lines[9], "}");
+        assert_eq!(lines[8], " }");
+        assert_eq!(lines.len(), source.lines().count());
         let module = crate::parse_module(source).unwrap();
         assert_eq!(module.pages[0].persisted, vec!["count".to_string()]);
     }
@@ -2168,6 +2170,11 @@ mod tests {
             error.starts_with("line 2: Unexpected character: '$'"),
             "{error}"
         );
+        // A later rule in the file keeps its own line numbers.
+        let source = "f(a)\n  always -> a\n\ng(b)\n  need b + 1\n  always -> b\n";
+        let module = crate::parse_module(source).unwrap();
+        let error = crate::validate_source(&module.contracts[1], source).unwrap_err();
+        assert!(error.starts_with("line 5: type error"), "{error}");
         let error = crate::parse("f(a)\n  need a + 1\n  always -> a\n").unwrap_err();
         assert!(
             error.starts_with("line 2: type error: requires clause must be boolean"),
