@@ -44,6 +44,7 @@ fn oracle(name: &str, a: &[u32]) -> u32 {
         "change" => (a[0] as i32 - a[1] as i32) as u32,
         "leftover_share" => a[0] % a[1],
         "fair_share" => (a[0] + a[1] / 2) / a[1],
+        "per_person" => a[0].div_ceil(a[1]).div_ceil(100) * 100,
         "cart" => (a[0] + a[1] + a[2]).min(200_000),
         "spread" => a.iter().max().unwrap() - a.iter().min().unwrap(),
         "first" => a[0],
@@ -161,6 +162,12 @@ fair_share(total, people)
   need total <= 1000000
   need people >= 1
   always -> round(total / people)
+
+per_person(total, people)
+  need total <= 10000000
+  need people >= 1 and people <= 50
+  each = up(total / people)
+  always -> up(each / 100) * 100
 
 cart(prices[3])
   need prices <= 100000
