@@ -1,0 +1,12 @@
+# 한 사람이 낼 돈: 100원 단위로 올림.
+per_person(total, people)
+  need total <= 10000000
+  need people >= 1 and people <= 50
+  each = up(total / people)
+  always -> up(each / 100) * 100
+
+# 다 같이 내고 남는 돈.
+leftover(total, people)
+  need total <= 10000000
+  need people >= 1 and people <= 50
+  always -> per_person(total, people) * people - total

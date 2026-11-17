@@ -149,7 +149,8 @@ page Shop
 
 See [writing specs](docs/writing-specs.md) for the full syntax and
 [limitations](docs/limitations.md) for what is not supported. Examples:
-`examples/rules`, `examples/web-counter`, and `examples/policy-calculator`.
+`examples/rules`, `examples/web-counter`, `examples/policy-calculator`, and
+`examples/split-bill`.
 
 The old contract syntax (`contract`, `ensures`, `{ }`) is no longer accepted in
 user files. It remains only as the internal format and in `tests/legacy`.
