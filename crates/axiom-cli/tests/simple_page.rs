@@ -26,10 +26,15 @@ drift(price) can be negative with 2 decimals
   need price >= -1000 and price <= 1000
   price < -10 -> -10
   else -> price * -1.5
+
+to_pay(paid[2], share[2]) can be negative
+  need paid >= 0 and paid <= 1000000
+  need share >= 0 and share <= 1000000
+  always -> share - paid
 ";
 
 const MAIN: &str = "\
-from logic: change, cart, vat, grade_of, drift
+from logic: change, cart, vat, grade_of, drift, to_pay
 
 page Shop
   save prices[3] = 0
@@ -66,6 +71,15 @@ page Shop
   when \"Drift\" is clicked
     moved = drift(delta)
   show moved
+
+  save paid[2], share[2] = 0
+  save owe[2] = 0 can be negative
+  ask \"Paid\" for paid
+  ask \"Share\" for share
+  when \"Owe\" is clicked
+    owe = to_pay(paid, share)
+  show owe[1]
+  show owe[2]
 ";
 
 const RUNTIME: &str = r#"
@@ -145,7 +159,10 @@ function type(values) {
   delta.value = '-20';
   delta.dispatch('change');
   press('Drift');
-  lines.push(outputs().at(-1));
+  lines.push(outputs().at(-3));
+  type([...inputs().slice(0, 7).map((input) => input.value), 5000, 1000, 3000, 3000]);
+  press('Owe');
+  lines.push(outputs().slice(-2).join(','));
   process.stdout.write(lines.join('\n'));
 })().catch((failure) => { console.error(failure); process.exitCode = 1; });
 "#;
@@ -191,7 +208,7 @@ fn list_negative_and_conditional_show_work_in_the_page() {
     );
     assert_eq!(
         String::from_utf8(run.stdout).unwrap(),
-        "Price 1,Price 2,Price 3,Last,Price,Score,Delta\n6000,-3000,0.00,0.00,,0.00|false\n250000,250000,0.00,0.00,,0.00|true\n1250,1.25\n1.25,13.75,,0.00|true\n1250\nB,-250,B,3.75\n-10.00"
+        "Price 1,Price 2,Price 3,Last,Price,Score,Delta,Paid 1,Paid 2,Share 1,Share 2\n6000,-3000,0.00,0.00,,0.00,0,0|false\n250000,250000,0.00,0.00,,0.00,0,0|true\n1250,1.25\n1.25,13.75,,0.00,0,0|true\n1250\nB,-250,B,3.75,0,0\n-10.00\n-2000,2000"
     );
     fs::remove_dir_all(dir).ok();
 }
