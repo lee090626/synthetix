@@ -2,4 +2,4 @@
 increment(count)
   need count < 1000000
 
-  -> count + 1
+  always -> count + 1

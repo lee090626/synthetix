@@ -13,7 +13,7 @@ fit_price(price, min, max)
 
   price < min -> min
   price > max -> max
-  -> price
+  else -> price
 ```
 
 | Part | Form | Meaning |
@@ -22,18 +22,19 @@ fit_price(price, min, max)
 | Need | `need condition` | Only inputs that meet this are accepted |
 | Rule | `condition -> value` | If the condition holds, this value is the answer |
 | Name a value | `name = value` | Gives a part of the computation a name; must come before the `->` lines |
-| Default | `-> value` | The answer when no rule above matches; must be last |
+| Otherwise | `else -> value` | The answer when no line above matches; must be last |
+| Only answer | `always -> value` | A rule with one answer and no conditions |
 | Note | `# text` | Ignored by the computation |
 
 Rules are read top to bottom; the first one that matches gives the answer.
-A rule with only `-> value` always gives that value:
+A rule with one answer writes `always -> value`:
 
 ```
 base_amount(price, quantity)
   need price <= 10000
   need quantity <= 100
 
-  -> price * quantity
+  always -> price * quantity
 ```
 
 - Operators: `+ - * / ( )`, `mod`, `< <= > >=`, `is`, `is not`, `and`, `or`.
@@ -49,7 +50,7 @@ base_amount(price, quantity)
     need used <= total
     left = total - used
     left > 10 -> left * 2
-    -> left
+    else -> left
   ```
 - A rule can use another rule from the same file: `-> fit_price(base_amount(price, quantity), min, max)`.
 - Every value is a whole number from 0 to 4294967295, unless the name line
@@ -65,7 +66,7 @@ Add `can be negative` to the name line. Values then go from -2147483648 to
 change(now, before) can be negative
   need now <= 1000000 and now >= 0
   need before <= 1000000 and before >= 0
-  -> now - before
+  always -> now - before
 ```
 
 Write negative numbers with a minus sign: `-5`, `x < -100`, `-x`. In these
@@ -83,7 +84,7 @@ A `need` line about the list holds for every item:
 cart(prices[3])
   need prices <= 100000
   sum(prices) > 200000 -> 200000
-  -> sum(prices)
+  else -> sum(prices)
 ```
 
 A list has a fixed size from 1 to 16.
@@ -97,7 +98,7 @@ down to them:
 ```
 vat(price) with 2 decimals
   need price <= 100000
-  -> price * 0.1
+  always -> price * 0.1
 ```
 
 `vat(12.50)` is `1.25`. `round(a / b)` rounds half up to the last place
@@ -115,7 +116,7 @@ Put each answer in quotes to answer with text:
 grade(score)
   score >= 90 -> "A"
   score >= 80 -> "B"
-  -> "C"
+  else -> "C"
 ```
 
 Every `->` line then needs a text answer. A page shows it (below); other rules
@@ -192,7 +193,8 @@ sets a text value: `grade = grade_of(score)`.
 
 | Message | What to do |
 | --- | --- |
-| `the last line must be -> value` | Add a final `-> value` line for when no rule matches |
+| `the last line must be else -> value` | Add a final `else -> value` line for when no line above matches |
+| `` `->` needs a condition, `else`, or `always` before it `` | Write `else -> value` after other `->` lines, or `always -> value` for a rule with one answer |
 | `may go outside 0 to 4294967295` | Add `need name <= limit` lines for the inputs |
 | `may divide by 0` | Add `need divisor >= 1` |
 | `is not defined for inputs [...]` | A `-` can go below 0 for those inputs; add a `need` line or a condition |

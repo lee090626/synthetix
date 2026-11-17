@@ -103,6 +103,8 @@ function activate(context) {
 function completionItems(document) {
   const items = [
     completion("need", vscode.CompletionItemKind.Keyword, "need condition"),
+    completion("else", vscode.CompletionItemKind.Keyword, "else -> value: when no line above matches"),
+    completion("always", vscode.CompletionItemKind.Keyword, "always -> value: a rule with one answer"),
     completion("is", vscode.CompletionItemKind.Keyword, "x is 1"),
     completion("not", vscode.CompletionItemKind.Keyword, "x is not 1"),
     completion("and", vscode.CompletionItemKind.Keyword),
@@ -246,6 +248,8 @@ function completion(label, kind, detail) {
 
 const hoverDocs = new Map([
   ["need", "이 조건을 지키는 입력만 받습니다."],
+  ["else", "위 줄이 하나도 맞지 않을 때의 답입니다. 마지막 줄에 씁니다."],
+  ["always", "조건 없이 늘 이 답입니다. 답이 하나뿐인 규칙에 씁니다."],
   ["is", "같은지 비교합니다. `x is 1`은 x가 1이면 참입니다."],
   ["not", "`is not`: 다른지 비교합니다."],
   ["and", "두 조건이 모두 맞아야 합니다."],
@@ -272,7 +276,9 @@ function explainLine(text) {
   const line = text.replace(/#.*$/, "").trim();
   if (!line) return undefined;
   if (line.startsWith("need ")) return `입력 조건: ${line.slice(5)} 인 입력만 받습니다.`;
-  if (line.startsWith("->")) return `위 줄이 하나도 맞지 않으면 답은 ${line.slice(2).trim()} 입니다.`;
+  const fallback = line.match(/^(else|always)\s*->\s*(.+)$/);
+  if (fallback?.[1] === "else") return `위 줄이 하나도 맞지 않으면 답은 ${fallback[2]} 입니다.`;
+  if (fallback) return `답은 항상 ${fallback[2]} 입니다.`;
   const arrow = line.indexOf("->");
   if (arrow > 0 && !line.startsWith("button")) {
     return `${line.slice(0, arrow).trim()} 이면 답은 ${line.slice(arrow + 2).trim()} 입니다. (위에서부터 처음 맞는 줄이 답)`;

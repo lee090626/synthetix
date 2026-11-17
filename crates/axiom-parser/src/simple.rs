@@ -319,11 +319,33 @@ fn rule_line(
         let condition = each_item(condition, &block.lists, line_no)?;
         out[index] = format!("    requires {};", expr(&condition)?);
     } else if let Some((condition, value)) = trimmed.split_once("->") {
-        let condition = condition.trim();
-        let condition = if condition.is_empty() {
-            None
-        } else {
-            Some(expr(condition)?)
+        // `->` always has something on its left, so it reads as "if this, the answer is".
+        let condition = match condition.trim() {
+            "" => {
+                let word = if block.rules.is_empty() {
+                    "always"
+                } else {
+                    "else"
+                };
+                return Err(format!(
+                    "line {line_no}: write `{word} -> {}`; `->` needs a condition, `else`, or `always` before it",
+                    value.trim()
+                ));
+            }
+            "else" if block.rules.is_empty() => {
+                return Err(format!(
+                    "line {line_no}: `else` follows other `->` lines; for a rule with one answer write `always -> {}`",
+                    value.trim()
+                ));
+            }
+            "always" if !block.rules.is_empty() => {
+                return Err(format!(
+                    "line {line_no}: `always` is for a rule with one answer; after other `->` lines write `else -> {}`",
+                    value.trim()
+                ));
+            }
+            "else" | "always" => None,
+            condition => Some(expr(condition)?),
         };
         let value = value.trim();
         let value = if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
@@ -352,7 +374,7 @@ fn rule_line(
         });
     } else {
         return Err(format!(
-            "line {line_no}: expected `need ...`, `name = value`, `condition -> value`, or `-> value`"
+            "line {line_no}: expected `need ...`, `name = value`, `condition -> value`, `else -> value`, or `always -> value`"
         ));
     }
     Ok(())
@@ -1047,13 +1069,13 @@ impl Block {
         }
         let Some(last) = self.rules.last() else {
             return Err(format!(
-                "line {}: add at least one `-> value` line",
+                "line {}: add an answer line, like `always -> value`",
                 self.name_line
             ));
         };
         if last.condition.is_some() {
             return Err(format!(
-                "line {}: the last line must be `-> value` (used when no rule matches)",
+                "line {}: the last line must be `else -> value` (used when no line above matches)",
                 last.line_no
             ));
         }
@@ -1062,7 +1084,7 @@ impl Block {
             .find(|rule| rule.condition.is_none())
         {
             return Err(format!(
-                "line {}: `-> value` without a condition must be the last line",
+                "line {}: the `else` or `always` line must be the last line",
                 rule.line_no
             ));
         }
@@ -1765,37 +1787,38 @@ fn out_of_range(name: &str, op: &str, (min, max): (i64, i64)) -> String {
 mod tests {
     use super::*;
 
-    const FIT: &str = "# note\nfit_price(price, min, max)\n  need min <= max\n\n  price < min -> min\n  price > max -> max\n  -> price\n";
+    const FIT: &str = "# note\nfit_price(price, min, max)\n  need min <= max\n\n  price < min -> min\n  price > max -> max\n  else -> price\n";
 
     #[test]
     fn new_features_reject_misuse() {
         let err = |src: &str| crate::parse_module(src).unwrap_err();
-        assert!(err("f(a, b) can be negative\n  -> a / b\n").contains("divide by 0"));
-        assert!(err("f(a)\n  -> -5\n").contains("can be negative"));
-        assert!(err("f(a)\n  a > 1 -> \"A\"\n  -> 2\n").contains("text answer"));
-        assert!(err("f(a) can be negative\n  -> \"A\"\n").contains("text answers cannot"));
-        assert!(err("g(a)\n  -> \"A\"\n\nf(a)\n  -> g(a)\n").contains("only a page"));
+        assert!(err("f(a, b) can be negative\n  always -> a / b\n").contains("divide by 0"));
+        assert!(err("f(a)\n  always -> -5\n").contains("can be negative"));
+        assert!(err("f(a)\n  a > 1 -> \"A\"\n  else -> 2\n").contains("text answer"));
+        assert!(err("f(a) can be negative\n  always -> \"A\"\n").contains("text answers cannot"));
+        assert!(err("g(a)\n  always -> \"A\"\n\nf(a)\n  always -> g(a)\n").contains("only a page"));
         assert!(err("page P\n  save a = 0 can be negative\n  show a + 1\n").contains("in a rule"));
-        assert!(err("f(a, b) can be negative\n  -> a + b\n").contains("may go outside"));
-        assert!(err("f(a, b)\n  -> round(a + b)\n").contains("round takes a division"));
-        assert!(err("f(a, b)\n  -> a mod b\n").contains("divide by 0"));
-        assert!(err("f(p[3])\n  -> p[4]\n").contains("items 1 to 3"));
-        assert!(err("f(p[0])\n  -> 1\n").contains("size from 1"));
-        assert!(err("f(a) with 1 decimal\n  -> a * 1.25\n").contains("more than 1"));
+        assert!(err("f(a, b) can be negative\n  always -> a + b\n").contains("may go outside"));
+        assert!(err("f(a, b)\n  always -> round(a + b)\n").contains("round takes a division"));
+        assert!(err("f(a, b)\n  always -> a mod b\n").contains("divide by 0"));
+        assert!(err("f(p[3])\n  always -> p[4]\n").contains("items 1 to 3"));
+        assert!(err("f(p[0])\n  always -> 1\n").contains("size from 1"));
+        assert!(err("f(a) with 1 decimal\n  always -> a * 1.25\n").contains("more than 1"));
         assert!(err("page P\n  save a = 0\n  show a if a > 1\n").contains("only a text"));
     }
 
     #[test]
     fn number_forms_mix() {
-        let out = translate("f(a, b) can be negative\n  need b >= 1\n  -> round(a / b)\n").unwrap();
+        let out = translate("f(a, b) can be negative\n  need b >= 1\n  always -> round(a / b)\n")
+            .unwrap();
         assert!(out.contains("2 *% (a) / (b)"), "{out}");
-        let out = translate("f(a) with 2 decimals\n  -> round(a / 3) + a mod 2\n").unwrap();
+        let out = translate("f(a) with 2 decimals\n  always -> round(a / 3) + a mod 2\n").unwrap();
         assert!(
             out.contains("+% 1) / 200") && out.contains("% 200"),
             "{out}"
         );
         let module = crate::parse_module(
-            "g(a) with 2 decimals\n  need a <= 10\n  -> a\n\nf(a)\n  need a <= 10\n  -> g(a)\n",
+            "g(a) with 2 decimals\n  need a <= 10\n  always -> a\n\nf(a)\n  need a <= 10\n  always -> g(a)\n",
         )
         .unwrap();
         let answer = format!("{:?}", module.contracts[1].ensures);
@@ -1816,24 +1839,27 @@ mod tests {
 
     #[test]
     fn new_features_translate() {
-        let module =
-            crate::parse_module("f(p[2]) with 2 decimals\n  need p <= 10\n  -> sum(p) * 1.5\n")
-                .unwrap();
+        let module = crate::parse_module(
+            "f(p[2]) with 2 decimals\n  need p <= 10\n  always -> sum(p) * 1.5\n",
+        )
+        .unwrap();
         let contract = &module.contracts[0];
         assert_eq!(contract.decimals, 2);
         assert_eq!(contract.params.len(), 2);
         assert_eq!(contract.requires.len(), 1);
-        let module =
-            crate::parse_module("f(x) can be negative\n  need x >= -10\n  x < -5 -> -5\n  -> -x\n")
-                .unwrap();
+        let module = crate::parse_module(
+            "f(x) can be negative\n  need x >= -10\n  x < -5 -> -5\n  else -> -x\n",
+        )
+        .unwrap();
         assert_eq!(module.contracts[0].requires.len(), 1);
         let module =
-            crate::parse_module("g(s)\n  s > 5 -> \"Hi\"\n  s > 2 -> \"Lo\"\n  -> \"Hi\"\n")
+            crate::parse_module("g(s)\n  s > 5 -> \"Hi\"\n  s > 2 -> \"Lo\"\n  else -> \"Hi\"\n")
                 .unwrap();
         assert_eq!(module.contracts[0].labels, ["Hi", "Lo"]);
-        let out = translate("f(a, b) can be negative\n  -> a - b\n").unwrap();
+        let out = translate("f(a, b) can be negative\n  always -> a - b\n").unwrap();
         assert!(out.contains("-> i32") && out.contains("a -% b"), "{out}");
-        let out = translate("f(a, b)\n  need b >= 1\n  -> round(a / b) + a mod b\n").unwrap();
+        let out =
+            translate("f(a, b)\n  need b >= 1\n  always -> round(a / b) + a mod b\n").unwrap();
         assert!(out.contains("(((a) +% (b) / 2) / (b)) +% a % b"), "{out}");
         let out = translate(
             "page P\n  save p[2] = 0\n  ask \"Price\" for p\n  show \"Big\" if p[1] > 9\n",
@@ -1848,22 +1874,22 @@ mod tests {
 
     #[test]
     fn named_values_are_inlined() {
-        let src = "f(total, used)\n  need used <= total\n  need total <= 1000\n  left = total - used\n  twice = left * 2\n  left is 0 -> 0\n  -> twice\n";
+        let src = "f(total, used)\n  need used <= total\n  need total <= 1000\n  left = total - used\n  twice = left * 2\n  left is 0 -> 0\n  else -> twice\n";
         let out = translate(src).unwrap();
         assert!(out.contains("(total -! used) == 0"), "{out}");
         assert!(out.contains("((total -! used) *% 2)"), "{out}");
         crate::parse_module(src).unwrap();
         assert!(
-            translate("f(x)\n  a = x\n  a = x\n  -> a\n")
+            translate("f(x)\n  a = x\n  a = x\n  always -> a\n")
                 .unwrap_err()
                 .contains("already set")
         );
         assert!(
-            translate("f(x)\n  x > 1 -> 1\n  a = x\n  -> a\n")
+            translate("f(x)\n  x > 1 -> 1\n  a = x\n  else -> a\n")
                 .unwrap_err()
                 .contains("before")
         );
-        assert!(translate("f(x)\n  x <= 1 -> 1\n  -> x\n").is_ok());
+        assert!(translate("f(x)\n  x <= 1 -> 1\n  else -> x\n").is_ok());
     }
 
     #[test]
@@ -1899,29 +1925,50 @@ mod tests {
                 .contains("last line must be")
         );
         assert!(
-            translate("f(x)\n  -> 1\n  -> 2\n")
+            translate("f(x)\n  x > 0 -> 1\n  else -> 2\n  else -> 3\n")
                 .unwrap_err()
                 .contains("must be the last line")
         );
+        // `->` always has a condition, `else`, or `always` on its left.
         assert!(
-            translate("f(x)\n  -> x\n  need x <= 1\n")
+            translate("f(x)\n  -> x\n")
+                .unwrap_err()
+                .contains("write `always -> x`")
+        );
+        assert!(
+            translate("f(x)\n  x > 1 -> 1\n  -> x\n")
+                .unwrap_err()
+                .contains("write `else -> x`")
+        );
+        assert!(
+            translate("f(x)\n  else -> x\n")
+                .unwrap_err()
+                .contains("always -> x")
+        );
+        assert!(
+            translate("f(x)\n  x > 1 -> 1\n  always -> x\n")
+                .unwrap_err()
+                .contains("else -> x")
+        );
+        assert!(
+            translate("f(x)\n  always -> x\n  need x <= 1\n")
                 .unwrap_err()
                 .contains("before")
         );
         assert!(
-            translate("f(x)\n  x = 1 -> 1\n  -> 0\n")
+            translate("f(x)\n  x = 1 -> 1\n  else -> 0\n")
                 .unwrap_err()
                 .contains("use `is`")
         );
         assert!(
-            translate("f(x)\n  x != 1 -> 1\n  -> 0\n")
+            translate("f(x)\n  x != 1 -> 1\n  else -> 0\n")
                 .unwrap_err()
                 .contains("is not")
         );
-        let out = translate("f(x, y)\n  x is 1 and y is not 2 -> 1\n  -> 0\n").unwrap();
+        let out = translate("f(x, y)\n  x is 1 and y is not 2 -> 1\n  else -> 0\n").unwrap();
         assert!(out.contains("if x == 1 && y != 2 { 1 }"), "{out}");
         assert!(
-            translate("f(input)\n  -> 1\n")
+            translate("f(input)\n  always -> 1\n")
                 .unwrap_err()
                 .contains("reserved")
         );
@@ -1930,40 +1977,44 @@ mod tests {
     #[test]
     fn checks_arithmetic_ranges_from_needs() {
         assert!(
-            crate::parse_module("f(a, b)\n  -> a * b\n")
+            crate::parse_module("f(a, b)\n  always -> a * b\n")
                 .unwrap_err()
                 .contains("may go outside")
         );
-        crate::parse_module("f(a, b)\n  need a <= 10000\n  need b <= 100\n  -> a * b\n").unwrap();
-        crate::parse_module("f(a, b)\n  need a >= 10\n  need b <= 10\n  -> a - b\n").unwrap();
-        crate::parse_module("f(a, b)\n  a > b -> a - b\n  -> b - a\n").unwrap();
-        crate::parse_module("f(a, b)\n  need a >= b\n  -> a - b\n").unwrap();
-        crate::parse_module("f(a)\n  a > 5 -> a - 5\n  -> 0\n").unwrap();
-        crate::parse_module("p(x, r)\n  need x <= 1000000\n  need r <= 100\n  -> x * r / 100\n")
+        crate::parse_module("f(a, b)\n  need a <= 10000\n  need b <= 100\n  always -> a * b\n")
             .unwrap();
+        crate::parse_module("f(a, b)\n  need a >= 10\n  need b <= 10\n  always -> a - b\n")
+            .unwrap();
+        crate::parse_module("f(a, b)\n  a > b -> a - b\n  else -> b - a\n").unwrap();
+        crate::parse_module("f(a, b)\n  need a >= b\n  always -> a - b\n").unwrap();
+        crate::parse_module("f(a)\n  a > 5 -> a - 5\n  else -> 0\n").unwrap();
+        crate::parse_module(
+            "p(x, r)\n  need x <= 1000000\n  need r <= 100\n  always -> x * r / 100\n",
+        )
+        .unwrap();
         assert!(
-            crate::parse_module("q(x, d)\n  -> x / d\n")
+            crate::parse_module("q(x, d)\n  always -> x / d\n")
                 .unwrap_err()
                 .contains("divide by 0")
         );
-        crate::parse_module("q(x, d)\n  need d >= 1\n  -> x / d\n").unwrap();
-        let out = translate("c(t, lo, hi)\n  -> max(lo, min(t, hi))\n").unwrap();
+        crate::parse_module("q(x, d)\n  need d >= 1\n  always -> x / d\n").unwrap();
+        let out = translate("c(t, lo, hi)\n  always -> max(lo, min(t, hi))\n").unwrap();
         assert!(
             out.contains("(if lo >= (if t <= hi { t } else { hi }) { lo } else { (if t <= hi { t } else { hi }) })"),
             "{out}"
         );
         assert!(
-            translate("c(a)\n  -> min(a)\n")
+            translate("c(a)\n  always -> min(a)\n")
                 .unwrap_err()
                 .contains("two values")
         );
-        crate::parse_module("c(min, max)\n  -> min + max * 0\n").unwrap();
+        crate::parse_module("c(min, max)\n  always -> min + max * 0\n").unwrap();
         crate::parse_module(
-            "d(x)\n  need x <= 10\n  -> x + x\n\ng(x)\n  need x <= 5\n  -> d(x) + 1\n",
+            "d(x)\n  need x <= 10\n  always -> x + x\n\ng(x)\n  need x <= 5\n  always -> d(x) + 1\n",
         )
         .unwrap();
         assert!(
-            crate::parse_module("g(x)\n  -> h(x) + 1\n")
+            crate::parse_module("g(x)\n  always -> h(x) + 1\n")
                 .unwrap_err()
                 .contains("may go outside")
         );
@@ -2064,32 +2115,32 @@ mod tests {
     #[test]
     fn errors_show_the_source_line() {
         assert!(
-            translate("f(x)\n  -> (x\n")
+            translate("f(x)\n  always -> (x\n")
                 .unwrap_err()
                 .contains("not closed")
         );
         assert!(
-            translate("f(x)\n  -> x)\n")
+            translate("f(x)\n  always -> x)\n")
                 .unwrap_err()
                 .contains("no matching")
         );
-        let error = crate::parse_module("f(x)\n  x = 1 -> 2\n  -> 0\n").unwrap_err();
+        let error = crate::parse_module("f(x)\n  x = 1 -> 2\n  else -> 0\n").unwrap_err();
         assert!(error.ends_with("\n  2 |   x = 1 -> 2"), "{error}");
     }
 
     #[test]
     fn expression_errors_name_the_users_line() {
-        let error = crate::parse_module("f(a)\n  a > -> 1\n  -> a +\n").unwrap_err();
+        let error = crate::parse_module("f(a)\n  a > -> 1\n  else -> a +\n").unwrap_err();
         assert!(
             error.starts_with("line 2: `a >` is not a complete expression"),
             "{error}"
         );
-        let error = crate::parse_module("f(a)\n  -> a $ 2\n").unwrap_err();
+        let error = crate::parse_module("f(a)\n  always -> a $ 2\n").unwrap_err();
         assert!(
             error.starts_with("line 2: Unexpected character: '$'"),
             "{error}"
         );
-        let error = crate::parse("f(a)\n  need a + 1\n  -> a\n").unwrap_err();
+        let error = crate::parse("f(a)\n  need a + 1\n  always -> a\n").unwrap_err();
         assert!(
             error.starts_with("line 2: type error: requires clause must be boolean"),
             "{error}"
