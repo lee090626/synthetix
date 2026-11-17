@@ -1258,6 +1258,7 @@ fn expression(text: &str, line_no: usize, ctx: &Ctx) -> Result<String, String> {
     }
     let text = rewrite_lists(text, ctx.lists, None, line_no)?.0;
     let text = expand_round(&text, ctx.signed, ctx.decimals, line_no)?;
+    let text = expand_up(&text, ctx.signed, ctx.decimals, line_no)?;
     let text = expand_negatives(&text, ctx.signed, line_no)?;
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::new();
@@ -1523,7 +1524,46 @@ fn each_item(condition: &str, lists: &[(String, usize)], line_no: usize) -> Resu
 /// `d = 2 * a / b`: `(d + 1) / 2`, or `(d + sign(d)) / 2` (half away from 0),
 /// where 1 is one unit of the last decimal place.
 fn expand_round(text: &str, signed: bool, decimals: u32, line_no: usize) -> Result<String, String> {
-    let Some(start) = find_word_call(text, "round") else {
+    expand_division(text, "round", line_no, &|top, bottom| {
+        Ok(if !signed && decimals == 0 {
+            format!("((({top}) + ({bottom}) / 2) / ({bottom}))")
+        } else {
+            let unit = if decimals == 0 {
+                "1".to_string()
+            } else {
+                format!("0.{}1", "0".repeat(decimals as usize - 1))
+            };
+            let twice = format!("(2 * ({top}) / ({bottom}))");
+            if signed {
+                format!("(({twice} + max(-{unit}, min({unit}, {twice}))) / 2)")
+            } else {
+                format!("(({twice} + {unit}) / 2)")
+            }
+        })
+    })
+}
+
+/// Rewrites `up(a / b)` into `(a + b - 1) / b` (rounds up).
+fn expand_up(text: &str, signed: bool, decimals: u32, line_no: usize) -> Result<String, String> {
+    expand_division(text, "up", line_no, &|top, bottom| {
+        if signed || decimals > 0 {
+            // shortcut: whole numbers that cannot be negative only; add the other forms when a rule needs them.
+            return Err(format!(
+                "line {line_no}: up works only in rules without `can be negative` or decimals"
+            ));
+        }
+        Ok(format!("((({top}) + ({bottom}) - 1) / ({bottom}))"))
+    })
+}
+
+/// Replaces each `name(a / b)` with `rewrite(a, b)`, innermost calls first.
+fn expand_division(
+    text: &str,
+    name: &str,
+    line_no: usize,
+    rewrite: &dyn Fn(&str, &str) -> Result<String, String>,
+) -> Result<String, String> {
+    let Some(start) = find_word_call(text, name) else {
         return Ok(text.to_string());
     };
     let open = start + text[start..].find('(').unwrap_or_default();
@@ -1546,30 +1586,16 @@ fn expand_round(text: &str, signed: bool, decimals: u32, line_no: usize) -> Resu
     }
     let (Some(close), Some(slash)) = (close, slash) else {
         return Err(format!(
-            "line {line_no}: round takes a division, like `round(price / 3)`"
+            "line {line_no}: {name} takes a division, like `{name}(price / 3)`"
         ));
     };
-    let top = expand_round(text[open + 1..slash].trim(), signed, decimals, line_no)?;
-    let bottom = expand_round(text[slash + 1..close].trim(), signed, decimals, line_no)?;
-    let rounded = if !signed && decimals == 0 {
-        format!("((({top}) + ({bottom}) / 2) / ({bottom}))")
-    } else {
-        let unit = if decimals == 0 {
-            "1".to_string()
-        } else {
-            format!("0.{}1", "0".repeat(decimals as usize - 1))
-        };
-        let twice = format!("(2 * ({top}) / ({bottom}))");
-        if signed {
-            format!("(({twice} + max(-{unit}, min({unit}, {twice}))) / 2)")
-        } else {
-            format!("(({twice} + {unit}) / 2)")
-        }
-    };
+    let top = expand_division(text[open + 1..slash].trim(), name, line_no, rewrite)?;
+    let bottom = expand_division(text[slash + 1..close].trim(), name, line_no, rewrite)?;
     Ok(format!(
-        "{}{rounded}{}",
+        "{}{}{}",
         &text[..start],
-        expand_round(&text[close + 1..], signed, decimals, line_no)?
+        rewrite(&top, &bottom)?,
+        expand_division(&text[close + 1..], name, line_no, rewrite)?
     ))
 }
 
@@ -1800,6 +1826,8 @@ mod tests {
         assert!(err("page P\n  save a = 0 can be negative\n  show a + 1\n").contains("in a rule"));
         assert!(err("f(a, b) can be negative\n  always -> a + b\n").contains("may go outside"));
         assert!(err("f(a, b)\n  always -> round(a + b)\n").contains("round takes a division"));
+        assert!(err("f(a, b)\n  always -> up(a + b)\n").contains("up takes a division"));
+        assert!(err("f(a) with 2 decimals\n  always -> up(a / 3)\n").contains("up works only"));
         assert!(err("f(a, b)\n  always -> a mod b\n").contains("divide by 0"));
         assert!(err("f(p[3])\n  always -> p[4]\n").contains("items 1 to 3"));
         assert!(err("f(p[0])\n  always -> 1\n").contains("size from 1"));

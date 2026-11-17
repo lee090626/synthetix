@@ -16,7 +16,7 @@
     },
     {
       "name": "support.function.axiom",
-      "match": "\\b(min|max|round|sum|count)(?=\\s*\\()"
+      "match": "\\b(min|max|round|up|sum|count)(?=\\s*\\()"
     },
     {
       "name": "keyword.control.axiom",
