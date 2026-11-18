@@ -287,3 +287,7 @@ share(10000, [1, 1, 2, 0], [0, 0, 0, 0], 100); // [2500, 2500, 5000, 0]
 ```
 
 A wrong array length or a value outside the `need` lines throws.
+
+Add `use settle for 4` to a rules file to prove `settle` for 4 people there;
+then `settle(owe)` takes the 4 balances and returns the 16 transfers, item
+`(i - 1) * 4 + j` from person `i` to person `j`.

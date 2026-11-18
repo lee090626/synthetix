@@ -188,7 +188,41 @@ pub fn emit_modules(
             dts += &declaration;
         }
     }
+    if let Some((function, declaration)) = settle_wrapper(&contracts) {
+        js += "\n";
+        js += &function;
+        dts += &declaration;
+    }
     Ok((js, dts))
+}
+
+/// `settle(owe)` over every generated `settle_N_i_j`: picks N from the array
+/// length and returns the N * N transfers, item (i-1)*N+j from i to j.
+fn settle_wrapper(all: &[&Contract]) -> Option<(String, String)> {
+    if all.iter().any(|c| c.name == "settle") {
+        return None;
+    }
+    let sizes: Vec<usize> = (2..=16)
+        .filter(|n| all.iter().any(|c| c.name == format!("settle_{n}_1_1")))
+        .collect();
+    if sizes.is_empty() {
+        return None;
+    }
+    let mut cases = String::new();
+    for n in &sizes {
+        let calls: Vec<String> = (1..=*n)
+            .flat_map(|i| (1..=*n).map(move |j| format!("settle_{n}_{i}_{j}(...owe)")))
+            .collect();
+        cases += &format!("  if (owe.length === {n}) return [{}];\n", calls.join(", "));
+    }
+    let list: Vec<String> = sizes.iter().map(usize::to_string).collect();
+    Some((
+        format!(
+            "export function settle(owe) {{\n  if (!Array.isArray(owe)) throw new TypeError(\"settle: owe must be an array\");\n{cases}  throw new TypeError(\"settle: owe must have {} items\");\n}}\n",
+            list.join(" or ")
+        ),
+        "export function settle(owe: number[]): number[];\n".to_string(),
+    ))
 }
 
 /// Splits `x_1..x_k` (k >= 2, same type) runs into one list parameter.
@@ -228,6 +262,9 @@ fn list_wrapper(first: &Contract, all: &[&Contract]) -> Result<Option<(String, S
     let Some(base) = first.name.strip_suffix("_1") else {
         return Ok(None);
     };
+    if base.starts_with("settle_") {
+        return Ok(None);
+    }
     let parts: Vec<&Contract> = (1..)
         .map_while(|i| {
             let name = format!("{base}_{i}");
