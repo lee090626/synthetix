@@ -1,0 +1,39 @@
+# 한 달 요금 중 쓴 날만큼 (원 미만 버림)
+prorate(price, used, days)
+  need days >= 28 and days <= 31
+  need used <= days
+  need used <= 31
+  need price <= 10000000
+  always -> price * used / days
+
+# 달 중간에 플랜을 바꿀 때 남은 날만큼 더 낼 돈 (내리면 음수: 돌려줄 돈)
+change(old, new, used, days) can be negative
+  need days >= 28 and days <= 31
+  need used >= 0 and used <= days and used <= 31
+  need old >= 0 and old <= 10000000
+  need new >= 0 and new <= 10000000
+  always -> (new - old) * (days - used) / days
+
+# 부가세: 공급가액의 10%, 원 미만 버림
+vat(supply)
+  need supply <= 400000000
+  always -> supply / 10
+
+# 부가세 포함 금액에서 공급가액 (원 미만 버림), 세액은 나머지
+supply_of(total)
+  need total <= 400000000
+  always -> total * 10 / 11
+
+tax_of(total)
+  need total <= 400000000
+  always -> total - supply_of(total)
+
+# 원천징수: 소득세 3%, 10원 미만 버림
+income_tax(pay)
+  need pay <= 400000000
+  always -> pay * 3 / 100 / 10 * 10
+
+# 지방소득세: 소득세의 10%, 10원 미만 버림
+local_tax(pay)
+  need pay <= 400000000
+  always -> income_tax(pay) / 10 / 10 * 10
