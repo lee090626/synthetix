@@ -14,10 +14,10 @@ result; 새 모임 starts over. Every payment is kept in the `payments` table
 | `share` | Set-aside amount first, the rest split by ratio, rounded up to the unit (1, 10, or 100 won) |
 | `add_up` | Running totals of shares and of money paid |
 | `owe` | What each person still owes (below 0: is owed) |
-| `settle` (built in) | Each transfer is at least 0, at most what the sender owes, and only from someone who owes to someone who is owed |
+| `settle` (built in) | Each transfer is at least 0, at most what the sender owes, and only from someone who owes to someone who is owed; with `settle_split` and `settle_whole`, every balance reaches 0 |
 
 ```bash
-axiom check && axiom build   # prove 38 rules (about 15 seconds) and emit dist/
+axiom check && axiom build   # prove 40 rules (about 17 seconds) and emit dist/
 axiom dev                    # live app
 ```
 
