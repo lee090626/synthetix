@@ -1849,7 +1849,8 @@ fn settle_rules(size: usize) -> String {
             // Not proven by Z3: proofs/lean/Settle.lean proves this formula
             // (`t` there) brings every balance to 0 for any group size.
             out.push_str(&format!(
-                " export fn settle_{size}_{from}_{to}({}) -> i32 {{ {} return {}; }}",
+                // The grammar needs one `ensures`; this one costs Z3 nothing.
+                " export fn settle_{size}_{from}_{to}({}) -> i32 {{ {} return {}; ensures result == result; }}",
                 params.join(", "),
                 needs.join(" "),
                 amount
