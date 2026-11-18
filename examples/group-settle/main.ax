@@ -17,6 +17,9 @@ page Gathering
   ask "비율" for weight
   ask "따로 정한 금액" for fixed
 
+  # 결제 기록: 얼마, 누가 얼마 냈나, 누가 참여했나
+  save payments = table of amount, paid, joined
+
   # 지금까지
   save count = 0
   save shares[4], spent[4] = 0
@@ -29,13 +32,16 @@ page Gathering
     shares = add_up(shares, share_now)
     spent = add_up(spent, paid)
     count = next(count)
+    add amount, paid, joined to payments
     balance = owe(shares, spent)
     sends = settle(balance)
   when "새 모임" is clicked
     shares = clear(shares)
     spent = clear(spent)
     count = zero(count)
+    clear payments
     balance = owe(shares, spent)
     sends = settle(balance)
   show count
   show transfers(sends, names)
+  show payments

@@ -369,6 +369,15 @@ function applyReducerTransition(element) {
   try {
     for (; updateIndex < element.updates.length; updateIndex++) {
       const update = element.updates[updateIndex];
+      // Table rows are page bookkeeping, not rules.
+      if (update.function === '__append') {
+        getPath(nextState, update.state).push(evaluate(update.args[0], nextState));
+        continue;
+      }
+      if (update.function === '__empty') {
+        setPath(nextState, update.state, []);
+        continue;
+      }
       functionName = update.function;
       const value = callContract(update.function, update.args.map((arg) => evaluate(arg, nextState)));
       setPath(nextState, update.state, value);
