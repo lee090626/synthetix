@@ -275,3 +275,15 @@ axiom build      # static output in dist/
 ```
 
 Use `axiom run file.ax -- <inputs>` to try a single rule.
+
+## Using rules from JavaScript or TypeScript
+
+`axiom build --emit js` also writes `dist/contracts.js` and `dist/contracts.d.ts`,
+one function per proven rule. A rule with a list answer takes and returns arrays:
+
+```ts
+import { share } from "./dist/contracts.js";
+share(10000, [1, 1, 2, 0], [0, 0, 0, 0], 100); // [2500, 2500, 5000, 0]
+```
+
+A wrong array length or a value outside the `need` lines throws.
