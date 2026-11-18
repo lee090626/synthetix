@@ -31,8 +31,9 @@ does not. The detailed rules are in [semantics.md](semantics.md) and
   to read and judge.
 - **Old syntax removed from user files.** Loops, recursion, records,
   growable lists, and property-only results (`ensures`) exist in the engine
-  but have no simple syntax yet. Lists of lists (a table of payments) are not
-  supported: write one list per payment.
+  but have no simple syntax yet. Tables (`table of`) keep rows on the page but
+  cannot be passed to a rule; add each row's numbers into running totals
+  instead (see examples/group-settle).
 - **Some number forms do not mix.** A button passes values only to a rule with
   the same decimal places, and a rule uses a rule from another file only with
   the same places; pages calculate only with values that cannot be negative.

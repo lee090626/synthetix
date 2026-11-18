@@ -1532,6 +1532,28 @@ fn validate_page(
             ));
         }
         for update in &reducer.updates {
+            if let Some(rows) = table_update(update) {
+                let state_type =
+                    path_type(&update.state, &states, records, &HashMap::new(), source)?;
+                let Type::List(item) = state_type else {
+                    return Err(format!(
+                        "{}: {} is not a table",
+                        source.display(),
+                        update.state
+                    ));
+                };
+                if let Some(row) = rows {
+                    let row_type = page_expr_type(row, &states, records, &HashMap::new(), source)?;
+                    if !types_compatible(&row_type, &item) {
+                        return Err(format!(
+                            "{}: row does not match table {}",
+                            source.display(),
+                            update.state
+                        ));
+                    }
+                }
+                continue;
+            }
             validate_call(
                 &update.state,
                 &update.function,
@@ -1638,7 +1660,9 @@ fn validate_decimals(
         }
     }
     for update in page.reducers.iter().flat_map(|reducer| &reducer.updates) {
-        check_call(&update.state, &update.function, &update.args)?;
+        if table_update(update).is_none() {
+            check_call(&update.state, &update.function, &update.args)?;
+        }
     }
     Ok(())
 }
@@ -1890,6 +1914,16 @@ fn path_type(
             })?;
     }
     Ok(current)
+}
+
+/// `__append(row)` and `__empty()` add a row to or empty a table (a list
+/// state); they are page bookkeeping, not rules. Returns the row, if any.
+fn table_update(update: &axiom_parser::ReducerUpdate) -> Option<Option<&SpecExpr>> {
+    match (update.function.as_str(), update.args.as_slice()) {
+        ("__append", [row]) => Some(Some(row)),
+        ("__empty", []) => Some(None),
+        _ => None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

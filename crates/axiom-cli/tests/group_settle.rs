@@ -1,5 +1,5 @@
 //! Builds examples/group-settle and settles a three-payment gathering in
-//! node: payments added one by one (A), people left out (B), transfers (C), ratio and
+//! node: payments added one by one and kept as a table (A), people left out (B), transfers (C), ratio and
 //! rounding (D), and copying and keeping the result (E).
 
 use std::{fs, path::PathBuf, process::Command};
@@ -81,8 +81,12 @@ function type(values) {
   set(4, 10);
   press('결제 추가');
   lines.push(`${outputs()[0]}:${texts().join('|')}`);
+  const table = () => root.children.filter((node) => node.tagName === 'ul')
+    .flatMap((list) => list.children)
+    .map((row) => row.children.map((cell) => cell.textContent).join(','));
+  lines.push(table().join('|'));
   press('새 모임');
-  lines.push(`${outputs()[0]}:${texts().join('|')}`);
+  lines.push(`${outputs()[0]}:${texts().join('|')}:${table().length}`);
   process.stdout.write(lines.join('\n'));
 })().catch((failure) => { console.error(failure); process.exitCode = 1; });
 "#;
@@ -127,7 +131,10 @@ fn group_settle_example_settles_a_gathering() {
          철수 → 민수 10000|영희 → 민수 10000|영희 → 지영 10000\n\
          1\n\
          3:철수 → 민수 2000|영희 → 민수 14000|영희 → 지영 8000\n\
-         0:"
+         40000,40000,0,0,0,true,true,true,true|\
+         30000,0,30000,0,0,true,true,false,true|\
+         10000,0,0,10000,0,true,true,true,true\n\
+         0::0"
     );
     fs::remove_dir_all(dir).ok();
 }

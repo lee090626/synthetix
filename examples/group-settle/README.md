@@ -5,7 +5,8 @@ paid how much, who joined (check box), each person's ratio (1 = normal,
 2 = double, up to 4), and any amount set aside for someone, then press
 결제 추가. The page keeps the running totals and lists who sends whom how much
 ("철수 → 민수 10000"). 복사 copies the list; 기록 저장 keeps it below as a past
-result; 새 모임 starts over.
+result; 새 모임 starts over. Every payment is kept in the `payments` table
+(amount, who paid how much, who joined) below the transfers.
 
 | Rule | What it proves |
 | --- | --- |

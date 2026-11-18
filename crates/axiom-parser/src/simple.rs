@@ -106,6 +106,12 @@ struct PageInfo {
     yes_no: Vec<String>,
     /// Group sizes `settle(...)` is used with; each adds its rules.
     settles: Vec<usize>,
+    /// Text values.
+    texts: Vec<String>,
+    /// Tables (`save t = table of a, b`) and their columns.
+    tables: Vec<(String, Vec<String>)>,
+    /// Record declarations for the tables, placed after the page.
+    records: String,
     /// Every value: name, whether it can be negative, decimal places.
     values: Vec<(String, bool, u32)>,
     /// The open `when "Label" is clicked` block.
@@ -133,13 +139,17 @@ impl Click {
             sets,
             ..
         } = self;
+        // Table rows (`__append`) are not rules, so they always go in a reducer.
+        let rows = sets.iter().any(|(_, value)| value.starts_with("__"));
         out[index] = match sets.as_slice() {
             [] => {
                 return Err(format!(
                     "line {line_no}: add the values to set on the lines below, like `    total = cart(prices)`"
                 ));
             }
-            [(target, value)] => format!("    button {label} updates {target} with {value};"),
+            [(target, value)] if !rows => {
+                format!("    button {label} updates {target} with {value};")
+            }
             _ => {
                 let updates: String = sets
                     .iter()
@@ -173,6 +183,7 @@ impl Current {
                     click.finish(out)?;
                 }
                 out[last_index].push_str(" }");
+                out[last_index].push_str(&page.records);
                 for size in page.settles {
                     out[last_index].push_str(&settle_rules(size));
                 }
@@ -219,6 +230,9 @@ pub fn translate_with_decimals(source: &str) -> Result<(String, Decimals), Strin
                         lists: Vec::new(),
                         yes_no: Vec::new(),
                         settles: Vec::new(),
+                        texts: Vec::new(),
+                        tables: Vec::new(),
+                        records: String::new(),
                         values: Vec::new(),
                         click: None,
                     },
@@ -502,6 +516,9 @@ fn page_line(
                 if state.contains(": bool") {
                     page.yes_no.push(name.to_string());
                 }
+                if state.contains(": text") {
+                    page.texts.push(name.to_string());
+                }
                 page.values.push((name.to_string(), signed, places));
                 if places > 0 {
                     decimals.push((page.name.clone(), name.to_string(), places));
@@ -532,7 +549,100 @@ fn page_line(
         Ok(substitute(&expression(text, line_no, &ctx)?, &yes_no))
     };
     match word {
+        "save" if rest.contains("= table of ") => {
+            let (name, columns) = rest.split_once("= table of ").unwrap_or_default();
+            let name = name.trim();
+            check_name(name, line_no)?;
+            let mut fields = Vec::new();
+            let mut columns_out = Vec::new();
+            for column in columns.split(',').map(str::trim).filter(|c| !c.is_empty()) {
+                let items: Vec<String> = match page.lists.iter().find(|(list, _)| list == column) {
+                    Some((list, size)) => {
+                        (1..=*size).map(|item| format!("{list}_{item}")).collect()
+                    }
+                    None => vec![column.to_string()],
+                };
+                for item in items {
+                    let ty = if page.yes_no.contains(&item) {
+                        "bool"
+                    } else if page.texts.contains(&item) {
+                        "text"
+                    } else {
+                        match page.values.iter().find(|(value, _, _)| *value == item) {
+                            Some((_, _, places)) if *places > 0 => {
+                                return Err(format!(
+                                    "line {line_no}: a table cannot hold `{item}`, which has decimals"
+                                ));
+                            }
+                            Some((_, true, _)) => "i32",
+                            Some(_) => "number",
+                            None => {
+                                return Err(format!(
+                                    "line {line_no}: `{column}` must be saved above the table"
+                                ));
+                            }
+                        }
+                    };
+                    fields.push(format!("{item}: {ty};"));
+                    columns_out.push(item);
+                }
+            }
+            if fields.is_empty() {
+                return Err(format!(
+                    "line {line_no}: write `save {name} = table of a, b`"
+                ));
+            }
+            page.records
+                .push_str(&format!(" record {name}_row {{ {} }}", fields.join(" ")));
+            page.tables.push((name.to_string(), columns_out));
+            Ok(format!(
+                "    state {name}: list<{name}_row> = []; persist {name};"
+            ))
+        }
+        "show" if page.tables.iter().any(|(table, _)| table == rest) => {
+            let (_, columns) = page.tables.iter().find(|(table, _)| table == rest).unwrap();
+            let shows: String = columns.iter().map(|c| format!(" show row.{c};")).collect();
+            Ok(format!("    list {rest} as row {{{shows} }}"))
+        }
         "save" => states(rest, true, line_no, lists),
+        "add" if spot.in_click && rest.contains(" to ") => {
+            let (columns, table) = rest.rsplit_once(" to ").unwrap_or_default();
+            let table = table.trim();
+            let Some((_, known)) = page.tables.iter().find(|(name, _)| name == table) else {
+                return Err(format!(
+                    "line {line_no}: `{table}` is not a table; write `save {table} = table of ...`"
+                ));
+            };
+            let mut given = Vec::new();
+            for column in columns.split(',').map(str::trim) {
+                match page.lists.iter().find(|(list, _)| list == column) {
+                    Some((list, size)) => {
+                        given.extend((1..=*size).map(|item| format!("{list}_{item}")))
+                    }
+                    None => given.push(column.to_string()),
+                }
+            }
+            if &given != known {
+                return Err(format!(
+                    "line {line_no}: add the table's columns in order: {}",
+                    columns_of(known)
+                ));
+            }
+            let fields: Vec<String> = known.iter().map(|c| format!("{c}: {c}")).collect();
+            if let Some(click) = page.click.as_mut() {
+                click.sets.push((
+                    table.to_string(),
+                    format!("__append({table}_row {{ {} }})", fields.join(", ")),
+                ));
+            }
+            Ok(String::new())
+        }
+        "clear" if spot.in_click && page.tables.iter().any(|(name, _)| name == rest) => {
+            if let Some(click) = page.click.as_mut() {
+                click.sets.push((rest.to_string(), "__empty()".to_string()));
+            }
+            Ok(String::new())
+        }
         _ if spot.in_click => {
             let (target, value) = trimmed.split_once('=').ok_or_else(|| {
                 format!("line {line_no}: expected `name = rule(...)` under `when ... is clicked`")
@@ -1737,6 +1847,21 @@ fn settle_rules(size: usize) -> String {
     out
 }
 
+/// `paid_1, paid_2, amount` with each list written once: `paid, amount`.
+fn columns_of(columns: &[String]) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for column in columns {
+        let base = column
+            .rsplit_once('_')
+            .filter(|(_, item)| item.parse::<usize>().is_ok())
+            .map_or(column.as_str(), |(base, _)| base);
+        if !out.iter().any(|known| known == base) {
+            out.push(base.to_string());
+        }
+    }
+    out.join(", ")
+}
+
 /// Marks a list used item by item (`share - paid`); a rule whose answer uses
 /// one becomes one rule per item, with the mark replaced by `_1`, `_2`, ...
 const ITEM: &str = "_0";
@@ -2154,6 +2279,36 @@ mod tests {
             translate("page P\n  save x[2], y[2] = 0\n  when \"Go\" is clicked\n    y = f(x)\n")
                 .unwrap();
         assert!(page.contains("updates y_2 with f_2(x_1, x_2)"), "{page}");
+    }
+
+    #[test]
+    fn tables_keep_rows() {
+        let page = translate(
+            "page P\n  save a = 0\n  save j[2] = no\n  save t = table of a, j\n  when \"Go\" is clicked\n    add a, j to t\n  when \"New\" is clicked\n    clear t\n  show t\n",
+        )
+        .unwrap();
+        assert!(
+            page.contains("state t: list<t_row> = []; persist t;"),
+            "{page}"
+        );
+        assert!(
+            page.contains("record t_row { a: number; j_1: bool; j_2: bool; }"),
+            "{page}"
+        );
+        assert!(
+            page.contains("updates t with __append(t_row { a: a, j_1: j_1, j_2: j_2 });"),
+            "{page}"
+        );
+        assert!(page.contains("updates t with __empty();"), "{page}");
+        assert!(
+            page.contains("list t as row { show row.a; show row.j_1; show row.j_2; }"),
+            "{page}"
+        );
+        let err = translate(
+            "page P\n  save a, b = 0\n  save t = table of a, b\n  when \"Go\" is clicked\n    add b, a to t\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("columns in order: a, b"), "{err}");
     }
 
     #[test]

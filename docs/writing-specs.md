@@ -189,6 +189,10 @@ page Shop
 | `    owe = to_pay(paid, share)` | (under `when`) Fill list `owe` from a rule with a list answer |
 | `    sends = settle(owe)` | (under `when`) Who sends whom how much so every `owe` reaches 0 |
 | `show transfers(sends, names)` | "name → name amount" lines, a copy button, and saved past results |
+| `save payments = table of amount, paid` | A table: one column per value (a list gives one per item), kept after reload |
+| `    add amount, paid to payments` | (under `when`) Add a row with the current values, columns in order |
+| `    clear payments` | (under `when`) Remove every row |
+| `show payments` | The table, one row per line |
 | `when "Label" is clicked` | A button; on click, the lines below it run in order |
 | `    a = rule(...)` | (under `when`) Set `a` to the rule's answer |
 
