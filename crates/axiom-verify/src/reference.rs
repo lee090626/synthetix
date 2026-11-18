@@ -36,7 +36,7 @@ pub fn eval_ami(expr: &Expr, args: &[u32]) -> Result<u32, String> {
             .get(*index as usize)
             .copied()
             .ok_or_else(|| format!("candidate references missing argument {index}")),
-        Expr::Const(value) => Ok(*value),
+        Expr::Const(value) => Ok(*value as u32),
         Expr::Add(lhs, rhs) => Ok(eval_ami(lhs, args)?.wrapping_add(eval_ami(rhs, args)?)),
         Expr::Sub(lhs, rhs) => Ok(eval_ami(lhs, args)?.wrapping_sub(eval_ami(rhs, args)?)),
         Expr::Mul(lhs, rhs) => Ok(eval_ami(lhs, args)?.wrapping_mul(eval_ami(rhs, args)?)),
@@ -200,7 +200,7 @@ fn eval_spec_with_locals(
                 _ => Err(format!("non-scalar parameter cannot be evaluated: {name}")),
             }
         }
-        SpecExpr::Number(value) => Ok(Value::U32(*value)),
+        SpecExpr::Number(value) => Ok(Value::U32(*value as u32)),
         SpecExpr::Bool(value) => Ok(Value::Bool(*value)),
         SpecExpr::Field(value, field) => {
             match eval_spec_with_locals(value, contract, args, result, locals)? {

@@ -78,6 +78,24 @@ rules `/` and `mod` round toward 0 (`-7 / 2` is -3, `-7 mod 2` is -1), and the
 divisor must stay above 0 or below 0. `round` rounds half away from 0
 (`round(-7 / 2)` is -4).
 
+### Big numbers
+
+Add `with big numbers` to the name line for amounts above 4294967295. Values
+then go from 0 to 18446744073709551615, or, with `can be negative`, from
+-9223372036854775808 to 9223372036854775807:
+
+```
+total(price, quantity) with big numbers
+  need price <= 1000000000000
+  need quantity <= 1000
+  always -> price * quantity
+```
+
+Only these rules use 64-bit numbers, so other rules are proven as fast as
+before. A rule with big numbers can use only other rules with big numbers. For
+now `axiom check` proves them, but `axiom build` and `axiom run` refuse them,
+and they cannot have decimals.
+
 ### Lists
 
 `prices[3]` is a list of three values. Use `sum(prices)`, `min(prices)`,

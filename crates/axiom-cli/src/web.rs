@@ -153,6 +153,14 @@ fn build_project(
     if compiled.is_empty() {
         return Err("web project must contain at least one contract".to_string());
     }
+    if let Some(function) = compiled.iter().find(|function| function.contract.wide) {
+        // shortcut: WebAssembly, JS and Rust output are 32-bit; lift with #159.
+        return Err(format!(
+            "{}:{}: rules `with big numbers` can be checked with `axiom check` but not built yet",
+            function.source.display(),
+            function.name
+        ));
+    }
 
     let mut exports = Vec::with_capacity(compiled.len() * 2);
     for function in &compiled {
@@ -593,8 +601,10 @@ fn promise_counterexample(
         if let Ok(axiom_verify::ProofResult::Counterexample(values)) =
             axiom_verify::verify(&one, &candidate)
         {
-            let show = |ty: &Type, v: u32| match ty {
-                Type::I32 => (v as i32).to_string(),
+            let bits = if contract.wide { 64 } else { 32 };
+            let show = |ty: &Type, v: u64| match ty {
+                Type::I32 if contract.wide => (v as i64).to_string(),
+                Type::I32 => (v as u32 as i32).to_string(),
                 _ => v.to_string(),
             };
             let inputs: Vec<String> = contract
@@ -603,7 +613,8 @@ fn promise_counterexample(
                 .zip(&values)
                 .map(|(p, v)| format!("{}={}", p.name, show(&p.ty, *v)))
                 .collect();
-            let answer = axiom_verify::reference::eval_ami(&candidate, &values)
+            let answer = candidate
+                .try_eval_bits(&values, bits)
                 .map(|v| show(&contract.return_type, v))
                 .unwrap_or_else(|e| e);
             return Some(format!(
@@ -3708,7 +3719,7 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
             .map(|(index, param)| {
                 let value = match &param.ty {
                     Type::Bool => SpecExpr::Bool(inputs[index] != 0),
-                    _ => SpecExpr::Number(inputs[index]),
+                    _ => SpecExpr::Number(inputs[index].into()),
                 };
                 SpecExpr::Binary(
                     BinaryOp::Eq,
@@ -3720,7 +3731,7 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
         let expected = if contract.return_type == Type::Bool {
             SpecExpr::Bool(expected != 0)
         } else {
-            SpecExpr::Number(expected)
+            SpecExpr::Number(expected.into())
         };
         point.ensures = vec![SpecExpr::Binary(
             BinaryOp::Eq,

@@ -10,13 +10,55 @@ use z3::{
 };
 
 mod int_check;
+
+thread_local! {
+    /// Word width of the contract being checked on this thread: 32, or 64
+    /// for `Contract::wide`. Z3 contexts are per thread too.
+    static BITS: std::cell::Cell<u32> = const { std::cell::Cell::new(32) };
+}
+
+pub(crate) fn bits() -> u32 {
+    BITS.with(std::cell::Cell::get)
+}
+
+/// A written number, rejected when it does not fit the contract's words.
+fn literal(value: u64) -> Result<u64, String> {
+    if value > mask() {
+        return Err(format!(
+            "{value} is above {}; add `with big numbers` to the name line",
+            mask()
+        ));
+    }
+    Ok(value)
+}
+
+fn mask() -> u64 {
+    u64::MAX >> (64 - bits())
+}
+
+/// Sets the word width for one contract; restores the previous one on drop,
+/// so nested checks of other contracts keep their own width.
+pub(crate) struct Width(u32);
+
+impl Width {
+    pub(crate) fn of(contract: &Contract) -> Self {
+        Width(BITS.with(|cell| cell.replace(if contract.wide { 64 } else { 32 })))
+    }
+}
+
+impl Drop for Width {
+    fn drop(&mut self) {
+        BITS.with(|cell| cell.set(self.0));
+    }
+}
 pub mod reference;
 pub mod uniqueness;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProofResult {
     Verified,
-    Counterexample(Vec<u32>),
+    /// Inputs that break the contract, as words of the contract's width.
+    Counterexample(Vec<u64>),
     SolverUnknown,
 }
 
@@ -129,12 +171,13 @@ fn check_preconditions_inner(
     contract: &Contract,
     metrics: &mut Option<&mut VerificationMetrics>,
 ) -> Result<PreconditionResult, String> {
+    let _width = Width::of(contract);
     if let Some(metrics) = metrics.as_deref_mut() {
         metrics.precondition_check_invocations += 1;
     }
     let setup_started = metrics.as_ref().is_some().then(Instant::now);
     let args = symbolic_args(contract)?;
-    let result = BV::new_const("__axiom_result", 32);
+    let result = BV::new_const("__axiom_result", bits());
     if let (Some(metrics), Some(started)) = (metrics.as_deref_mut(), setup_started) {
         metrics.precondition_translation_time_ns += started.elapsed().as_nanos();
     }
@@ -177,6 +220,10 @@ fn check_preconditions_inner(
 /// final default is rule `n + 1`. Returns nothing when the chain uses calls or
 /// cannot be checked in isolation.
 pub fn unreachable_rules(contract: &Contract) -> Vec<usize> {
+    if contract.wide {
+        // shortcut: the reference evaluator is 32-bit; no examples for 64-bit rules yet.
+        return Vec::new();
+    }
     use axiom_parser::{BinaryOp, SpecExpr};
     let Some(chain) = contract.ensures.iter().find_map(|clause| match clause {
         SpecExpr::Binary(BinaryOp::Eq, left, right)
@@ -225,6 +272,10 @@ pub fn unreachable_rules(contract: &Contract) -> Vec<usize> {
 /// deterministically from small values and the numbers in the rule (and their
 /// neighbours), so boundaries show up. Returns `(rule, inputs, answer)`.
 pub fn rule_examples(contract: &Contract) -> Vec<(usize, Vec<u32>, u32)> {
+    if contract.wide {
+        // shortcut: the reference evaluator is 32-bit; no examples for 64-bit rules yet.
+        return Vec::new();
+    }
     use axiom_parser::{BinaryOp, SpecExpr};
     let Some(chain) = contract.ensures.iter().find_map(|clause| match clause {
         SpecExpr::Binary(BinaryOp::Eq, left, right)
@@ -247,7 +298,10 @@ pub fn rule_examples(contract: &Contract) -> Vec<(usize, Vec<u32>, u32)> {
     let mut pool = vec![0u32, 1, 2, 3, 5, 10, 20, 50, 80, 100];
     fn numbers(expr: &SpecExpr, out: &mut Vec<u32>) {
         match expr {
-            SpecExpr::Number(n) => out.extend([n.saturating_sub(1), *n, n.saturating_add(1)]),
+            SpecExpr::Number(n) => {
+                let n = *n as u32;
+                out.extend([n.saturating_sub(1), n, n.saturating_add(1)])
+            }
             SpecExpr::Binary(_, l, r) => {
                 numbers(l, out);
                 numbers(r, out);
@@ -334,6 +388,7 @@ fn check_contract_inner(
     contract: &Contract,
     metrics: &mut Option<&mut VerificationMetrics>,
 ) -> Result<ContractCheck, String> {
+    let _width = Width::of(contract);
     if let Err(error) = axiom_parser::validate(contract) {
         return Ok(ContractCheck::Invalid(error));
     }
@@ -354,7 +409,7 @@ fn check_contract_inner(
     }
 
     let args = symbolic_args(contract)?;
-    let result = BV::new_const("__axiom_result", 32);
+    let result = BV::new_const("__axiom_result", bits());
     let requires = preconditions_to_bool(contract, &args, &result)?;
     let ensures_defined = contract
         .ensures
@@ -405,6 +460,7 @@ fn check_contract_inner(
 /// Lowers a `fn` return expression into the AMI shared by verification and WASM.
 /// Structurally recursive self-calls are statically unrolled to the depth bound.
 pub fn implementation_to_ami(contract: &Contract) -> Result<Expr, String> {
+    let _width = Width::of(contract);
     if contract.kind != axiom_parser::DeclarationKind::Function {
         return Err("only fn declarations have a local implementation".to_string());
     }
@@ -483,11 +539,11 @@ fn lower_implementation_value(
             }
         }
         SpecExpr::Number(value) => Ok(LoweredImplementation::Scalar {
-            expr: Expr::Const(*value),
+            expr: Expr::Const(literal(*value)?),
             defined: Expr::Const(1),
         }),
         SpecExpr::Bool(value) => Ok(LoweredImplementation::Scalar {
-            expr: Expr::Const(u32::from(*value)),
+            expr: Expr::Const(u64::from(*value)),
             defined: Expr::Const(1),
         }),
         SpecExpr::Let(name, value, body) => {
@@ -598,7 +654,7 @@ fn lower_implementation_value(
             match array {
                 LoweredImplementation::Array { elements, defined } => {
                     Ok(LoweredImplementation::Scalar {
-                        expr: Expr::Const(elements.len() as u32),
+                        expr: Expr::Const(elements.len() as u64),
                         defined,
                     })
                 }
@@ -627,7 +683,7 @@ fn lower_implementation_value(
             };
             let in_bounds = Expr::Lt(
                 Box::new(index_expr.clone()),
-                Box::new(Expr::Const(elements.len() as u32)),
+                Box::new(Expr::Const(elements.len() as u64)),
             );
             Ok(LoweredImplementation::Scalar {
                 expr: Expr::ArrayGet {
@@ -666,7 +722,7 @@ fn lower_implementation_value(
             };
             let in_bounds = Expr::Lt(
                 Box::new(index_expr.clone()),
-                Box::new(Expr::Const(elements.len() as u32)),
+                Box::new(Expr::Const(elements.len() as u64)),
             );
             Ok(LoweredImplementation::Array {
                 elements: elements
@@ -675,7 +731,7 @@ fn lower_implementation_value(
                     .map(|(position, element)| Expr::Select {
                         condition: Box::new(Expr::Eq(
                             Box::new(index_expr.clone()),
-                            Box::new(Expr::Const(position as u32)),
+                            Box::new(Expr::Const(position as u64)),
                         )),
                         then_branch: Box::new(value_expr.clone()),
                         else_branch: Box::new(element),
@@ -906,7 +962,7 @@ fn lower_bounded_loop(
         loop_values.insert(
             index.to_owned(),
             LoweredImplementation::Scalar {
-                expr: Expr::Const(iteration),
+                expr: Expr::Const(u64::from(iteration)),
                 defined: Expr::Const(1),
             },
         );
@@ -937,7 +993,7 @@ fn lower_bounded_loop(
     final_values.insert(
         index.to_owned(),
         LoweredImplementation::Scalar {
-            expr: Expr::Const(*end),
+            expr: Expr::Const(u64::from(*end)),
             defined: Expr::Const(1),
         },
     );
@@ -1028,6 +1084,7 @@ fn verify_inner(
     candidate: &Expr,
     metrics: &mut Option<&mut VerificationMetrics>,
 ) -> Result<ProofResult, String> {
+    let _width = Width::of(contract);
     match check_preconditions_inner(contract, metrics)? {
         PreconditionResult::Satisfiable => {}
         PreconditionResult::UnsatisfiablePrecondition => {
@@ -1111,8 +1168,7 @@ fn verify_inner(
                     model
                         .eval(arg, true)
                         .and_then(|value| value.as_u64())
-                        .map(|value| value as u32)
-                        .ok_or_else(|| "Z3 model did not contain a u32 argument".to_string())
+                        .ok_or_else(|| "Z3 model did not contain an argument value".to_string())
                 })
                 .collect::<Result<Vec<_>, String>>()?;
             Ok(ProofResult::Counterexample(values))
@@ -1169,6 +1225,7 @@ fn verify_compositional_inner(
     callees: &HashMap<String, Contract>,
     metrics: &mut Option<&mut VerificationMetrics>,
 ) -> Result<CompositionalProof, String> {
+    let _width = Width::of(contract);
     if contract.ensures.is_empty() {
         return Err("contract must have at least one ensures clause".to_string());
     }
@@ -1331,7 +1388,7 @@ fn solver_with_calls(contract: &Contract, args: &[BV], constraints: &[Bool]) -> 
     solver
 }
 
-fn model_inputs(solver: &Solver, args: &[BV]) -> Result<Vec<u32>, String> {
+fn model_inputs(solver: &Solver, args: &[BV]) -> Result<Vec<u64>, String> {
     let model = solver
         .get_model()
         .ok_or_else(|| "Z3 returned SAT without a model".to_string())?;
@@ -1340,8 +1397,7 @@ fn model_inputs(solver: &Solver, args: &[BV]) -> Result<Vec<u32>, String> {
             model
                 .eval(arg, true)
                 .and_then(|value| value.as_u64())
-                .map(|value| value as u32)
-                .ok_or_else(|| "Z3 model did not contain a u32 argument".to_string())
+                .ok_or_else(|| "Z3 model did not contain an argument value".to_string())
         })
         .collect()
 }
@@ -1396,7 +1452,7 @@ fn prepare_calls(
                 .iter()
                 .map(value_as_bv)
                 .collect::<Result<Vec<_>, _>>()?;
-            let call_result = BV::new_const(format!("__axiom_call_{}", calls.next_id), 32);
+            let call_result = BV::new_const(format!("__axiom_call_{}", calls.next_id), bits());
             calls.next_id += 1;
             let callee_requires = preconditions_to_bool(callee, &callee_args, &call_result)?;
             let callee_ensures = ensures_to_bool(callee, &callee_args, &call_result)?;
@@ -1411,7 +1467,7 @@ fn prepare_calls(
             });
             let symbol = format!("__axiom_call_value_{}", calls.next_id);
             let value = match callee.return_type {
-                Type::Bool => Value::Bool(call_result.ne(BV::from_u64(0, 32))),
+                Type::Bool => Value::Bool(call_result.ne(BV::from_u64(0, bits()))),
                 Type::I32 => Value::I32(call_result),
                 Type::U32 => Value::U32(call_result),
                 _ => return Err(format!("callee {name} has a non-scalar return type")),
@@ -1533,7 +1589,7 @@ fn prepare_calls(
 fn value_as_bv(value: &Value) -> Result<BV, String> {
     match value {
         Value::U32(value) | Value::I32(value) => Ok(value.clone()),
-        Value::Bool(value) => Ok(value.ite(&BV::from_u64(1, 32), &BV::from_u64(0, 32))),
+        Value::Bool(value) => Ok(value.ite(&BV::from_u64(1, bits()), &BV::from_u64(0, bits()))),
         Value::Array(_) => Err("compositional calls cannot pass fixed arrays yet".to_string()),
     }
 }
@@ -1543,11 +1599,11 @@ fn symbolic_args(contract: &Contract) -> Result<Vec<BV>, String> {
     for param in &contract.params {
         match &param.ty {
             Type::U32 | Type::I32 | Type::Bool => {
-                args.push(BV::new_const(param.name.as_str(), 32));
+                args.push(BV::new_const(param.name.as_str(), bits()));
             }
             Type::FixedArray(element, length) if **element == Type::U32 => {
                 for index in 0..*length {
-                    args.push(BV::new_const(format!("{}_{}", param.name, index), 32));
+                    args.push(BV::new_const(format!("{}_{}", param.name, index), bits()));
                 }
             }
             _ => return Err(format!("unsupported parameter type: {}", param.name)),
@@ -1560,8 +1616,8 @@ fn constrain_bool_parameters(solver: &Solver, contract: &Contract, args: &[BV]) 
     let mut offset = 0;
     for param in &contract.params {
         if param.ty == Type::Bool {
-            let zero = args[offset].eq(BV::from_u64(0, 32));
-            let one = args[offset].eq(BV::from_u64(1, 32));
+            let zero = args[offset].eq(BV::from_u64(0, bits()));
+            let one = args[offset].eq(BV::from_u64(1, bits()));
             solver.assert(Bool::or(&[&zero, &one]));
         }
         offset += match param.ty {
@@ -1621,7 +1677,7 @@ fn expr_to_bv(expr: &Expr, args: &[BV]) -> Result<BV, String> {
             .get(*index as usize)
             .cloned()
             .ok_or_else(|| format!("candidate references missing argument {}", index)),
-        Expr::Const(value) => Ok(BV::from_u64(*value as u64, 32)),
+        Expr::Const(value) => Ok(BV::from_u64(*value as u64, bits())),
         Expr::Add(lhs, rhs) => Ok(&expr_to_bv(lhs, args)? + &expr_to_bv(rhs, args)?),
         Expr::Sub(lhs, rhs) => Ok(&expr_to_bv(lhs, args)? - &expr_to_bv(rhs, args)?),
         Expr::Mul(lhs, rhs) => Ok(&expr_to_bv(lhs, args)? * &expr_to_bv(rhs, args)?),
@@ -1632,7 +1688,7 @@ fn expr_to_bv(expr: &Expr, args: &[BV]) -> Result<BV, String> {
         Expr::Shl(lhs, rhs) => {
             let lhs = expr_to_bv(lhs, args)?;
             let rhs = expr_to_bv(rhs, args)?;
-            Ok(lhs.bvshl(rhs.bvand(BV::from_u64(31, 32))))
+            Ok(lhs.bvshl(rhs.bvand(BV::from_u64(u64::from(bits() - 1), bits()))))
         }
         Expr::BitAnd(lhs, rhs) => Ok(expr_to_bv(lhs, args)?.bvand(expr_to_bv(rhs, args)?)),
         Expr::BitOr(lhs, rhs) => Ok(expr_to_bv(lhs, args)?.bvor(expr_to_bv(rhs, args)?)),
@@ -1661,9 +1717,9 @@ fn expr_to_bv(expr: &Expr, args: &[BV]) -> Result<BV, String> {
         }
         Expr::ArrayGet { elements, index } => {
             let index = expr_to_bv(index, args)?;
-            let mut selected = BV::from_u64(0, 32);
+            let mut selected = BV::from_u64(0, bits());
             for (position, element) in elements.iter().enumerate().rev() {
-                let matches = index.eq(BV::from_u64(position as u64, 32));
+                let matches = index.eq(BV::from_u64(position as u64, bits()));
                 selected = matches.ite(&expr_to_bv(element, args)?, &selected);
             }
             Ok(selected)
@@ -1686,12 +1742,12 @@ fn expr_to_bool(expr: &Expr, args: &[BV]) -> Result<Bool, String> {
         Expr::SGe(lhs, rhs) => Ok(expr_to_bv(lhs, args)?.bvsge(&expr_to_bv(rhs, args)?)),
         Expr::And(lhs, rhs) => Ok(&expr_to_bool(lhs, args)? & &expr_to_bool(rhs, args)?),
         Expr::Or(lhs, rhs) => Ok(&expr_to_bool(lhs, args)? | &expr_to_bool(rhs, args)?),
-        _ => Ok(expr_to_bv(expr, args)?.ne(BV::from_u64(0, 32))),
+        _ => Ok(expr_to_bv(expr, args)?.ne(BV::from_u64(0, bits()))),
     }
 }
 
 fn bool_to_bv(value: Bool) -> BV {
-    value.ite(&BV::from_u64(1, 32), &BV::from_u64(0, 32))
+    value.ite(&BV::from_u64(1, bits()), &BV::from_u64(0, bits()))
 }
 
 fn require_defined_when(
@@ -1744,7 +1800,7 @@ fn spec_definedness(
             Ok(and(vec![
                 spec_definedness(array, contract, args, result, locals)?,
                 spec_definedness(index_expr, contract, args, result, locals)?,
-                index.bvult(BV::from_u64(elements.len() as u64, 32)),
+                index.bvult(BV::from_u64(elements.len() as u64, bits())),
             ]))
         }
         SpecExpr::ArrayUpdate(array, index_expr, value) => {
@@ -1761,7 +1817,7 @@ fn spec_definedness(
                 spec_definedness(array, contract, args, result, locals)?,
                 spec_definedness(index_expr, contract, args, result, locals)?,
                 spec_definedness(value, contract, args, result, locals)?,
-                index.bvult(BV::from_u64(elements.len() as u64, 32)),
+                index.bvult(BV::from_u64(elements.len() as u64, bits())),
             ]))
         }
         SpecExpr::Let(name, value, body) => {
@@ -1827,11 +1883,11 @@ fn spec_definedness(
             ];
             match (dividend, divisor) {
                 (Value::U32(_), Value::U32(divisor)) => {
-                    facts.push(divisor.eq(BV::from_u64(0, 32)).not());
+                    facts.push(divisor.eq(BV::from_u64(0, bits())).not());
                 }
                 (Value::I32(dividend), Value::I32(divisor) | Value::U32(divisor))
                 | (Value::U32(dividend), Value::I32(divisor)) => {
-                    facts.push(divisor.eq(BV::from_u64(0, 32)).not());
+                    facts.push(divisor.eq(BV::from_u64(0, bits())).not());
                     facts.push(signed_overflow(&dividend, &divisor).not());
                 }
                 _ => return Err("division needs two u32 or two i32 values".to_string()),
@@ -1863,8 +1919,8 @@ fn spec_definedness(
 /// `i32::MIN / -1` does not fit in i32 (and traps in WebAssembly).
 fn signed_overflow(dividend: &BV, divisor: &BV) -> Bool {
     Bool::and(&[
-        &dividend.eq(BV::from_u64(0x8000_0000, 32)),
-        &divisor.eq(BV::from_u64(0xffff_ffff, 32)),
+        &dividend.eq(BV::from_u64(1 << (bits() - 1), bits())),
+        &divisor.eq(BV::from_u64(mask(), bits())),
     ])
 }
 
@@ -1878,27 +1934,27 @@ fn ami_definedness(expr: &Expr, args: &[BV]) -> Result<Bool, String> {
             Ok(and(vec![
                 ami_definedness(lhs, args)?,
                 ami_definedness(rhs, args)?,
-                divisor.ne(BV::from_u64(0, 32)),
+                divisor.ne(BV::from_u64(0, bits())),
                 signed_overflow(&dividend, &divisor).not(),
             ]))
         }
         Expr::Div(lhs, rhs) | Expr::Rem(lhs, rhs) => Ok(and(vec![
             ami_definedness(lhs, args)?,
             ami_definedness(rhs, args)?,
-            expr_to_bv(rhs, args)?.ne(BV::from_u64(0, 32)),
+            expr_to_bv(rhs, args)?.ne(BV::from_u64(0, bits())),
         ])),
         Expr::ArrayGet { elements, index } => {
             let index_value = expr_to_bv(index, args)?;
             let index_defined = ami_definedness(index, args)?;
             let mut selected_defined = Vec::with_capacity(elements.len());
             for (position, element) in elements.iter().enumerate() {
-                let is_selected = index_value.eq(BV::from_u64(position as u64, 32));
+                let is_selected = index_value.eq(BV::from_u64(position as u64, bits()));
                 let element_defined = ami_definedness(element, args)?;
                 selected_defined.push(Bool::or(&[&is_selected.not(), &element_defined]));
             }
             Ok(and(vec![
                 index_defined,
-                index_value.bvult(BV::from_u64(elements.len() as u64, 32)),
+                index_value.bvult(BV::from_u64(elements.len() as u64, bits())),
                 and(selected_defined),
             ]))
         }
@@ -1907,7 +1963,7 @@ fn ami_definedness(expr: &Expr, args: &[BV]) -> Result<Bool, String> {
             let value_defined = ami_definedness(value, args)?;
             Ok(and(vec![
                 ami_definedness(condition, args)?,
-                condition_value.ne(BV::from_u64(0, 32)),
+                condition_value.ne(BV::from_u64(0, bits())),
                 value_defined,
             ]))
         }
@@ -1970,7 +2026,7 @@ fn spec_to_value(
     match expr {
         SpecExpr::Ident(name) if name == "result" => {
             if contract.return_type == Type::Bool {
-                Ok(Value::Bool(result.ne(BV::from_u64(0, 32))))
+                Ok(Value::Bool(result.ne(BV::from_u64(0, bits()))))
             } else if contract.return_type == Type::I32 {
                 Ok(Value::I32(result.clone()))
             } else {
@@ -1987,7 +2043,7 @@ fn spec_to_value(
             let (offsets, _) = axiom_parser::verified_abi_layout(&contract.params)?;
             let offset = offsets[index];
             match contract.params[index].ty {
-                Type::Bool => Ok(Value::Bool(args[offset].ne(BV::from_u64(0, 32)))),
+                Type::Bool => Ok(Value::Bool(args[offset].ne(BV::from_u64(0, bits())))),
                 Type::I32 => Ok(Value::I32(args[offset].clone())),
                 Type::FixedArray(_, length) => {
                     Ok(Value::Array(args[offset..offset + length].to_vec()))
@@ -1995,12 +2051,12 @@ fn spec_to_value(
                 _ => Ok(Value::U32(args[offset].clone())),
             }
         }
-        SpecExpr::Number(value) => Ok(Value::U32(BV::from_u64(*value as u64, 32))),
+        SpecExpr::Number(value) => Ok(Value::U32(BV::from_u64(literal(*value)?, bits()))),
         SpecExpr::Bool(value) => Ok(Value::Bool(Bool::from_bool(*value))),
         SpecExpr::Field(value, field) => {
             match spec_to_value(value, contract, args, result, locals)? {
                 Value::Array(elements) if field == "length" => {
-                    Ok(Value::U32(BV::from_u64(elements.len() as u64, 32)))
+                    Ok(Value::U32(BV::from_u64(elements.len() as u64, bits())))
                 }
                 _ => Err("field access is only supported for fixed array length".to_string()),
             }
@@ -2014,9 +2070,9 @@ fn spec_to_value(
             let Value::Array(elements) = array else {
                 return Err("indexed reads require a fixed verified array".to_string());
             };
-            let mut selected = BV::from_u64(0, 32);
+            let mut selected = BV::from_u64(0, bits());
             for (position, element) in elements.iter().enumerate().rev() {
-                let matches = index.eq(BV::from_u64(position as u64, 32));
+                let matches = index.eq(BV::from_u64(position as u64, bits()));
                 selected = matches.ite(element, &selected);
             }
             Ok(Value::U32(selected))
@@ -2040,7 +2096,7 @@ fn spec_to_value(
                     .enumerate()
                     .map(|(position, element)| {
                         index
-                            .eq(BV::from_u64(position as u64, 32))
+                            .eq(BV::from_u64(position as u64, bits()))
                             .ite(&value, element)
                     })
                     .collect(),
@@ -2140,14 +2196,14 @@ fn spec_to_value(
                 | (BinaryOp::MulWrap, Value::U32(lhs), Value::I32(rhs)) => {
                     Ok(Value::I32(&lhs * &rhs))
                 }
-                (BinaryOp::Shl, Value::U32(lhs), Value::U32(rhs)) => {
-                    Ok(Value::U32(lhs.bvshl(rhs.bvand(BV::from_u64(31, 32)))))
-                }
+                (BinaryOp::Shl, Value::U32(lhs), Value::U32(rhs)) => Ok(Value::U32(
+                    lhs.bvshl(rhs.bvand(BV::from_u64(u64::from(bits() - 1), bits()))),
+                )),
                 (BinaryOp::Shl, Value::I32(lhs), Value::I32(rhs))
                 | (BinaryOp::Shl, Value::I32(lhs), Value::U32(rhs))
-                | (BinaryOp::Shl, Value::U32(lhs), Value::I32(rhs)) => {
-                    Ok(Value::I32(lhs.bvshl(rhs.bvand(BV::from_u64(31, 32)))))
-                }
+                | (BinaryOp::Shl, Value::U32(lhs), Value::I32(rhs)) => Ok(Value::I32(
+                    lhs.bvshl(rhs.bvand(BV::from_u64(u64::from(bits() - 1), bits()))),
+                )),
                 (BinaryOp::BitAnd, Value::U32(lhs), Value::U32(rhs)) => {
                     Ok(Value::U32(lhs.bvand(rhs)))
                 }
@@ -2339,6 +2395,7 @@ mod tests {
             ensures_spans: Vec::new(),
             decimals: 0,
             labels: Vec::new(),
+            wide: false,
         };
         assert!(matches!(
             check_contract(&invalid).unwrap(),
