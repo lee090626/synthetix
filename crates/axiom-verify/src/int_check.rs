@@ -14,6 +14,14 @@ use z3::{
     ast::{Ast, Bool, Dynamic, Int},
 };
 
+/// 2^width as an integer; 2^64 does not fit in a u64.
+fn pow2(width: u32) -> Int {
+    (1u128 << width)
+        .to_string()
+        .parse()
+        .expect("a decimal number is a valid Z3 integer")
+}
+
 /// Bounds the integer try; nonlinear integer problems can run without end.
 const TIMEOUT_MS: u32 = 1000;
 
@@ -91,7 +99,7 @@ impl Lowering {
         let kind = expr.decl().kind();
         if let Some(bv) = expr.as_bv() {
             let width = bv.get_size();
-            if width > 63 {
+            if width > 64 {
                 return None;
             }
             if kind == DeclKind::Bnum {
@@ -104,14 +112,14 @@ impl Lowering {
                     None => {
                         let var = Int::new_const(format!("int!{name}"));
                         self.ranges.push(var.ge(&Int::from_u64(0)));
-                        self.ranges.push(var.lt(&Int::from_u64(1 << width)));
+                        self.ranges.push(var.lt(&pow2(width)));
                         self.vars.insert(name, var.clone());
                         var
                     }
                 };
                 return Some(Lowered::Int(var));
             }
-            let max = Int::from_u64((1 << width) - 1);
+            let max = Int::sub(&[pow2(width), Int::from_u64(1)]);
             let args = self.ints(expr)?;
             let value = match kind {
                 DeclKind::Badd => Int::add(&args),

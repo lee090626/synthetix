@@ -173,6 +173,8 @@ pub struct Decimals {
     pub states: Vec<(String, String, u32)>,
     /// Rules whose answers are texts: answer `n` means `labels[n]`.
     pub labels: Vec<(String, Vec<String>)>,
+    /// Rules with 64-bit numbers (`with big numbers`).
+    pub wide: Vec<String>,
 }
 
 impl Current {
@@ -254,6 +256,9 @@ pub fn translate_with_decimals(source: &str) -> Result<(String, Decimals), Strin
                 out[index] = header.text;
                 if header.decimals > 0 {
                     decimals.rules.push((header.rule.clone(), header.decimals));
+                }
+                if header.wide {
+                    decimals.wide.push(header.rule.clone());
                 }
                 current = Some(Current::Rule(Block {
                     name: header.rule,
@@ -926,6 +931,7 @@ pub fn apply_decimals(module: &mut crate::ast::Module, decimals: &Decimals) -> R
         .collect();
     for contract in &mut module.contracts {
         contract.decimals = places_of(&contract.name);
+        contract.wide = decimals.wide.contains(&contract.name);
         contract.labels = decimals
             .labels
             .iter()
@@ -1043,7 +1049,11 @@ fn change_places(expr: SpecExpr, from: u32, to: u32) -> SpecExpr {
         std::cmp::Ordering::Less => (BinaryOp::MulWrap, 10u32.pow(to - from)),
         std::cmp::Ordering::Greater => (BinaryOp::Div, 10u32.pow(from - to)),
     };
-    SpecExpr::Binary(op, Box::new(expr), Box::new(SpecExpr::Number(factor)))
+    SpecExpr::Binary(
+        op,
+        Box::new(expr),
+        Box::new(SpecExpr::Number(factor.into())),
+    )
 }
 
 /// Wraps calls to rules with other places: inputs go to the callee's places,
@@ -1100,14 +1110,14 @@ fn rescale(expr: SpecExpr, scale: u32) -> SpecExpr {
                 boxed(*left),
                 boxed(*right),
             )),
-            Box::new(SpecExpr::Number(scale)),
+            Box::new(SpecExpr::Number(scale.into())),
         ),
         SpecExpr::Binary(BinaryOp::Div, left, right) => SpecExpr::Binary(
             BinaryOp::Div,
             Box::new(SpecExpr::Binary(
                 BinaryOp::MulWrap,
                 boxed(*left),
-                Box::new(SpecExpr::Number(scale)),
+                Box::new(SpecExpr::Number(scale.into())),
             )),
             boxed(*right),
         ),
@@ -1124,7 +1134,7 @@ fn rescale(expr: SpecExpr, scale: u32) -> SpecExpr {
 }
 
 /// Proves that `+`, `-`, `*`, and `/` stay in range: `0..=u32::MAX`, or the
-/// i32 range for `can be negative` rules. Facts come from `need` lines and,
+/// i32 range for `can be negative` rules (u64 and i64 `with big numbers`). Facts come from `need` lines and,
 /// inside a rule, from that rule's condition (and the failed conditions of the
 /// rules above it).
 ///
@@ -1133,12 +1143,13 @@ fn rescale(expr: SpecExpr, scale: u32) -> SpecExpr {
 /// rule is returned for the rules after it.
 pub fn check_ranges(
     contract: &Contract,
-    known: &[(String, i64, i64)],
-) -> Result<(i64, i64), String> {
-    let limits = if contract.return_type == Type::I32 {
-        (i64::from(i32::MIN), i64::from(i32::MAX))
-    } else {
-        (0, i64::from(u32::MAX))
+    known: &[(String, i128, i128)],
+) -> Result<(i128, i128), String> {
+    let limits = match (contract.return_type == Type::I32, contract.wide) {
+        (true, false) => (i128::from(i32::MIN), i128::from(i32::MAX)),
+        (false, false) => (0, i128::from(u32::MAX)),
+        (true, true) => (i128::from(i64::MIN), i128::from(i64::MAX)),
+        (false, true) => (0, i128::from(u64::MAX)),
     };
     let mut facts = Facts {
         limits,
@@ -1173,11 +1184,11 @@ pub fn check_ranges(
 /// What is known about the inputs: value bounds and answers of earlier rules.
 #[derive(Clone)]
 struct Facts {
-    limits: (i64, i64),
-    calls: Vec<(String, i64, i64)>,
-    bounds: Vec<(String, i64, i64)>,
+    limits: (i128, i128),
+    calls: Vec<(String, i128, i128)>,
+    bounds: Vec<(String, i128, i128)>,
     /// Bounds on whole expressions, like `need sum(part) >= 1`.
-    exprs: Vec<(SpecExpr, i64, i64)>,
+    exprs: Vec<(SpecExpr, i128, i128)>,
 }
 
 impl Facts {
@@ -1219,7 +1230,7 @@ impl Facts {
         }
     }
 
-    fn bound_expr(&mut self, expr: &SpecExpr, op: BinaryOp, number: i64) {
+    fn bound_expr(&mut self, expr: &SpecExpr, op: BinaryOp, number: i128) {
         let index = match self.exprs.iter().position(|(known, _, _)| known == expr) {
             Some(index) => index,
             None => {
@@ -1238,7 +1249,7 @@ impl Facts {
         }
     }
 
-    fn bound(&mut self, name: &str, op: BinaryOp, number: i64) {
+    fn bound(&mut self, name: &str, op: BinaryOp, number: i128) {
         let Some(entry) = self.bounds.iter_mut().find(|(param, _, _)| param == name) else {
             return;
         };
@@ -1446,14 +1457,25 @@ struct Header {
     rule: String,
     text: String,
     signed: bool,
+    wide: bool,
     decimals: u32,
     lists: Vec<(String, usize)>,
 }
 
 /// Parses `name(a, b)`, `name(prices[3])`, `name(a, b) can be negative`, and
-/// `name(a, b) with 2 decimals`.
+/// `name(a, b) with 2 decimals`, and `name(a, b) with big numbers`.
 fn header(line: &str, line_no: usize) -> Result<Header, String> {
     let (line, decimals) = strip_decimals(line, line_no)?;
+    let (line, wide) = match line.strip_suffix("with big numbers") {
+        Some(rest) => (rest.trim_end(), true),
+        None => (line, false),
+    };
+    if wide && decimals > 0 {
+        // shortcut: decimals scale by 10^N in u32; allow both once scaling is 64-bit.
+        return Err(format!(
+            "line {line_no}: a rule cannot have both `with big numbers` and decimals yet"
+        ));
+    }
     let (line, signed) = match line.strip_suffix("can be negative") {
         Some(rest) => (rest.trim_end(), true),
         None => (line, false),
@@ -1487,6 +1509,7 @@ fn header(line: &str, line_no: usize) -> Result<Header, String> {
         rule: name.to_string(),
         text: format!("export contract {name}({}) -> {ty} {{", typed.join(", ")),
         signed,
+        wide,
         decimals,
         lists,
     })
@@ -2144,9 +2167,9 @@ fn find_call(text: &str) -> Option<usize> {
 }
 
 /// The value of a number expression such as `0 - 5` (a written `-5`).
-fn constant(expr: &SpecExpr) -> Option<i64> {
+fn constant(expr: &SpecExpr) -> Option<i128> {
     match expr {
-        SpecExpr::Number(n) => Some(i64::from(*n)),
+        SpecExpr::Number(n) => Some(i128::from(*n)),
         SpecExpr::Binary(BinaryOp::SubWrap | BinaryOp::SubChecked, left, right) => {
             Some(constant(left)? - constant(right)?)
         }
@@ -2185,9 +2208,9 @@ fn flip(op: BinaryOp) -> BinaryOp {
     }
 }
 
-fn range(expr: &SpecExpr, facts: &Facts, name: &str) -> Result<(i64, i64), String> {
+fn range(expr: &SpecExpr, facts: &Facts, name: &str) -> Result<(i128, i128), String> {
     let (min, max) = facts.limits;
-    let fits = |low: i64, high: i64, op: &str| {
+    let fits = |low: i128, high: i128, op: &str| {
         if low < min || high > max {
             Err(out_of_range(name, op, facts.limits))
         } else {
@@ -2195,7 +2218,7 @@ fn range(expr: &SpecExpr, facts: &Facts, name: &str) -> Result<(i64, i64), Strin
         }
     };
     Ok(match expr {
-        SpecExpr::Number(n) => (i64::from(*n), i64::from(*n)),
+        SpecExpr::Number(n) => (i128::from(*n), i128::from(*n)),
         SpecExpr::Ident(ident) => facts
             .bounds
             .iter()
@@ -2224,7 +2247,7 @@ fn range(expr: &SpecExpr, facts: &Facts, name: &str) -> Result<(i64, i64), Strin
         SpecExpr::Binary(op, left, right) => {
             let (l_low, l_high) = range(left, facts, name)?;
             let (r_low, r_high) = range(right, facts, name)?;
-            let known = |(low, high): (i64, i64), side: &SpecExpr| {
+            let known = |(low, high): (i128, i128), side: &SpecExpr| {
                 facts
                     .exprs
                     .iter()
@@ -2237,18 +2260,19 @@ fn range(expr: &SpecExpr, facts: &Facts, name: &str) -> Result<(i64, i64), Strin
                 BinaryOp::AddWrap => fits(l_low + r_low, l_high + r_high, "+")?,
                 BinaryOp::SubWrap => fits(l_low - r_high, l_high - r_low, "-")?,
                 BinaryOp::MulWrap => {
+                    // Bounds stay within ±2^64, so products fit in i128.
                     let corners = [
-                        i128::from(l_low) * i128::from(r_low),
-                        i128::from(l_low) * i128::from(r_high),
-                        i128::from(l_high) * i128::from(r_low),
-                        i128::from(l_high) * i128::from(r_high),
+                        l_low * r_low,
+                        l_low * r_high,
+                        l_high * r_low,
+                        l_high * r_high,
                     ];
                     let low = corners.iter().min().copied().unwrap_or_default();
                     let high = corners.iter().max().copied().unwrap_or_default();
-                    if low < i128::from(min) || high > i128::from(max) {
+                    if low < min || high > max {
                         return Err(out_of_range(name, "*", facts.limits));
                     }
-                    (low as i64, high as i64)
+                    (low, high)
                 }
                 BinaryOp::Div | BinaryOp::Rem if min < 0 && (r_low > 0 || r_high < 0) => {
                     if *op == BinaryOp::Rem {
@@ -2287,7 +2311,7 @@ fn range(expr: &SpecExpr, facts: &Facts, name: &str) -> Result<(i64, i64), Strin
     })
 }
 
-fn out_of_range(name: &str, op: &str, (min, max): (i64, i64)) -> String {
+fn out_of_range(name: &str, op: &str, (min, max): (i128, i128)) -> String {
     format!(
         "{name}: `{op}` may go outside {min} to {max}; add `need name <= limit` lines for its inputs"
     )
@@ -2379,6 +2403,15 @@ mod tests {
         assert!(translate("f(x)\n  promise answer >= x\n  always -> x\n").is_err());
         assert!(translate("f(a[2])\n  always -> a + 1\n  promise answer >= 1\n").is_err());
         assert_eq!(answer_as_result("answer + answers"), "result + answers");
+    }
+
+    #[test]
+    fn big_numbers_on_the_name_line() {
+        let (_, decimals) =
+            translate_with_decimals("f(a) can be negative with big numbers\n  always -> a\n")
+                .unwrap();
+        assert_eq!(decimals.wide, ["f"]);
+        assert!(translate("f(a) with big numbers with 2 decimals\n  always -> a\n").is_err());
     }
 
     #[test]

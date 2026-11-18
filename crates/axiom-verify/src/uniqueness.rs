@@ -17,9 +17,9 @@ use super::{ensures_to_bool, model_inputs, preconditions_to_bool, spec_definedne
 pub enum ResultUniqueness {
     AtMostOne,
     NonUnique {
-        inputs: Vec<u32>,
-        first: u32,
-        second: u32,
+        inputs: Vec<u64>,
+        first: u64,
+        second: u64,
     },
     EmptyDomain,
     Unknown {
@@ -34,6 +34,7 @@ pub fn analyze_result_uniqueness(
     timeout_ms: u32,
 ) -> Result<ResultUniqueness, String> {
     let started = Instant::now();
+    let _width = crate::Width::of(contract);
     axiom_parser::validate(contract)?;
     if contract.kind != DeclarationKind::Contract || contract.return_type != Type::U32 {
         return Err("result analysis supports contract declarations returning u32 only".into());
@@ -54,9 +55,11 @@ pub fn analyze_result_uniqueness(
     }
     let (_, count) = axiom_parser::verified_abi_layout(&contract.params)?;
     // Fresh symbols prevent user names and flattened array names from aliasing.
-    let args: Vec<BV> = (0..count).map(|_| BV::fresh_const("input", 32)).collect();
-    let first = BV::fresh_const("output", 32);
-    let second = BV::fresh_const("output", 32);
+    let args: Vec<BV> = (0..count)
+        .map(|_| BV::fresh_const("input", crate::bits()))
+        .collect();
+    let first = BV::fresh_const("output", crate::bits());
+    let second = BV::fresh_const("output", crate::bits());
     let locals = HashMap::new();
     let solver = Solver::new();
     let requires_defined = contract
@@ -179,7 +182,8 @@ mod tests {
                 panic!("expected two outputs for {source}");
             };
             assert_ne!(first, second);
-            for result in [first, second] {
+            let inputs: Vec<u32> = inputs.iter().map(|value| *value as u32).collect();
+            for result in [first as u32, second as u32] {
                 for clause in contract.requires.iter().chain(&contract.ensures) {
                     assert_eq!(
                         reference::eval_spec(clause, &contract, &inputs, result).unwrap(),

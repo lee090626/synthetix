@@ -17,7 +17,7 @@ pub const MAX_VERIFIED_ARRAY_LEN: usize = 16;
 pub const MAX_VERIFIED_LOOP_ITERATIONS: u32 = 16;
 pub const MAX_VERIFIED_RECURSION_DEPTH: u32 = 16;
 /// Bump when verified expression, type, or lowering semantics change.
-pub const VERIFIED_SEMANTICS_VERSION: &str = "v6.3-bounded-program-model";
+pub const VERIFIED_SEMANTICS_VERSION: &str = "v6.4-wide-words";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Param {
@@ -63,7 +63,7 @@ pub enum BinaryOp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpecExpr {
     Ident(String),
-    Number(u32),
+    Number(u64),
     Bool(bool),
     Text(String),
     List(Vec<SpecExpr>),
@@ -106,6 +106,9 @@ pub struct Contract {
     pub decimals: u32,
     /// Text answers: the rule returns `n` for `labels[n]`. Empty for numbers.
     pub labels: Vec<String>,
+    /// 64-bit words (`with big numbers`): `u32`/`i32` values, literals and
+    /// arithmetic are 64 bits wide in this contract.
+    pub wide: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

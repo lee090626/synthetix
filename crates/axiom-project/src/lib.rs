@@ -992,6 +992,18 @@ fn verification_order(
                     dependency.call_name
                 ));
             }
+            // shortcut: a 32-bit rule cannot call a 64-bit one or back; add
+            // widening calls when a project needs to mix them.
+            if let Some(callee) = definitions.get(target)
+                && callee.contract.wide != definition.contract.wide
+            {
+                return Err(format!(
+                    "{}: {} and {} must both use `with big numbers` or neither",
+                    key.0.display(),
+                    key.1,
+                    dependency.call_name
+                ));
+            }
             // Calls within one file convert between places when parsed.
             if let Some(callee) = definitions.get(target)
                 && target.0 != key.0

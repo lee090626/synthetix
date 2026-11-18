@@ -129,6 +129,13 @@ impl VerifiedComputation {
         if contract.kind == DeclarationKind::Extern {
             return Err(CompileError::ExternalBoundary);
         }
+        if contract.wide {
+            // shortcut: runs through 32-bit WebAssembly; lift with #159.
+            return Err(CompileError::Engine(format!(
+                "{}: rules `with big numbers` cannot run yet",
+                contract.name
+            )));
+        }
         match check_contract(contract).map_err(CompileError::Engine)? {
             ContractCheck::Valid => {}
             result => return Err(CompileError::Contract(result)),

@@ -263,6 +263,7 @@ impl<'a> Parser<'a> {
             ensures_spans: Vec::new(),
             decimals: 0,
             labels: Vec::new(),
+            wide: false,
         })
     }
 
@@ -373,6 +374,7 @@ impl<'a> Parser<'a> {
             ensures_spans,
             decimals: 0,
             labels: Vec::new(),
+            wide: false,
         })
     }
 
@@ -702,12 +704,17 @@ impl<'a> Parser<'a> {
                 return Err(self.error(format!("Expected static loop bound, found {other:?}")));
             }
         };
-        if end < start || end - start > MAX_VERIFIED_LOOP_ITERATIONS {
-            return Err(self.error(format!(
-                "bounded loop must have 0..={} iterations",
-                MAX_VERIFIED_LOOP_ITERATIONS
-            )));
-        }
+        let (start, end) = match (u32::try_from(start), u32::try_from(end)) {
+            (Ok(start), Ok(end)) if end >= start && end - start <= MAX_VERIFIED_LOOP_ITERATIONS => {
+                (start, end)
+            }
+            _ => {
+                return Err(self.error(format!(
+                    "bounded loop must have 0..={} iterations",
+                    MAX_VERIFIED_LOOP_ITERATIONS
+                )));
+            }
+        };
         self.expect(Token::With)?;
         let accumulator = self.expect_ident()?;
         if accumulator == index {
