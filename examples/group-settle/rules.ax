@@ -15,10 +15,27 @@ share(amount, part[4], fixed[4], unit)
   need unit >= 1 and unit <= 100
   always -> fixed + up(up((amount - sum(fixed)) * part / sum(part)) / unit) * unit
 
+# 지금까지의 합에 이번 결제를 더함
+add_up(total[4], more[4])
+  need total <= 100000000
+  need more <= 10000000
+  always -> total + more
+
 # 사람마다 더 낼 돈 (음수면 돌려받을 돈)
-balance(share1[4], paid1[4], share2[4], paid2[4]) can be negative
-  need share1 >= 0 and share1 <= 20000000
-  need paid1 >= 0 and paid1 <= 10000000
-  need share2 >= 0 and share2 <= 20000000
-  need paid2 >= 0 and paid2 <= 10000000
-  always -> share1 + share2 - paid1 - paid2
+owe(shares[4], paid[4]) can be negative
+  need shares >= 0 and shares <= 100000000
+  need paid >= 0 and paid <= 100000000
+  always -> shares - paid
+
+# 새 모임: 모두 0으로
+clear(total[4])
+  always -> total * 0
+
+# 결제 수 하나 늘리기
+next(count)
+  need count <= 1000
+  always -> count + 1
+
+# 결제 수를 0으로
+zero(count)
+  always -> 0

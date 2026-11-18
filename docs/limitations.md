@@ -39,7 +39,7 @@ does not. The detailed rules are in [semantics.md](semantics.md) and
 - **Text answers are for pages.** A rule with text answers cannot be used by
   another rule, and `contracts.js` returns the answer's position, not the text.
 - **Settling is not the fewest transfers.** `settle` uses at most n - 1
-  transfers, not always the fewest, and a group of 4 takes about 30 seconds to
-  prove (16 rules).
+  transfers, not always the fewest, and a group of 4 takes about 15 seconds to
+  prove (16 functions).
 - **Not validated with real users.** Ergonomics and error messages reflect
   internal testing only.

@@ -207,9 +207,9 @@ Pass a list to a rule by name: `total = cart(prices)`.
 and fills a list with one item per pair of people, so `owe[4]` needs
 `sends[16]`; item `(i - 1) * 4 + j` is what person `i` sends person `j`.
 People who owe pay in list order to people who are owed, in list order.
-Synthetix proves each amount is computed as written; tests check that every
-balance reaches 0, only people who owe pay, nobody pays more than they owe,
-and there are at most n - 1 transfers. It does not promise the fewest
+Synthetix proves every transfer is never below 0, never more than the sender
+owes, and only goes from someone who owes to someone who is owed; tests check
+that every balance reaches 0 and there are at most n - 1 transfers. It does not promise the fewest
 transfers. See [examples/group-settle](../examples/group-settle).
 A value with decimals goes only into a rule with the same places. On a page,
 values can be calculated and compared (`show price + tax`,
