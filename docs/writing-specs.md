@@ -184,6 +184,11 @@ page Shop
 | `save price = 0 with 2 decimals` | Values typed and shown with 2 decimal places |
 | `save d = 0 can be negative with 2 decimals` | Both |
 | `save grade = ""` | A text value, for a rule with text answers |
+| `save joined = yes` | A yes/no value (a check box); a rule gets 1 for yes, 0 for no |
+| `save names[4] = ""` | Text values, like people's names |
+| `    owe = to_pay(paid, share)` | (under `when`) Fill list `owe` from a rule with a list answer |
+| `    sends = settle(owe)` | (under `when`) Who sends whom how much so every `owe` reaches 0 |
+| `show transfers(sends, names)` | "name → name amount" lines, a copy button, and saved past results |
 | `when "Label" is clicked` | A button; on click, the lines below it run in order |
 | `    a = rule(...)` | (under `when`) Set `a` to the rule's answer |
 
@@ -197,6 +202,15 @@ when "Calc" is clicked
 ```
 
 Pass a list to a rule by name: `total = cart(prices)`.
+
+`settle(owe)` takes the list of what each person still owes (below 0: is owed)
+and fills a list with one item per pair of people, so `owe[4]` needs
+`sends[16]`; item `(i - 1) * 4 + j` is what person `i` sends person `j`.
+People who owe pay in list order to people who are owed, in list order.
+Synthetix proves each amount is computed as written; tests check that every
+balance reaches 0, only people who owe pay, nobody pays more than they owe,
+and there are at most n - 1 transfers. It does not promise the fewest
+transfers. See [examples/group-settle](../examples/group-settle).
 A value with decimals goes only into a rule with the same places. On a page,
 values can be calculated and compared (`show price + tax`,
 `show "Pricey" if price > 10.5`); values with fewer places are raised to the

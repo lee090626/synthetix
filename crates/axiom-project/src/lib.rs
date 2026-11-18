@@ -1980,6 +1980,11 @@ fn validate_elements(
                 page_expr_type(value, states, records, locals, source)?;
             }
             PageElement::ShowText { .. } => {}
+            PageElement::Transfers { sends, names } => {
+                for state in sends.iter().chain(names) {
+                    path_type(state, states, records, locals, source)?;
+                }
+            }
             PageElement::WhenShow { condition, .. } => {
                 if page_expr_type(condition, states, records, locals, source)? != Type::Bool {
                     return Err(format!(

@@ -462,6 +462,11 @@ impl<'a> Parser<'a> {
         }
         let value = self.parse_expr(0)?;
         self.expect(Token::Semi)?;
+        if let SpecExpr::Call(name, args) = &value
+            && name == "transfers"
+        {
+            return transfers(args).map_err(|message| self.error(message));
+        }
         Ok(match value {
             SpecExpr::Ident(state) => PageElement::Show { state },
             value => PageElement::ShowExpr { value },
@@ -888,4 +893,23 @@ impl<'a> Parser<'a> {
 
         Ok(lhs)
     }
+}
+
+/// `transfers(s_1, .., s_nn, name_1, .., name_n)`: n*n amounts, then n names.
+fn transfers(args: &[SpecExpr]) -> Result<PageElement, String> {
+    let names: Vec<String> = args
+        .iter()
+        .map(|arg| match arg {
+            SpecExpr::Ident(name) => Ok(name.clone()),
+            _ => Err("transfers takes a list of amounts and a list of names".to_string()),
+        })
+        .collect::<Result<_, _>>()?;
+    let size = (1..=16).find(|n| n * n + n == names.len()).ok_or_else(|| {
+        "transfers takes n*n amounts (one per pair of people) and n names".to_string()
+    })?;
+    let (sends, people) = names.split_at(size * size);
+    Ok(PageElement::Transfers {
+        sends: sends.to_vec(),
+        names: people.to_vec(),
+    })
 }
