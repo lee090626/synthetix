@@ -423,9 +423,12 @@ fn compile_contracts_inner(
                     // The answer lines fix the answer, so with `promise` lines a
                     // failed search means a promise does not always hold.
                     let hint = if linked.contract.ensures.len() > 1 {
-                        "\nhint: a `promise` line may not hold for every allowed input"
+                        promise_counterexample(&linked.contract, options).unwrap_or_else(|| {
+                            "\nhint: a `promise` line may not hold for every allowed input"
+                                .to_string()
+                        })
                     } else {
-                        ""
+                        String::new()
                     };
                     format!("{}:{}: {error}{hint}", linked.source.display(), name)
                 })?;
@@ -573,6 +576,43 @@ fn compile_contracts_inner(
         .iter()
         .filter_map(|linked| compiled_by_id.remove(&ContractId::from(linked)))
         .collect())
+}
+
+/// For a rule whose `promise` lines failed: the first promise (counted from
+/// 1) that an allowed input breaks, with that input and the answer.
+fn promise_counterexample(
+    contract: &axiom_parser::Contract,
+    options: axiom_synth::SynthesisOptions,
+) -> Option<String> {
+    let mut answer_only = contract.clone();
+    answer_only.ensures.truncate(1);
+    let candidate = axiom_synth::synthesize_with_options(&answer_only, options).ok()?;
+    for (index, promise) in contract.ensures.iter().enumerate().skip(1) {
+        let mut one = answer_only.clone();
+        one.ensures.push(promise.clone());
+        if let Ok(axiom_verify::ProofResult::Counterexample(values)) =
+            axiom_verify::verify(&one, &candidate)
+        {
+            let show = |ty: &Type, v: u32| match ty {
+                Type::I32 => (v as i32).to_string(),
+                _ => v.to_string(),
+            };
+            let inputs: Vec<String> = contract
+                .params
+                .iter()
+                .zip(&values)
+                .map(|(p, v)| format!("{}={}", p.name, show(&p.ty, *v)))
+                .collect();
+            let answer = axiom_verify::reference::eval_ami(&candidate, &values)
+                .map(|v| show(&contract.return_type, v))
+                .unwrap_or_else(|e| e);
+            return Some(format!(
+                "\npromise {index} does not hold for {} (answer {answer})",
+                inputs.join(", ")
+            ));
+        }
+    }
+    None
 }
 
 fn proof_cache_key(

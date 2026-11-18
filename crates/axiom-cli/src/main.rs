@@ -30,7 +30,7 @@ usage:
   axiom dev [--port N] [--no-open] [--once]
   axiom check <contract.ax>
   axiom analyze <contract.ax> [--timeout-ms N] [--report report.json]
-  axiom check
+  axiom check [--report check.json]
   axiom build <contract.ax> [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N] [--max-memory-bytes N] [--emit js]
   axiom build [--emit js|rust]
   axiom run <contract.ax> [--] [<value>...] [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N] [--max-memory-bytes N]
@@ -109,10 +109,20 @@ fn new_command(args: &[String]) -> Result<(), String> {
 }
 
 fn check_command(args: &[String]) -> Result<(), String> {
-    if args.is_empty() {
+    let report = match args {
+        [] => None,
+        [flag, path] if flag == "--report" => Some(path),
+        _ => None,
+    };
+    if args.is_empty() || report.is_some() {
         let config =
             axiom_project::find_config(env::current_dir().map_err(|error| error.to_string())?)?;
-        return web::check(&config);
+        let result = web::check(&config);
+        if let Some(path) = report {
+            fs::write(path, format!("{}\n", check_report(&result)))
+                .map_err(|error| format!("cannot write check report {path}: {error}"))?;
+        }
+        return result;
     }
     let input = single_input(args, "check")?;
     let contract = read_contract(input)?;
@@ -126,6 +136,50 @@ fn check_command(args: &[String]) -> Result<(), String> {
     print_unreachable_rules(&contract);
     println!("status: valid");
     Ok(())
+}
+
+/// `axiom check --report`: the outcome as JSON for tools and AI agents. The
+/// error text is kept whole; known parts are also given as fields.
+fn check_report(result: &Result<(), String>) -> serde_json::Value {
+    let Err(message) = result else {
+        return serde_json::json!({ "ok": true });
+    };
+    let mut error = serde_json::json!({ "message": message });
+    let first = message.lines().next().unwrap_or_default();
+    // `path.ax:rule: ...`, `path.ax: line N: ...` or `path.ax:N:M: ...`
+    if let Some((file, rest)) = first.split_once(".ax") {
+        error["file"] = format!("{}.ax", file.trim_start_matches("error: ")).into();
+        let rest = rest.trim_start_matches(':').trim_start();
+        let head = rest.split(':').next().unwrap_or_default();
+        if let Some(line) = rest.strip_prefix("line ").and_then(|r| r.split(':').next()) {
+            error["line"] = line.trim().parse::<u64>().ok().into();
+        } else if let Ok(line) = head.parse::<u64>() {
+            error["line"] = line.into();
+        } else if !head.is_empty() && !head.contains(' ') {
+            error["rule"] = head.into();
+        }
+    }
+    // `promise N does not hold for a=1, b=2 (answer 3)`
+    if let Some(line) = message.lines().find(|l| l.starts_with("promise ")) {
+        let mut words = line.split(' ');
+        error["promise"] = words.nth(1).and_then(|n| n.parse::<u64>().ok()).into();
+        if let Some((inputs, answer)) = line
+            .split_once(" for ")
+            .and_then(|(_, r)| r.rsplit_once(" (answer "))
+        {
+            let inputs: serde_json::Map<_, _> = inputs
+                .split(", ")
+                .filter_map(|pair| pair.split_once('='))
+                .filter_map(|(k, v)| Some((k.to_string(), v.parse::<i64>().ok()?.into())))
+                .collect();
+            error["inputs"] = inputs.into();
+            error["answer"] = answer.trim_end_matches(')').parse::<i64>().ok().into();
+        }
+    }
+    if let Some(hint) = message.lines().find_map(|l| l.strip_prefix("hint: ")) {
+        error["hint"] = hint.into();
+    }
+    serde_json::json!({ "ok": false, "error": error })
 }
 
 fn analyze_command(args: &[String]) -> Result<(), String> {
@@ -1145,6 +1199,24 @@ fn default_output_path(input: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn check_report_fields() {
+        assert_eq!(check_report(&Ok(())), serde_json::json!({ "ok": true }));
+        let report = check_report(&Err(
+            "a/rules.ax:supply_of: RESOURCE_LIMIT: x\npromise 2 does not hold for total=9, d=-1 (answer 8)".into(),
+        ));
+        assert_eq!(report["error"]["rule"], "supply_of");
+        assert_eq!(report["error"]["promise"], 2);
+        assert_eq!(
+            report["error"]["inputs"],
+            serde_json::json!({ "total": 9, "d": -1 })
+        );
+        assert_eq!(report["error"]["answer"], 8);
+        let report = check_report(&Err("error: a/main.ax: line 4: oops".into()));
+        assert_eq!(report["error"]["file"], "a/main.ax");
+        assert_eq!(report["error"]["line"], 4);
+    }
 
     #[test]
     fn parses_run_value_with_separator() {
