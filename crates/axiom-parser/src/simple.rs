@@ -184,8 +184,11 @@ impl Current {
                 }
                 out[last_index].push_str(" }");
                 out[last_index].push_str(&page.records);
-                for size in page.settles {
-                    out[last_index].push_str(&settle_rules(size));
+                for size in &page.settles {
+                    out[last_index].push_str(&settle_rules(*size));
+                }
+                if !page.settles.is_empty() {
+                    out[last_index].push_str(&settle_lemmas());
                 }
                 Ok(())
             }
@@ -1862,6 +1865,35 @@ fn columns_of(columns: &[String]) -> String {
     out.join(", ")
 }
 
+/// Why every balance reaches 0 after `settle`. Transfer i→j is the overlap
+/// of i's stretch of total debt [D(i-1), D(i)] with j's stretch of total
+/// credit [C(j-1), C(j)]. These two facts, proven here for any numbers, give
+/// by induction over j that i's transfers add up to D(i) - D(i-1), exactly
+/// what i owes, and (the overlap is symmetric) that j receives C(j) - C(j-1):
+/// - `settle_split`: an overlap with [x, z] is the overlaps with [x, y] and
+///   [y, z] added together;
+/// - `settle_whole`: the overlap of [a, b] with [0, t] that contains it is b - a.
+fn settle_lemmas() -> String {
+    let overlap = |a: &str, b: &str, x: &str, y: &str| {
+        let high = format!("(if {b} <= {y} {{ {b} }} else {{ {y} }})");
+        let low = format!("(if {a} >= {x} {{ {a} }} else {{ {x} }})");
+        format!("(if {high} > {low} {{ {high} -% {low} }} else {{ 0 }})")
+    };
+    format!(
+        " export fn settle_split(a: i32, b: i32, x: i32, y: i32, z: i32) -> i32 {{ \
+         requires a >= 0 && a <= b && b <= {SETTLE_LIMIT}; \
+         requires x >= 0 && x <= y && y <= z && z <= {SETTLE_LIMIT}; \
+         return {} +% {} -% {}; ensures result == 0; }} \
+         export fn settle_whole(a: i32, b: i32, t: i32) -> i32 {{ \
+         requires a >= 0 && a <= b && b <= t && t <= {SETTLE_LIMIT}; \
+         return {} -% (b -% a); ensures result == 0; }}",
+        overlap("a", "b", "x", "y"),
+        overlap("a", "b", "y", "z"),
+        overlap("a", "b", "x", "z"),
+        overlap("a", "b", "t -% t", "t"),
+    )
+}
+
 /// Marks a list used item by item (`share - paid`); a rule whose answer uses
 /// one becomes one rule per item, with the mark replaced by `_1`, `_2`, ...
 const ITEM: &str = "_0";
@@ -2328,6 +2360,10 @@ mod tests {
             "{page}"
         );
         assert!(page.contains("fn settle_2_2_1("), "{page}");
+        assert!(
+            page.contains("fn settle_split(") && page.contains("fn settle_whole("),
+            "{page}"
+        );
         let err = translate(
             "page P\n  o[2], s[3] = 0 can be negative\n  when \"Go\" is clicked\n    s = settle(o)\n",
         )
