@@ -1325,13 +1325,23 @@ fn expand_expr(
 }
 
 fn result_body(contract: &Contract) -> Result<&SpecExpr, String> {
-    if contract.ensures.len() != 1 {
-        return Err(format!(
-            "contract {} must have exactly one ensures equality when called",
-            contract.name
-        ));
-    }
-    let SpecExpr::Binary(axiom_parser::BinaryOp::Eq, lhs, rhs) = &contract.ensures[0] else {
+    // Further ensures (`promise` lines) are proven for the callee itself and
+    // follow from this body, so inlining only the body is exact.
+    let is_result = |e: &SpecExpr| {
+        matches!(e, SpecExpr::Binary(axiom_parser::BinaryOp::Eq, lhs, _)
+            if matches!(lhs.as_ref(), SpecExpr::Ident(name) if name == "result"))
+    };
+    let first = match contract.ensures.as_slice() {
+        [only] => only,
+        [first, ..] if is_result(first) => first,
+        _ => {
+            return Err(format!(
+                "contract {} must have exactly one ensures equality when called",
+                contract.name
+            ));
+        }
+    };
+    let SpecExpr::Binary(axiom_parser::BinaryOp::Eq, lhs, rhs) = first else {
         return Err(format!(
             "contract {} must return a result equality when called",
             contract.name

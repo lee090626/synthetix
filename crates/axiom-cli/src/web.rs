@@ -419,7 +419,16 @@ fn compile_contracts_inner(
         let prove = |linked: &axiom_project::LinkedContract| -> Result<Expr, String> {
             let name = &linked.contract.name;
             let candidate = axiom_synth::synthesize_with_options(&linked.contract, options)
-                .map_err(|error| format!("{}:{}: {error}", linked.source.display(), name))?;
+                .map_err(|error| {
+                    // The answer lines fix the answer, so with `promise` lines a
+                    // failed search means a promise does not always hold.
+                    let hint = if linked.contract.ensures.len() > 1 {
+                        "\nhint: a `promise` line may not hold for every allowed input"
+                    } else {
+                        ""
+                    };
+                    format!("{}:{}: {error}{hint}", linked.source.display(), name)
+                })?;
             let composition = project
                 .verify_compositional_with_verified_summaries(
                     linked,
