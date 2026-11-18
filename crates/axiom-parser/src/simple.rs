@@ -102,6 +102,10 @@ enum Current {
 struct PageInfo {
     name: String,
     lists: Vec<(String, usize)>,
+    /// `yes`/`no` values, passed to rules as 1 and 0.
+    yes_no: Vec<String>,
+    /// Group sizes `settle(...)` is used with; each adds its rules.
+    settles: Vec<usize>,
     /// Every value: name, whether it can be negative, decimal places.
     values: Vec<(String, bool, u32)>,
     /// The open `when "Label" is clicked` block.
@@ -169,6 +173,9 @@ impl Current {
                     click.finish(out)?;
                 }
                 out[last_index].push_str(" }");
+                for size in page.settles {
+                    out[last_index].push_str(&settle_rules(size));
+                }
                 Ok(())
             }
         }
@@ -210,6 +217,8 @@ pub fn translate_with_decimals(source: &str) -> Result<(String, Decimals), Strin
                     page: PageInfo {
                         name: name.to_string(),
                         lists: Vec::new(),
+                        yes_no: Vec::new(),
+                        settles: Vec::new(),
                         values: Vec::new(),
                         click: None,
                     },
@@ -478,6 +487,11 @@ fn page_line(
     let rest = rest.trim();
     let values = page.values.clone();
     let list_names = page.lists.clone();
+    let yes_no: Vec<(String, String)> = page
+        .yes_no
+        .iter()
+        .map(|name| (name.clone(), format!("(if {name} {{ 1 }} else {{ 0 }})")))
+        .collect();
     let lists = &mut page.lists;
     let mut states =
         |text: &str, persist: bool, line_no: usize, lists: &mut Vec<(String, usize)>| {
@@ -485,6 +499,9 @@ fn page_line(
             let (line, signed) = states(text, persist, places, line_no, lists)?;
             for state in line.split(" state ").skip(1) {
                 let name = state.split(':').next().unwrap_or_default();
+                if state.contains(": bool") {
+                    page.yes_no.push(name.to_string());
+                }
                 page.values.push((name.to_string(), signed, places));
                 if places > 0 {
                     decimals.push((page.name.clone(), name.to_string(), places));
@@ -512,7 +529,7 @@ fn page_line(
             decimals: places,
             lists: &list_names,
         };
-        expression(text, line_no, &ctx)
+        Ok(substitute(&expression(text, line_no, &ctx)?, &yes_no))
     };
     match word {
         "save" => states(rest, true, line_no, lists),
@@ -523,9 +540,36 @@ fn page_line(
             let target = target.trim();
             check_name(target, line_no)?;
             let value = expression(value.trim(), line_no)?;
-            let Some(click) = page.click.as_mut() else {
+            if page.click.is_none() {
                 return Ok(String::new());
-            };
+            }
+            // `sends = settle(owe)`: item (i-1)*n+j is what person i sends person j.
+            if let Some(args) = value.strip_prefix("settle(") {
+                let size = args.split(',').count();
+                let fits = lists
+                    .iter()
+                    .any(|(list, n)| list == target && *n == size * size);
+                if !fits {
+                    return Err(format!(
+                        "line {line_no}: `{target}` needs {} items: one per pair of the {size} people",
+                        size * size
+                    ));
+                }
+                if !page.settles.contains(&size) {
+                    page.settles.push(size);
+                }
+                let click = page.click.as_mut().expect("checked above");
+                for from in 1..=size {
+                    for to in 1..=size {
+                        click.sets.push((
+                            format!("{target}_{}", (from - 1) * size + to),
+                            format!("settle_{size}_{from}_{to}({args}"),
+                        ));
+                    }
+                }
+                return Ok(String::new());
+            }
+            let click = page.click.as_mut().expect("checked above");
             // `balances = to_pay(paid, share)`: a list takes a rule's answer per item.
             match (
                 lists.iter().find(|(list, _)| list == target),
@@ -622,17 +666,27 @@ fn states(
             "line {line_no}: a text value cannot be negative or have decimals"
         ));
     }
+    let yes_no = matches!(initial, "yes" | "no");
+    if yes_no && (signed || places > 0) {
+        return Err(format!(
+            "line {line_no}: a yes/no value cannot be negative or have decimals"
+        ));
+    }
     let initial = if text_value {
         initial.to_string()
+    } else if yes_no {
+        (if initial == "yes" { "true" } else { "false" }).to_string()
     } else if !initial.is_empty() && initial.chars().all(|c| c.is_ascii_digit() || c == '.') {
         scaled_number(initial, places, line_no)?
     } else {
         return Err(format!(
-            "line {line_no}: the starting value must be a number or a text in quotes"
+            "line {line_no}: the starting value must be a number, a text in quotes, yes, or no"
         ));
     };
     let ty = if text_value {
         "text"
+    } else if yes_no {
+        "bool"
     } else if signed {
         "i32"
     } else {
@@ -946,6 +1000,7 @@ pub fn check_ranges(
             .iter()
             .map(|param| (param.name.clone(), limits.0, limits.1))
             .collect(),
+        exprs: Vec::new(),
     };
     for requirement in &contract.requires {
         facts.learn(requirement, true);
@@ -969,6 +1024,8 @@ struct Facts {
     limits: (i64, i64),
     calls: Vec<(String, i64, i64)>,
     bounds: Vec<(String, i64, i64)>,
+    /// Bounds on whole expressions, like `need sum(part) >= 1`.
+    exprs: Vec<(SpecExpr, i64, i64)>,
 }
 
 impl Facts {
@@ -1002,6 +1059,29 @@ impl Facts {
                     self.bound(name, flip(op), n);
                 }
             }
+            (expr, number) => {
+                if let Some(n) = constant(number) {
+                    self.bound_expr(expr, op, n);
+                }
+            }
+        }
+    }
+
+    fn bound_expr(&mut self, expr: &SpecExpr, op: BinaryOp, number: i64) {
+        let index = match self.exprs.iter().position(|(known, _, _)| known == expr) {
+            Some(index) => index,
+            None => {
+                self.exprs
+                    .push((expr.clone(), self.limits.0, self.limits.1));
+                self.exprs.len() - 1
+            }
+        };
+        let entry = &mut self.exprs[index];
+        match op {
+            BinaryOp::Le => entry.2 = entry.2.min(number),
+            BinaryOp::Lt => entry.2 = entry.2.min(number - 1),
+            BinaryOp::Ge => entry.1 = entry.1.max(number),
+            BinaryOp::Gt => entry.1 = entry.1.max(number + 1),
             _ => {}
         }
     }
@@ -1593,6 +1673,60 @@ fn rewrite_lists(
     Ok((out, bare))
 }
 
+/// The largest balance `settle` takes, plus or minus.
+const SETTLE_LIMIT: u32 = 100_000_000;
+
+/// Rules `settle_N_i_j`: how much person `i` sends person `j` so every
+/// balance (`o_k`, positive = still owes) reaches 0. People who owe pay in
+/// order, people owed are paid in order: debtor `i` covers the stretch of
+/// total debt from D(i-1) to D(i), creditor `j` the stretch from C(j-1) to
+/// C(j), and `i` sends `j` the overlap. Nobody pays more than they owe, and
+/// there are at most N - 1 transfers.
+fn settle_rules(size: usize) -> String {
+    let params: Vec<String> = (1..=size).map(|k| format!("o_{k}: i32")).collect();
+    let needs: Vec<String> = (1..=size)
+        .map(|k| format!("requires o_{k} >= (0 -% {SETTLE_LIMIT}) && o_{k} <= {SETTLE_LIMIT};"))
+        .collect();
+    let min = |a: &str, b: &str| format!("(if {a} <= {b} {{ {a} }} else {{ {b} }})");
+    let max = |a: &str, b: &str| format!("(if {a} >= {b} {{ {a} }} else {{ {b} }})");
+    let total = |upto: usize, owes: bool| -> String {
+        if upto == 0 {
+            return "0".to_string();
+        }
+        let parts: Vec<String> = (1..=upto)
+            .map(|k| {
+                if owes {
+                    format!("(if o_{k} > 0 {{ o_{k} }} else {{ 0 }})")
+                } else {
+                    format!("(if o_{k} < 0 {{ 0 -% o_{k} }} else {{ 0 }})")
+                }
+            })
+            .collect();
+        format!("({})", parts.join(" +% "))
+    };
+    let mut out = String::new();
+    for from in 1..=size {
+        for to in 1..=size {
+            let covered = min(&total(from, true), &total(to, false));
+            let overlap = if from == 1 && to == 1 {
+                covered
+            } else {
+                format!(
+                    "{covered} -% {}",
+                    max(&total(from - 1, true), &total(to - 1, false))
+                )
+            };
+            out.push_str(&format!(
+                " export contract settle_{size}_{from}_{to}({}) -> i32 {{ {} ensures result == ({}); }}",
+                params.join(", "),
+                needs.join(" "),
+                max("0", &format!("({overlap})"))
+            ));
+        }
+    }
+    out
+}
+
 /// Marks a list used item by item (`share - paid`); a rule whose answer uses
 /// one becomes one rule per item, with the mark replaced by `_1`, `_2`, ...
 const ITEM: &str = "_0";
@@ -1898,6 +2032,15 @@ fn range(expr: &SpecExpr, facts: &Facts, name: &str) -> Result<(i64, i64), Strin
         SpecExpr::Binary(op, left, right) => {
             let (l_low, l_high) = range(left, facts, name)?;
             let (r_low, r_high) = range(right, facts, name)?;
+            let known = |(low, high): (i64, i64), side: &SpecExpr| {
+                facts
+                    .exprs
+                    .iter()
+                    .find(|(expr, _, _)| expr == side)
+                    .map_or((low, high), |(_, l, h)| (low.max(*l), high.min(*h)))
+            };
+            let (l_low, l_high) = known((l_low, l_high), left);
+            let (r_low, r_high) = known((r_low, r_high), right);
             match op {
                 BinaryOp::AddWrap => fits(l_low + r_low, l_high + r_high, "+")?,
                 BinaryOp::SubWrap => fits(l_low - r_high, l_high - r_low, "-")?,
@@ -2001,6 +2144,30 @@ mod tests {
             translate("page P\n  save x[2], y[2] = 0\n  when \"Go\" is clicked\n    y = f(x)\n")
                 .unwrap();
         assert!(page.contains("updates y_2 with f_2(x_1, x_2)"), "{page}");
+    }
+
+    #[test]
+    fn yes_no_and_settle_on_pages() {
+        let page = translate(
+            "page P\n  save j[2] = no\n  n = 0\n  when \"Go\" is clicked\n    n = f(j)\n",
+        )
+        .unwrap();
+        assert!(page.contains("state j_1: bool = false;"), "{page}");
+        assert!(page.contains("f((if j_1 { 1 } else { 0 })"), "{page}");
+        let page = translate(
+            "page P\n  o[2], s[4] = 0 can be negative\n  when \"Go\" is clicked\n    s = settle(o)\n",
+        )
+        .unwrap();
+        assert!(
+            page.contains("updates s_2 with settle_2_1_2(o_1, o_2)"),
+            "{page}"
+        );
+        assert!(page.contains("contract settle_2_2_1("), "{page}");
+        let err = translate(
+            "page P\n  o[2], s[3] = 0 can be negative\n  when \"Go\" is clicked\n    s = settle(o)\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("needs 4 items"), "{err}");
     }
 
     #[test]

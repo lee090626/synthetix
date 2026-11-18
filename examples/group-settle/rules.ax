@@ -1,0 +1,24 @@
+# 결제마다 사람별 비율: 빠진 사람(no)은 0
+part(joined[4], weight[4])
+  need joined <= 1
+  need weight <= 4
+  always -> joined * weight
+
+# 한 결제에서 사람마다 낼 몫
+# 따로 정한 금액(fixed)을 먼저 내고, 나머지는 비율대로 나눠 unit원 단위로 올림
+share(amount, part[4], fixed[4], unit)
+  need amount <= 5000000
+  need part <= 4
+  need sum(part) >= 1
+  need fixed <= 5000000
+  need sum(fixed) <= amount
+  need unit >= 1 and unit <= 100
+  always -> fixed + up(up((amount - sum(fixed)) * part / sum(part)) / unit) * unit
+
+# 사람마다 더 낼 돈 (음수면 돌려받을 돈)
+balance(share1[4], paid1[4], share2[4], paid2[4]) can be negative
+  need share1 >= 0 and share1 <= 20000000
+  need paid1 >= 0 and paid1 <= 10000000
+  need share2 >= 0 and share2 <= 20000000
+  need paid2 >= 0 and paid2 <= 10000000
+  always -> share1 + share2 - paid1 - paid2

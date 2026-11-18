@@ -719,6 +719,20 @@ fn element_json(
         PageElement::ShowText { text } => {
             format!("{{\"kind\":\"text\",\"text\":{}}}", json_string(text))
         }
+        PageElement::Transfers { sends, names } => {
+            let list = |items: &[String]| {
+                items
+                    .iter()
+                    .map(|item| json_string(item))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            format!(
+                "{{\"kind\":\"transfers\",\"sends\":[{}],\"names\":[{}]}}",
+                list(sends),
+                list(names)
+            )
+        }
         PageElement::WhenShow { condition, text } => format!(
             "{{\"kind\":\"when-show\",\"condition\":{},\"text\":{}}}",
             expr_json(condition).unwrap_or_else(|error| error_json(&error)),

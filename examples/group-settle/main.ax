@@ -1,0 +1,33 @@
+from rules: part, share, balance
+
+page Gathering
+  save names[4] = ""
+  save unit = 100
+  ask "이름" for names
+  ask "단위 (1, 10, 100원)" for unit
+
+  save amount1, amount2 = 0
+  save paid1[4], fixed1[4], paid2[4], fixed2[4] = 0
+  save joined1[4], joined2[4] = yes
+  save weight1[4], weight2[4] = 1
+  ask "1차 금액" for amount1
+  ask "1차 낸 돈" for paid1
+  ask "1차 참여" for joined1
+  ask "1차 비율" for weight1
+  ask "1차 따로 정한 금액" for fixed1
+  ask "2차 금액" for amount2
+  ask "2차 낸 돈" for paid2
+  ask "2차 참여" for joined2
+  ask "2차 비율" for weight2
+  ask "2차 따로 정한 금액" for fixed2
+
+  part1[4], part2[4], share1[4], share2[4] = 0
+  owe[4], sends[16] = 0 can be negative
+  when "정산" is clicked
+    part1 = part(joined1, weight1)
+    part2 = part(joined2, weight2)
+    share1 = share(amount1, part1, fixed1, unit)
+    share2 = share(amount2, part2, fixed2, unit)
+    owe = balance(share1, paid1, share2, paid2)
+    sends = settle(owe)
+  show transfers(sends, names)
