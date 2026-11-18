@@ -40,3 +40,26 @@ income_tax(pay)
 local_tax(pay)
   need pay <= 400000000
   always -> income_tax(pay) / 10 / 10 * 10
+
+# PG 수수료: 결제 금액 × 수수료율(1만분의 1 단위, 330 = 3.3%), 원 미만 버림
+fee(amount, rate)
+  need amount <= 4000000
+  need rate <= 1000
+  always -> amount * rate / 10000
+
+# 가맹점이 받는 돈: 수수료와 합치면 정확히 결제 금액
+payout(amount, rate)
+  need amount <= 4000000
+  need rate <= 1000
+  always -> amount - fee(amount, rate)
+  promise answer + fee(amount, rate) is amount
+
+# 두 상품을 한 번에 결제했을 때 수수료를 금액 비율로 나눔: 첫 상품 몫
+# 둘째 상품 몫은 fee(a + b, rate) - fee_first(a, b, rate): 나눠도 합계가 1원도 안 틀림
+fee_first(a, b, rate)
+  need a <= 10000
+  need b <= 10000
+  need a + b >= 1
+  need rate <= 1000
+  always -> fee(a + b, rate) * a / (a + b)
+  promise answer <= fee(a + b, rate)
