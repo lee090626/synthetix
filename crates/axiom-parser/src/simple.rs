@@ -29,7 +29,8 @@ pub fn is_simple(source: &str) -> bool {
     if line.contains('{') || line.ends_with(';') {
         return false;
     }
-    if line.starts_with("from ") || line.starts_with("page ") {
+    if line.starts_with("from ") || line.starts_with("page ") || line.starts_with("use settle for ")
+    {
         return true;
     }
     let Some((name, _)) = line.split_once('(') else {
@@ -222,6 +223,17 @@ pub fn translate_with_decimals(source: &str) -> Result<(String, Decimals), Strin
             }
             if let Some(rest) = trimmed.strip_prefix("from ") {
                 out[index] = import(rest, line_no)?;
+            } else if let Some(size) = trimmed.strip_prefix("use settle for ") {
+                // shortcut: a file may not also have a page using settle (lemmas would repeat).
+                let size = size
+                    .trim()
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|n| (2..=16).contains(n))
+                    .ok_or(format!(
+                        "line {line_no}: write `use settle for N` with N from 2 to 16"
+                    ))?;
+                out[index] = format!("{}{}", settle_rules(size), settle_lemmas());
             } else if let Some(name) = trimmed.strip_prefix("page ") {
                 let name = name.trim();
                 check_name(name, line_no)?;
@@ -2341,6 +2353,13 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("columns in order: a, b"), "{err}");
+    }
+
+    #[test]
+    fn settle_in_a_rules_file() {
+        let out = translate("use settle for 3\n").unwrap();
+        assert!(out.contains("export fn settle_3_3_3(") && out.contains("settle_whole"));
+        assert!(translate("use settle for 1\n").is_err());
     }
 
     #[test]
