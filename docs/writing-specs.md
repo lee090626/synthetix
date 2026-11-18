@@ -211,13 +211,13 @@ Pass a list to a rule by name: `total = cart(prices)`.
 and fills a list with one item per pair of people, so `owe[4]` needs
 `sends[16]`; item `(i - 1) * 4 + j` is what person `i` sends person `j`.
 People who owe pay in list order to people who are owed, in list order.
-Synthetix proves every transfer is never below 0, never more than the sender
-owes, and only goes from someone who owes to someone who is owed. It also
-proves the two facts (`settle_split`, `settle_whole`) behind every balance
-reaching 0, and [proofs/lean/Settle.lean](../proofs/lean/Settle.lean) proves in
-Lean that, for any number of people whose balances add up to 0, the transfers
-bring every balance to exactly 0. Tests check that
-on random balances, and that there are at most n - 1 transfers. It does not promise the fewest
+`settle` is built in and proven once, in Lean, for any number of people:
+[proofs/lean/Settle.lean](../proofs/lean/Settle.lean) shows that when the
+balances add up to 0, what each person sends is what they owe and what each
+receives is what they are owed, so every balance ends at exactly 0. It is not
+proven again on each build. Tests check the generated code against this on
+random balances, and that there are at most n - 1 transfers. Up to 21 people,
+each balance within ±100,000,000. It does not promise the fewest
 transfers. See [examples/group-settle](../examples/group-settle).
 A value with decimals goes only into a rule with the same places. On a page,
 values can be calculated and compared (`show price + tax`,
