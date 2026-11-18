@@ -24,6 +24,7 @@ fit_price(price, min, max)
 | Name a value | `name = value` | Gives a part of the computation a name; must come before the `->` lines |
 | Otherwise | `else -> value` | The answer when no line above matches; must be last |
 | Only answer | `always -> value` | A rule with one answer and no conditions |
+| Promise | `promise condition` | After the `->` lines: Synthetix proves `condition` holds for every allowed input; `answer` is the rule's answer |
 | Note | `# text` | Ignored by the computation |
 
 Rules are read top to bottom; the first one that matches gives the answer.

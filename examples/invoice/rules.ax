@@ -23,6 +23,9 @@ vat(supply)
 supply_of(total)
   need total <= 400000000
   always -> total * 10 / 11
+  # 공급가액과 그 부가세를 더해도 낸 돈을 넘지 않고, 모자라도 1원 이하
+  promise answer + answer / 10 <= total
+  promise answer + answer / 10 + 1 >= total
 
 tax_of(total)
   need total <= 400000000

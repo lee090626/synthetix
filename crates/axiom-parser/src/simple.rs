@@ -264,6 +264,7 @@ pub fn translate_with_decimals(source: &str) -> Result<(String, Decimals), Strin
                     signed: header.signed,
                     decimals: header.decimals,
                     lists: header.lists,
+                    promises: Vec::new(),
                 }));
             }
             continue;
@@ -353,6 +354,14 @@ fn rule_line(
         }
         let condition = each_item(condition, &block.lists, line_no)?;
         out[index] = format!("    requires {};", expr(&condition)?);
+    } else if let Some(condition) = trimmed.strip_prefix("promise ") {
+        if block.rules.is_empty() {
+            return Err(format!(
+                "line {line_no}: put `promise` lines after the `->` lines"
+            ));
+        }
+        let condition = answer_as_result(condition);
+        block.promises.push(expr(&condition)?);
     } else if let Some((condition, value)) = trimmed.split_once("->") {
         // `->` always has something on its left, so it reads as "if this, the answer is".
         let condition = match condition.trim() {
@@ -409,10 +418,27 @@ fn rule_line(
         });
     } else {
         return Err(format!(
-            "line {line_no}: expected `need ...`, `name = value`, `condition -> value`, `else -> value`, or `always -> value`"
+            "line {line_no}: expected `need ...`, `name = value`, `condition -> value`, `else -> value`, `always -> value`, or `promise ...`"
         ));
     }
     Ok(())
+}
+
+/// `answer` (the rule's answer) as the contract's `result`, whole words only.
+fn answer_as_result(text: &str) -> String {
+    let mut out = String::new();
+    let mut word = String::new();
+    for c in text.chars().chain(std::iter::once(' ')) {
+        if c.is_alphanumeric() || c == '_' {
+            word.push(c);
+        } else {
+            out.push_str(if word == "answer" { "result" } else { &word });
+            word.clear();
+            out.push(c);
+        }
+    }
+    out.pop();
+    out
 }
 
 /// Splits `name = value` (a single `=`, not part of `<=` or `>=`).
@@ -1133,6 +1159,10 @@ pub fn check_ranges(
             && matches!(left.as_ref(), SpecExpr::Ident(name) if name == "result")
         {
             answer = range(right, &facts, &contract.name)?;
+            // `promise` lines after it may use the answer's range.
+            facts
+                .bounds
+                .push(("result".to_string(), answer.0, answer.1));
         } else {
             range(ensures, &facts, &contract.name)?;
         }
@@ -1240,6 +1270,8 @@ struct Block {
     decimals: u32,
     /// List inputs (`prices[3]`) and their sizes.
     lists: Vec<(String, usize)>,
+    /// `promise` lines, translated: extra facts the answer must always meet.
+    promises: Vec<String>,
 }
 
 /// What an expression may use: signed arithmetic and list names.
@@ -1329,10 +1361,22 @@ impl Block {
                 size = Some(n);
             }
         }
+        let promises: String = self
+            .promises
+            .iter()
+            .map(|p| format!(" ensures {p};"))
+            .collect();
         let Some(size) = size else {
-            out[last.index] = format!("    ensures result == ({chain}); }}");
+            out[last.index] = format!("    ensures result == ({chain});{promises} }}");
             return Ok(());
         };
+        if !promises.is_empty() {
+            // shortcut: promises only on rules with one answer; add per-item when needed.
+            return Err(format!(
+                "line {}: `promise` works only in a rule with one answer, not a list",
+                self.name_line
+            ));
+        }
         // An answer per item: rule `name` becomes `name_1` .. `name_N`, each
         // with the same inputs and `need` lines.
         let head = self.name_line - 1;
@@ -2322,6 +2366,19 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("columns in order: a, b"), "{err}");
+    }
+
+    #[test]
+    fn promise_lines_become_ensures() {
+        let out =
+            translate("f(x)\n  need x <= 10\n  always -> x * 2\n  promise answer >= x\n").unwrap();
+        assert!(
+            out.contains("ensures result == (x *% 2); ensures result >= x; }"),
+            "{out}"
+        );
+        assert!(translate("f(x)\n  promise answer >= x\n  always -> x\n").is_err());
+        assert!(translate("f(a[2])\n  always -> a + 1\n  promise answer >= 1\n").is_err());
+        assert_eq!(answer_as_result("answer + answers"), "result + answers");
     }
 
     #[test]
