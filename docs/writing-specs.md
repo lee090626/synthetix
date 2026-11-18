@@ -249,6 +249,16 @@ keeps serving an old result. Fix the file and save; `axiom dev` rebuilds and
 reloads. It starts even when the first build fails and shows the error in the
 browser until then.
 
+A `promise` that some allowed input breaks is reported with that input:
+
+```text
+promise 2 does not hold for total=294896131 (answer 268087391)
+```
+
+`axiom check --report check.json` also writes the outcome as JSON for tools and
+AI agents: `{"ok": true}`, or `{"ok": false, "error": {...}}` with `message`
+and, when known, `file`, `rule`, `line`, `promise`, `inputs`, `answer`, `hint`.
+
 ## Checking what a rule does
 
 `axiom check` prints one example per `->` line, counted from the top of the
