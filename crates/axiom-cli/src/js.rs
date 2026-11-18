@@ -73,8 +73,77 @@ pub fn expr(e: &Expr) -> String {
     }
 }
 
-fn ts_type(ty: &Type) -> Result<&'static str, String> {
+/// Prints one AMI expression of a `wide` contract; every sub-expression is a
+/// bigint in `0..2^64`.
+pub fn expr64(e: &Expr) -> String {
+    let wrap = |op: &str, l: &Expr, r: &Expr| {
+        format!("BigInt.asUintN(64, {} {op} {})", expr64(l), expr64(r))
+    };
+    let cmp = |op: &str, l: &Expr, r: &Expr, signed: bool| {
+        if signed {
+            format!(
+                "(BigInt.asIntN(64, {}) {op} BigInt.asIntN(64, {}) ? 1n : 0n)",
+                expr64(l),
+                expr64(r)
+            )
+        } else {
+            format!("({} {op} {} ? 1n : 0n)", expr64(l), expr64(r))
+        }
+    };
+    match e {
+        Expr::Arg(i) => format!("a{i}"),
+        Expr::Const(v) => format!("{v}n"),
+        Expr::Add(l, r) => wrap("+", l, r),
+        Expr::Sub(l, r) => wrap("-", l, r),
+        Expr::Mul(l, r) => wrap("*", l, r),
+        Expr::Div(l, r) => format!("$div64({}, {}, false)", expr64(l), expr64(r)),
+        Expr::Rem(l, r) => format!("$rem64({}, {}, false)", expr64(l), expr64(r)),
+        Expr::SDiv(l, r) => format!("$div64({}, {}, true)", expr64(l), expr64(r)),
+        Expr::SRem(l, r) => format!("$rem64({}, {}, true)", expr64(l), expr64(r)),
+        Expr::Shl(l, r) => format!("BigInt.asUintN(64, {} << ({} & 63n))", expr64(l), expr64(r)),
+        Expr::BitAnd(l, r) => format!("({} & {})", expr64(l), expr64(r)),
+        Expr::BitOr(l, r) => format!("({} | {})", expr64(l), expr64(r)),
+        Expr::BitXor(l, r) => format!("({} ^ {})", expr64(l), expr64(r)),
+        Expr::Eq(l, r) => cmp("===", l, r, false),
+        Expr::Ne(l, r) => cmp("!==", l, r, false),
+        Expr::Lt(l, r) => cmp("<", l, r, false),
+        Expr::Le(l, r) => cmp("<=", l, r, false),
+        Expr::Gt(l, r) => cmp(">", l, r, false),
+        Expr::Ge(l, r) => cmp(">=", l, r, false),
+        Expr::SLt(l, r) => cmp("<", l, r, true),
+        Expr::SLe(l, r) => cmp("<=", l, r, true),
+        Expr::SGt(l, r) => cmp(">", l, r, true),
+        Expr::SGe(l, r) => cmp(">=", l, r, true),
+        Expr::And(l, r) => format!("({} !== 0n && {} !== 0n ? 1n : 0n)", expr64(l), expr64(r)),
+        Expr::Or(l, r) => format!("({} !== 0n || {} !== 0n ? 1n : 0n)", expr64(l), expr64(r)),
+        Expr::Select {
+            condition,
+            then_branch,
+            else_branch,
+        } => format!(
+            "({} !== 0n ? {} : {})",
+            expr64(condition),
+            expr64(then_branch),
+            expr64(else_branch)
+        ),
+        Expr::ArrayGet { elements, index } => {
+            let items: Vec<String> = elements
+                .iter()
+                .map(|e| format!("() => {}", expr64(e)))
+                .collect();
+            format!("$at({}, [{}])", expr64(index), items.join(", "))
+        }
+        Expr::Guard { condition, value } => format!(
+            "({} !== 0n ? {} : $trap(\"verified runtime guard failed\"))",
+            expr64(condition),
+            expr64(value)
+        ),
+    }
+}
+
+fn ts_type(ty: &Type, wide: bool) -> Result<&'static str, String> {
     match ty {
+        Type::U32 | Type::I32 if wide => Ok("bigint"),
         Type::U32 | Type::I32 => Ok("number"),
         Type::Bool => Ok("boolean"),
         other => Err(format!(
@@ -134,8 +203,14 @@ const RESERVED: &[&str] = &[
     "eval",
 ];
 
-fn check_for(name: &str, ty: &Type, var: &str) -> Result<String, String> {
+fn check_for(name: &str, ty: &Type, var: &str, wide: bool) -> Result<String, String> {
     Ok(match ty {
+        Type::U32 if wide => format!(
+            "  if (typeof {var} !== \"bigint\" || {var} < 0n || {var} > 0xffffffffffffffffn) throw new TypeError(\"{name}: expected u64 bigint\");\n"
+        ),
+        Type::I32 if wide => format!(
+            "  if (typeof {var} !== \"bigint\" || {var} < -0x8000000000000000n || {var} > 0x7fffffffffffffffn) throw new TypeError(\"{name}: expected i64 bigint\");\n"
+        ),
         Type::U32 => format!(
             "  if (!Number.isInteger({var}) || {var} < 0 || {var} > 0xffffffff) throw new TypeError(\"{name}: expected u32\");\n"
         ),
@@ -171,7 +246,9 @@ pub fn emit_modules(
     let mut js = format!(
         "{HEADER}// {proof_note}\n\
          const $trap = (message) => {{ throw new RangeError(message); }};\n\
-         const $at = (index, items) => (index < items.length ? items[index]() : $trap(\"fixed array index is out of bounds\"));\n"
+         const $at = (index, items) => (index < items.length ? items[Number(index)]() : $trap(\"fixed array index is out of bounds\"));\n\
+         const $div64 = (l, r, s) => {{ const [a, b] = s ? [BigInt.asIntN(64, l), BigInt.asIntN(64, r)] : [l, r]; if (b === 0n || (s && a === -(2n ** 63n) && b === -1n)) $trap(\"division by zero or overflow\"); return BigInt.asUintN(64, a / b); }};\n\
+         const $rem64 = (l, r, s) => {{ const [a, b] = s ? [BigInt.asIntN(64, l), BigInt.asIntN(64, r)] : [l, r]; if (b === 0n || (s && a === -(2n ** 63n) && b === -1n)) $trap(\"division by zero or overflow\"); return BigInt.asUintN(64, a % b); }};\n"
     );
     let mut dts = HEADER.to_string();
     for (contract, candidate, guard) in items {
@@ -305,7 +382,7 @@ fn list_wrapper(first: &Contract, all: &[&Contract]) -> Result<Option<(String, S
         } else {
             name.clone()
         };
-        let ty = ts_type(ty)?;
+        let ty = ts_type(ty, first.wide)?;
         if *size > 0 {
             checks += &format!(
                 "  if (!Array.isArray({var}) || {var}.length !== {size}) throw new TypeError(\"{base}: {doc} must be an array of {size}\");\n"
@@ -331,7 +408,7 @@ fn list_wrapper(first: &Contract, all: &[&Contract]) -> Result<Option<(String, S
         format!(
             "export function {base}({}): {}[];\n",
             dts.join(", "),
-            ts_type(&first.return_type)?
+            ts_type(&first.return_type, first.wide)?
         ),
     )))
 }
@@ -341,7 +418,9 @@ fn emit_function(
     candidate: &Expr,
     guard: Option<&Expr>,
 ) -> Result<(String, String), String> {
-    let ret = ts_type(&contract.return_type)?;
+    let wide = contract.wide;
+    let print = if wide { expr64 } else { expr };
+    let ret = ts_type(&contract.return_type, wide)?;
     if RESERVED.contains(&contract.name.as_str()) || contract.name.starts_with('$') {
         return Err(format!(
             "contract name {} is not a valid JS export",
@@ -353,12 +432,14 @@ fn emit_function(
     let mut names = Vec::new();
     let mut dts_params = Vec::new();
     for (i, p) in contract.params.iter().enumerate() {
-        let ty = ts_type(&p.ty)?;
+        let ty = ts_type(&p.ty, wide)?;
         let var = format!("p{i}");
-        checks += &check_for(&contract.name, &p.ty, &var)?;
-        lowered += &match p.ty {
-            Type::Bool => format!("  const a{i} = {var} ? 1 : 0;\n"),
-            _ => format!("  const a{i} = {var} >>> 0;\n"),
+        checks += &check_for(&contract.name, &p.ty, &var, wide)?;
+        lowered += &match (&p.ty, wide) {
+            (Type::Bool, false) => format!("  const a{i} = {var} ? 1 : 0;\n"),
+            (Type::Bool, true) => format!("  const a{i} = {var} ? 1n : 0n;\n"),
+            (_, false) => format!("  const a{i} = {var} >>> 0;\n"),
+            (_, true) => format!("  const a{i} = BigInt.asUintN(64, {var});\n"),
         };
         names.push(var);
         let doc_name = if RESERVED.contains(&p.name.as_str()) {
@@ -371,16 +452,18 @@ fn emit_function(
     let guard_js = guard
         .map(|g| {
             format!(
-                "  if ({} === 0) throw new RangeError(\"{}: input violates a requires clause\");\n",
-                expr(g),
+                "  if (!{}) throw new RangeError(\"{}: input violates a requires clause\");\n",
+                print(g),
                 contract.name
             )
         })
         .unwrap_or_default();
-    let result = expr(candidate);
-    let result = match contract.return_type {
-        Type::Bool => format!("{result} !== 0"),
-        Type::I32 => format!("({result}) | 0"),
+    let result = print(candidate);
+    let result = match (&contract.return_type, wide) {
+        (Type::Bool, false) => format!("{result} !== 0"),
+        (Type::Bool, true) => format!("{result} !== 0n"),
+        (Type::I32, false) => format!("({result}) | 0"),
+        (Type::I32, true) => format!("BigInt.asIntN(64, {result})"),
         _ => result,
     };
     Ok((
