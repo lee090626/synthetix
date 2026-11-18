@@ -196,15 +196,43 @@ pub fn emit_modules(
     Ok((js, dts))
 }
 
+/// Group sizes with generated `settle_N_i_j`, unless a rule is named `settle`.
+pub(crate) fn settle_sizes(all: &[&Contract]) -> Vec<usize> {
+    if all.iter().any(|c| c.name == "settle") {
+        return Vec::new();
+    }
+    (2..=16)
+        .filter(|n| all.iter().any(|c| c.name == format!("settle_{n}_1_1")))
+        .collect()
+}
+
+/// For `f_1`, the rule `f` was a list answer split into `f_1..f_N` (same
+/// inputs), and no rule is named `f`: returns `f` and the parts.
+pub(crate) fn list_parts<'a, 'f>(
+    first: &'f Contract,
+    all: &[&'a Contract],
+) -> Option<(&'f str, Vec<&'a Contract>)> {
+    let base = first.name.strip_suffix("_1")?;
+    if base.starts_with("settle_") {
+        return None;
+    }
+    let parts: Vec<&Contract> = (1..)
+        .map_while(|i| {
+            let name = format!("{base}_{i}");
+            all.iter().find(|c| c.name == name).copied()
+        })
+        .collect();
+    let taken = all.iter().any(|c| c.name == base);
+    let same = parts
+        .iter()
+        .all(|c| c.params == first.params && c.return_type == first.return_type);
+    (parts.len() >= 2 && !taken && same).then_some((base, parts))
+}
+
 /// `settle(owe)` over every generated `settle_N_i_j`: picks N from the array
 /// length and returns the N * N transfers, item (i-1)*N+j from i to j.
 fn settle_wrapper(all: &[&Contract]) -> Option<(String, String)> {
-    if all.iter().any(|c| c.name == "settle") {
-        return None;
-    }
-    let sizes: Vec<usize> = (2..=16)
-        .filter(|n| all.iter().any(|c| c.name == format!("settle_{n}_1_1")))
-        .collect();
+    let sizes = settle_sizes(all);
     if sizes.is_empty() {
         return None;
     }
@@ -226,7 +254,7 @@ fn settle_wrapper(all: &[&Contract]) -> Option<(String, String)> {
 }
 
 /// Splits `x_1..x_k` (k >= 2, same type) runs into one list parameter.
-fn param_groups(contract: &Contract) -> Vec<(String, usize, Type)> {
+pub(crate) fn param_groups(contract: &Contract) -> Vec<(String, usize, Type)> {
     let mut groups: Vec<(String, usize, Type)> = Vec::new();
     for p in &contract.params {
         let split = p
@@ -259,23 +287,10 @@ fn param_groups(contract: &Contract) -> Vec<(String, usize, Type)> {
 /// For a list-answer rule split into `f_1..f_N`, emits `f(...)` taking and
 /// returning arrays; it only calls the verified `f_i` exports.
 fn list_wrapper(first: &Contract, all: &[&Contract]) -> Result<Option<(String, String)>, String> {
-    let Some(base) = first.name.strip_suffix("_1") else {
+    let Some((base, parts)) = list_parts(first, all) else {
         return Ok(None);
     };
-    if base.starts_with("settle_") {
-        return Ok(None);
-    }
-    let parts: Vec<&Contract> = (1..)
-        .map_while(|i| {
-            let name = format!("{base}_{i}");
-            all.iter().find(|c| c.name == name).copied()
-        })
-        .collect();
-    let taken = all.iter().any(|c| c.name == base);
-    let same = parts
-        .iter()
-        .all(|c| c.params == first.params && c.return_type == first.return_type);
-    if parts.len() < 2 || taken || !same || RESERVED.contains(&base) || base.starts_with('$') {
+    if RESERVED.contains(&base) || base.starts_with('$') {
         return Ok(None);
     }
     let groups = param_groups(first);
