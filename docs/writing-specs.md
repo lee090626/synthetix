@@ -213,8 +213,10 @@ and fills a list with one item per pair of people, so `owe[4]` needs
 People who owe pay in list order to people who are owed, in list order.
 Synthetix proves every transfer is never below 0, never more than the sender
 owes, and only goes from someone who owes to someone who is owed. It also
-proves the two facts (`settle_split`, `settle_whole`) from which every balance
-reaching 0 follows by a short induction, written in the code. Tests check that
+proves the two facts (`settle_split`, `settle_whole`) behind every balance
+reaching 0, and [proofs/lean/Settle.lean](../proofs/lean/Settle.lean) proves in
+Lean that, for any number of people whose balances add up to 0, the transfers
+bring every balance to exactly 0. Tests check that
 on random balances, and that there are at most n - 1 transfers. It does not promise the fewest
 transfers. See [examples/group-settle](../examples/group-settle).
 A value with decimals goes only into a rule with the same places. On a page,

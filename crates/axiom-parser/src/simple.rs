@@ -1885,6 +1885,9 @@ fn columns_of(columns: &[String]) -> String {
 /// - `settle_split`: an overlap with [x, z] is the overlaps with [x, y] and
 ///   [y, z] added together;
 /// - `settle_whole`: the overlap of [a, b] with [0, t] that contains it is b - a.
+///
+/// The induction itself, for any number of people, is checked in Lean:
+/// `settle_all_zero` in proofs/lean/Settle.lean.
 fn settle_lemmas() -> String {
     let overlap = |a: &str, b: &str, x: &str, y: &str| {
         let high = format!("(if {b} <= {y} {{ {b} }} else {{ {y} }})");
