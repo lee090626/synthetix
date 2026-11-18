@@ -153,17 +153,9 @@ fn build_project(
     if compiled.is_empty() {
         return Err("web project must contain at least one contract".to_string());
     }
-    if let Some(function) = compiled.iter().find(|function| function.contract.wide) {
-        // shortcut: WebAssembly, JS and Rust output are 32-bit; lift with #159.
-        return Err(format!(
-            "{}:{}: rules `with big numbers` can be checked with `axiom check` but not built yet",
-            function.source.display(),
-            function.name
-        ));
-    }
-
     let mut exports = Vec::with_capacity(compiled.len() * 2);
-    for function in &compiled {
+    // Pages cannot call rules with big numbers, so only TS and Rust get them.
+    for function in compiled.iter().filter(|function| !function.contract.wide) {
         exports.push((function.name.clone(), &function.candidate, function.params));
         if let (Some(requires), Some(name)) = (&function.requires, &function.requires_export) {
             exports.push((name.clone(), requires, function.params));

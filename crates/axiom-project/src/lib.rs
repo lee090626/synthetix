@@ -1633,6 +1633,17 @@ fn validate_decimals(
         walk(expr, &of_state)
     };
     let check_call = |state: &str, function: &str, args: &[SpecExpr]| -> Result<(), String> {
+        if scope
+            .and_then(|scope| scope.get(function))
+            .and_then(|key| definitions.get(key))
+            .is_some_and(|definition| definition.contract.wide)
+        {
+            // shortcut: pages run 32-bit WebAssembly; allow once i64 lowering lands (#159).
+            return Err(format!(
+                "{}: {function} uses big numbers, which pages cannot use yet; call it from TS or Rust",
+                source.display()
+            ));
+        }
         let rule_places = scope
             .and_then(|scope| scope.get(function))
             .and_then(|key| definitions.get(key))

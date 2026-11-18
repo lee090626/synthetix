@@ -79,6 +79,89 @@ fn big_numbers_need_the_name_line_and_matching_callers() {
         "{out}"
     );
 
-    let (ok, out) = axiom(&project("build", BIG), &["build"]);
-    assert!(!ok && out.contains("not built yet"), "{out}");
+    let page =
+        format!("{BIG}\npage P\n  a, b, t = 0\n  when \"Go\" is clicked\n    t = total(a, b)\n");
+    let (ok, out) = axiom(&project("page", &page), &["build"]);
+    assert!(!ok && out.contains("pages cannot use yet"), "{out}");
+}
+
+// Inputs near the 32-bit and 64-bit edges.
+const ROWS: [[i64; 2]; 4] = [
+    [1_000_000_000_000, 1000],
+    [4_294_967_296, 3],
+    [0, 1_000_000_000_000],
+    [999_999_999_999, 7],
+];
+
+#[test]
+fn rust_and_js_output_use_64_bit_words() {
+    let dir = project("emit", BIG);
+    let (ok, out) = axiom(&dir, &["build", "--emit", "rust"]);
+    assert!(ok, "{out}");
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::copy(dir.join("dist/contracts.rs"), bin.join("contracts.rs")).unwrap();
+    let rows: Vec<String> = ROWS.iter().map(|[a, b]| format!("({a}, {b})")).collect();
+    fs::write(
+        bin.join("main.rs"),
+        format!(
+            "mod contracts;\nfn main() {{ for (a, b) in [{}] {{ println!(\"{{:?}} {{:?}}\", contracts::total(a as u64, b as u64), contracts::drift(a, b)); }} }}\n",
+            rows.join(", ")
+        ),
+    )
+    .unwrap();
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
+    let out = Command::new(rustc)
+        .args(["--edition", "2024", "main.rs", "-o", "main"])
+        .current_dir(&bin)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let got = String::from_utf8_lossy(&Command::new(bin.join("main")).output().unwrap().stdout)
+        .to_string();
+    let expected: String = ROWS
+        .iter()
+        .map(|[a, b]| {
+            let total = if *b <= 1000 {
+                format!("Ok({})", a * b)
+            } else {
+                "Err(AxiomError(\"total: input violates a requires clause\"))".to_string()
+            };
+            format!("{total} Ok({})\n", a - b)
+        })
+        .collect();
+    assert_eq!(got, expected);
+
+    if Command::new("node").arg("--version").output().is_err() {
+        eprintln!("SKIPPED big_numbers js: node not found");
+        return;
+    }
+    let (ok, out) = axiom(&dir, &["build", "--emit", "js"]);
+    assert!(ok, "{out}");
+    let script = format!(
+        "import('{}').then(m => {{ for (const [a, b] of [{}]) {{ let t; try {{ t = String(m.total(BigInt(a), BigInt(b))); }} catch (e) {{ t = 'ERR'; }} console.log(t, String(m.drift(BigInt(a), BigInt(b)))); }} }})",
+        dir.join("dist/contracts.js").display(),
+        ROWS.iter()
+            .map(|[a, b]| format!("['{a}', '{b}']"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let out = Command::new("node").args(["-e", &script]).output().unwrap();
+    let got = String::from_utf8_lossy(&out.stdout).to_string();
+    let expected: String = ROWS
+        .iter()
+        .map(|[a, b]| {
+            let total = if *b <= 1000 {
+                (a * b).to_string()
+            } else {
+                "ERR".to_string()
+            };
+            format!("{total} {}\n", a - b)
+        })
+        .collect();
+    assert_eq!(got, expected, "{}", String::from_utf8_lossy(&out.stderr));
 }
