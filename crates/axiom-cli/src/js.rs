@@ -180,7 +180,108 @@ pub fn emit_modules(
         js += &function;
         dts += &declaration;
     }
+    let contracts: Vec<&Contract> = items.iter().map(|(c, _, _)| *c).collect();
+    for contract in &contracts {
+        if let Some((function, declaration)) = list_wrapper(contract, &contracts)? {
+            js += "\n";
+            js += &function;
+            dts += &declaration;
+        }
+    }
     Ok((js, dts))
+}
+
+/// Splits `x_1..x_k` (k >= 2, same type) runs into one list parameter.
+fn param_groups(contract: &Contract) -> Vec<(String, usize, Type)> {
+    let mut groups: Vec<(String, usize, Type)> = Vec::new();
+    for p in &contract.params {
+        let split = p
+            .name
+            .rsplit_once('_')
+            .and_then(|(base, n)| n.parse::<usize>().ok().map(|n| (base.to_string(), n)));
+        if let (Some((base, n)), Some(last)) = (&split, groups.last_mut())
+            && last.0 == *base
+            && last.1 + 1 == *n
+            && last.2 == p.ty
+        {
+            last.1 += 1;
+            continue;
+        }
+        match split {
+            Some((base, 1)) => groups.push((base, 1, p.ty.clone())),
+            _ => groups.push((p.name.clone(), 0, p.ty.clone())),
+        }
+    }
+    // A run of one is an ordinary scalar named `x_1`.
+    for g in &mut groups {
+        if g.1 == 1 {
+            g.0 += "_1";
+            g.1 = 0;
+        }
+    }
+    groups
+}
+
+/// For a list-answer rule split into `f_1..f_N`, emits `f(...)` taking and
+/// returning arrays; it only calls the verified `f_i` exports.
+fn list_wrapper(first: &Contract, all: &[&Contract]) -> Result<Option<(String, String)>, String> {
+    let Some(base) = first.name.strip_suffix("_1") else {
+        return Ok(None);
+    };
+    let parts: Vec<&Contract> = (1..)
+        .map_while(|i| {
+            let name = format!("{base}_{i}");
+            all.iter().find(|c| c.name == name).copied()
+        })
+        .collect();
+    let taken = all.iter().any(|c| c.name == base);
+    let same = parts
+        .iter()
+        .all(|c| c.params == first.params && c.return_type == first.return_type);
+    if parts.len() < 2 || taken || !same || RESERVED.contains(&base) || base.starts_with('$') {
+        return Ok(None);
+    }
+    let groups = param_groups(first);
+    let mut params = Vec::new();
+    let mut checks = String::new();
+    let mut args = Vec::new();
+    let mut dts = Vec::new();
+    for (i, (name, size, ty)) in groups.iter().enumerate() {
+        let var = format!("p{i}");
+        let doc = if RESERVED.contains(&name.as_str()) {
+            var.clone()
+        } else {
+            name.clone()
+        };
+        let ty = ts_type(ty)?;
+        if *size > 0 {
+            checks += &format!(
+                "  if (!Array.isArray({var}) || {var}.length !== {size}) throw new TypeError(\"{base}: {doc} must be an array of {size}\");\n"
+            );
+            args.push(format!("...{var}"));
+            dts.push(format!("{doc}: {ty}[]"));
+        } else {
+            args.push(var.clone());
+            dts.push(format!("{doc}: {ty}"));
+        }
+        params.push(var);
+    }
+    let calls: Vec<String> = parts
+        .iter()
+        .map(|c| format!("{}({})", c.name, args.join(", ")))
+        .collect();
+    Ok(Some((
+        format!(
+            "export function {base}({}) {{\n{checks}  return [{}];\n}}\n",
+            params.join(", "),
+            calls.join(", ")
+        ),
+        format!(
+            "export function {base}({}): {}[];\n",
+            dts.join(", "),
+            ts_type(&first.return_type)?
+        ),
+    )))
 }
 
 fn emit_function(
