@@ -165,7 +165,12 @@ fn build_project(
         .iter()
         .map(|(name, expression, params)| (name.as_str(), *expression, *params))
         .collect::<Vec<_>>();
-    let wasm = axiom_wasm::emit_functions(&functions)?;
+    // Every rule may use big numbers (TS/Rust only); then there is no WebAssembly.
+    let wasm = if functions.is_empty() {
+        None
+    } else {
+        Some(axiom_wasm::emit_functions(&functions)?)
+    };
     let items = compiled
         .iter()
         .map(|f| (&f.contract, &f.candidate, f.requires.as_ref()))
@@ -181,7 +186,13 @@ fn build_project(
 
     fs::create_dir_all(output_dir)
         .map_err(|error| format!("cannot create {}: {error}", output_dir.display()))?;
-    write_file(&output_dir.join("app.wasm"), &wasm)?;
+    let wasm_path = output_dir.join("app.wasm");
+    match &wasm {
+        Some(wasm) => write_file(&wasm_path, wasm)?,
+        None if wasm_path.exists() => fs::remove_file(&wasm_path)
+            .map_err(|error| format!("cannot remove {}: {error}", wasm_path.display()))?,
+        None => {}
+    }
     write_file(
         &output_dir.join("index.html"),
         page_html(project, compiled.len()).as_bytes(),
