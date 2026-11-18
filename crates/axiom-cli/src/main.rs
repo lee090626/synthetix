@@ -21,6 +21,7 @@ type SynthesisOutput = (
 );
 
 mod js;
+mod rs;
 mod web;
 
 const USAGE: &str = "\
@@ -31,7 +32,7 @@ usage:
   axiom analyze <contract.ax> [--timeout-ms N] [--report report.json]
   axiom check
   axiom build <contract.ax> [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N] [--max-memory-bytes N] [--emit js]
-  axiom build [--emit js]
+  axiom build [--emit js|rust]
   axiom run <contract.ax> [--] [<value>...] [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N] [--max-memory-bytes N]
   axiom app-run <contract.ax> [--] [<application-value>...]
   axiom <contract.ax> [-o output.wasm]
@@ -188,11 +189,14 @@ fn analyze_command(args: &[String]) -> Result<(), String> {
 
 fn build_command(args: &[String]) -> Result<(), String> {
     if args.is_empty() || args[0].starts_with("--") {
-        let emit_js = match args {
-            [] => false,
-            [flag, target] if flag == "--emit" && target == "js" => true,
+        let emit = match args {
+            [] => web::Emit::None,
+            [flag, target] if flag == "--emit" && target == "js" => web::Emit::Js,
+            [flag, target] if flag == "--emit" && target == "rust" => web::Emit::Rust,
             [flag, target] if flag == "--emit" => {
-                return Err(format!("unknown emit target: {target} (supported: js)"));
+                return Err(format!(
+                    "unknown emit target: {target} (supported: js, rust)"
+                ));
             }
             _ => return Err(format!("unknown project build option: {}", args.join(" "))),
         };
@@ -201,7 +205,7 @@ fn build_command(args: &[String]) -> Result<(), String> {
         let root = config
             .parent()
             .ok_or_else(|| "cannot determine project root".to_string())?;
-        return web::build_with_options(&config, &root.join("dist"), emit_js).map(|_| ());
+        return web::build_with_options(&config, &root.join("dist"), emit).map(|_| ());
     }
     let options = parse_build_args(args)?;
     let (contract, candidate, module, diagnostic, candidates_checked) = match synthesize(

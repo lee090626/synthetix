@@ -733,7 +733,28 @@ fn link_project_retained(
                     target.display()
                 ));
             }
-            for name in &import.names {
+            // A rule with an answer per item (`to_pay`) is `to_pay_1` .. `to_pay_N`.
+            let names: Vec<String> = import
+                .names
+                .iter()
+                .flat_map(|name| {
+                    if definitions.contains_key(&(target.clone(), name.clone())) {
+                        return vec![name.clone()];
+                    }
+                    let items: Vec<String> = (1..)
+                        .map(|item| format!("{name}_{item}"))
+                        .take_while(|item| {
+                            definitions.contains_key(&(target.clone(), item.clone()))
+                        })
+                        .collect();
+                    if items.is_empty() {
+                        vec![name.clone()]
+                    } else {
+                        items
+                    }
+                })
+                .collect();
+            for name in &names {
                 let key = (target.clone(), name.clone());
                 let Some(definition) = definitions.get(&key) else {
                     return Err(format!(
@@ -1511,6 +1532,28 @@ fn validate_page(
             ));
         }
         for update in &reducer.updates {
+            if let Some(rows) = table_update(update) {
+                let state_type =
+                    path_type(&update.state, &states, records, &HashMap::new(), source)?;
+                let Type::List(item) = state_type else {
+                    return Err(format!(
+                        "{}: {} is not a table",
+                        source.display(),
+                        update.state
+                    ));
+                };
+                if let Some(row) = rows {
+                    let row_type = page_expr_type(row, &states, records, &HashMap::new(), source)?;
+                    if !types_compatible(&row_type, &item) {
+                        return Err(format!(
+                            "{}: row does not match table {}",
+                            source.display(),
+                            update.state
+                        ));
+                    }
+                }
+                continue;
+            }
             validate_call(
                 &update.state,
                 &update.function,
@@ -1617,7 +1660,9 @@ fn validate_decimals(
         }
     }
     for update in page.reducers.iter().flat_map(|reducer| &reducer.updates) {
-        check_call(&update.state, &update.function, &update.args)?;
+        if table_update(update).is_none() {
+            check_call(&update.state, &update.function, &update.args)?;
+        }
     }
     Ok(())
 }
@@ -1871,6 +1916,16 @@ fn path_type(
     Ok(current)
 }
 
+/// `__append(row)` and `__empty()` add a row to or empty a table (a list
+/// state); they are page bookkeeping, not rules. Returns the row, if any.
+fn table_update(update: &axiom_parser::ReducerUpdate) -> Option<Option<&SpecExpr>> {
+    match (update.function.as_str(), update.args.as_slice()) {
+        ("__append", [row]) => Some(Some(row)),
+        ("__empty", []) => Some(None),
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn validate_call(
     state: &str,
@@ -1959,6 +2014,11 @@ fn validate_elements(
                 page_expr_type(value, states, records, locals, source)?;
             }
             PageElement::ShowText { .. } => {}
+            PageElement::Transfers { sends, names } => {
+                for state in sends.iter().chain(names) {
+                    path_type(state, states, records, locals, source)?;
+                }
+            }
             PageElement::WhenShow { condition, .. } => {
                 if page_expr_type(condition, states, records, locals, source)? != Type::Bool {
                     return Err(format!(

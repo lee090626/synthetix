@@ -74,18 +74,28 @@ struct DevState {
 
 #[cfg(test)]
 pub fn build(config_path: &Path, output_dir: &Path) -> Result<BuildResult, String> {
-    build_with_options(config_path, output_dir, false)
+    build_with_options(config_path, output_dir, Emit::None)
 }
 
-/// Static build; with `emit_js`, also writes `contracts.js` and `contracts.d.ts`.
+/// Extra library output next to the web app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Emit {
+    None,
+    /// `contracts.js` and `contracts.d.ts`.
+    Js,
+    /// `contracts.rs`.
+    Rust,
+}
+
+/// Static build; `emit` adds library files for the proven rules.
 pub fn build_with_options(
     config_path: &Path,
     output_dir: &Path,
-    emit_js: bool,
+    emit: Emit,
 ) -> Result<BuildResult, String> {
     let mut cache = VerificationCache::default();
     let result = axiom_project::load(config_path)
-        .and_then(|project| build_project(&project, output_dir, &mut cache, false, emit_js));
+        .and_then(|project| build_project(&project, output_dir, &mut cache, false, emit));
     if result.is_err() {
         remove_verified_outputs(output_dir)?;
     }
@@ -101,6 +111,7 @@ const VERIFIED_OUTPUTS: &[&str] = &[
     "app.proof.json",
     "contracts.js",
     "contracts.d.ts",
+    "contracts.rs",
 ];
 
 /// After a failed static build, an older bundle must not pass for the current spec.
@@ -123,7 +134,7 @@ fn build_with_cache(
     dev_runtime: bool,
 ) -> Result<BuildResult, String> {
     let project = axiom_project::load(config_path)?;
-    build_project(&project, output_dir, cache, dev_runtime, false)
+    build_project(&project, output_dir, cache, dev_runtime, Emit::None)
 }
 
 fn build_project(
@@ -131,7 +142,7 @@ fn build_project(
     output_dir: &Path,
     cache: &mut VerificationCache,
     dev_runtime: bool,
-    emit_js: bool,
+    emit: Emit,
 ) -> Result<BuildResult, String> {
     let compiled = compile_contracts_with_cache(
         project,
@@ -155,14 +166,17 @@ fn build_project(
         .map(|(name, expression, params)| (name.as_str(), *expression, *params))
         .collect::<Vec<_>>();
     let wasm = axiom_wasm::emit_functions(&functions)?;
-    let js_module = if emit_js {
-        let items = compiled
-            .iter()
-            .map(|f| (&f.contract, &f.candidate, f.requires.as_ref()))
-            .collect::<Vec<_>>();
-        Some(crate::js::emit_modules(&items, crate::js::PROOF_NOTE)?)
-    } else {
-        None
+    let items = compiled
+        .iter()
+        .map(|f| (&f.contract, &f.candidate, f.requires.as_ref()))
+        .collect::<Vec<_>>();
+    let library: Vec<(&str, String)> = match emit {
+        Emit::None => Vec::new(),
+        Emit::Js => {
+            let (js, dts) = crate::js::emit_modules(&items, crate::js::PROOF_NOTE)?;
+            vec![("contracts.js", js), ("contracts.d.ts", dts)]
+        }
+        Emit::Rust => vec![("contracts.rs", crate::rs::emit_module(&items)?)],
     };
 
     fs::create_dir_all(output_dir)
@@ -185,20 +199,14 @@ fn build_project(
         &output_dir.join("app.proof.json"),
         proof_json(project, &compiled).as_bytes(),
     )?;
-    let (js_path, dts_path) = (
-        output_dir.join("contracts.js"),
-        output_dir.join("contracts.d.ts"),
-    );
-    if let Some((js, dts)) = js_module {
-        write_file(&js_path, js.as_bytes())?;
-        write_file(&dts_path, dts.as_bytes())?;
-    } else {
-        // A build without --emit js must not leave JS from an older spec behind.
-        for path in [&js_path, &dts_path] {
-            if path.exists() {
-                fs::remove_file(path)
-                    .map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
-            }
+    // Library files not emitted this time must not survive from an older spec.
+    for name in ["contracts.js", "contracts.d.ts", "contracts.rs"] {
+        let path = output_dir.join(name);
+        if let Some((_, text)) = library.iter().find(|(file, _)| *file == name) {
+            write_file(&path, text.as_bytes())?;
+        } else if path.exists() {
+            fs::remove_file(&path)
+                .map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
         }
     }
 
@@ -242,7 +250,8 @@ pub fn dev(config_path: &Path, port: u16, open_browser: bool, once: bool) -> Res
     // The server also starts on a failed first build and shows the error until a
     // fix rebuilds, the same as a failed rebuild; `--once` still reports it.
     let initial = retained_loader.load(config_path).and_then(|(project, _)| {
-        build_project(&project, &output_dir, &mut cache, true, false).map(|result| result.files)
+        build_project(&project, &output_dir, &mut cache, true, Emit::None)
+            .map(|result| result.files)
     });
     let (mut watched_files, error) = match initial {
         Ok(files) => (files, None),
@@ -364,44 +373,51 @@ fn compile_contracts_inner(
         .iter()
         .map(|linked| (ContractId::from(linked), linked))
         .collect::<HashMap<_, _>>();
-    for id in &project.verification_order {
-        let linked = linked_by_id
-            .get(id)
-            .copied()
-            .ok_or_else(|| format!("missing linked contract {}", id.name))?;
-        if linked.contract.kind == DeclarationKind::Extern {
-            let key = proof_cache_key(
+    // Rules whose callees are all proven are proven together, one thread each;
+    // results are then recorded in verification order, so output and the first
+    // error reported stay the same as one by one.
+    let mut remaining: Vec<&ContractId> = project.verification_order.iter().collect();
+    while !remaining.is_empty() {
+        let mut wave = Vec::new();
+        let mut rest = Vec::new();
+        for id in remaining {
+            let linked = linked_by_id
+                .get(id)
+                .copied()
+                .ok_or_else(|| format!("missing linked contract {}", id.name))?;
+            let ready = project
+                .verification_dependencies(linked)?
+                .iter()
+                .all(|(_, dependency)| verified_cache_keys.contains_key(dependency));
+            if ready {
+                wave.push(linked);
+            } else {
+                rest.push(id);
+            }
+        }
+        if wave.is_empty() {
+            // Dependencies not yet proven failed earlier; keep the old order.
+            let id = rest.remove(0);
+            wave.push(
+                linked_by_id
+                    .get(id)
+                    .copied()
+                    .ok_or_else(|| format!("missing linked contract {}", id.name))?,
+            );
+        }
+        remaining = rest;
+        let mut keys = Vec::with_capacity(wave.len());
+        for linked in &wave {
+            keys.push(proof_cache_key(
                 project,
                 linked,
                 options,
                 semantics_version,
                 &verified_cache_keys,
-            )?;
-            verified_cache_keys.insert(id.clone(), key);
-            continue;
+            )?);
         }
-        let name = linked.contract.name.clone();
-        let key = proof_cache_key(
-            project,
-            linked,
-            options,
-            semantics_version,
-            &verified_cache_keys,
-        )?;
-        let contract_id = ContractId::from(linked);
-        let cached = cache
-            .entries
-            .get(&contract_id)
-            .filter(|entry| entry.key == key)
-            .cloned();
-        let (candidate, cache_hit) = if let Some(entry) = cached {
-            cache.stats.hits += 1;
-            (entry.candidate, true)
-        } else {
-            cache.stats.misses += 1;
-            if cache.entries.remove(&contract_id).is_some() {
-                cache.stats.invalidations += 1;
-            }
+        let prove = |linked: &axiom_project::LinkedContract| -> Result<Expr, String> {
+            let name = &linked.contract.name;
             let candidate = axiom_synth::synthesize_with_options(&linked.contract, options)
                 .map_err(|error| format!("{}:{}: {error}", linked.source.display(), name))?;
             let composition = project
@@ -449,55 +465,99 @@ fn compile_contracts_inner(
                     ));
                 }
             }
-            cache.entries.insert(
-                contract_id.clone(),
-                CachedVerifiedCandidate {
-                    key: key.clone(),
-                    candidate: candidate.clone(),
+            Ok(candidate)
+        };
+        let misses: Vec<bool> = wave
+            .iter()
+            .zip(&keys)
+            .map(|(linked, key)| {
+                linked.contract.kind != DeclarationKind::Extern
+                    && !cache
+                        .entries
+                        .get(&ContractId::from(*linked))
+                        .is_some_and(|entry| entry.key == *key)
+            })
+            .collect();
+        let mut proven: Vec<Option<Result<Expr, String>>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = wave
+                .iter()
+                .zip(&misses)
+                .map(|(linked, miss)| miss.then(|| scope.spawn(|| prove(linked))))
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.map(|h| h.join().expect("proof thread panicked")))
+                .collect()
+        });
+        for (index, linked) in wave.iter().copied().enumerate() {
+            let id = &ContractId::from(linked);
+            let key = keys[index].clone();
+            if linked.contract.kind == DeclarationKind::Extern {
+                verified_cache_keys.insert(id.clone(), key);
+                continue;
+            }
+            let name = linked.contract.name.clone();
+            let contract_id = ContractId::from(linked);
+            let (candidate, cache_hit) = if let Some(result) = proven[index].take() {
+                cache.stats.misses += 1;
+                if cache.entries.remove(&contract_id).is_some() {
+                    cache.stats.invalidations += 1;
+                }
+                let candidate = result?;
+                cache.entries.insert(
+                    contract_id.clone(),
+                    CachedVerifiedCandidate {
+                        key: key.clone(),
+                        candidate: candidate.clone(),
+                    },
+                );
+                (candidate, false)
+            } else {
+                cache.stats.hits += 1;
+                let entry = cache.entries.get(&contract_id).expect("checked hit");
+                (entry.candidate.clone(), true)
+            };
+            let requires = axiom_synth::lower_requires(&linked.contract)
+                .map_err(|error| format!("{}:{}: {error}", linked.source.display(), name))?;
+            let requires_export = requires.as_ref().map(|_| requires_export_name(&name));
+            if let Some(requires_export) = &requires_export
+                && !export_names.insert(requires_export.clone())
+            {
+                return Err(format!(
+                    "{}:{}: reserved or duplicate WASM export {requires_export}",
+                    linked.source.display(),
+                    name
+                ));
+            }
+            verified_cache_keys.insert(contract_id.clone(), key);
+            verified_summaries.insert(contract_id.clone(), linked.contract.clone());
+            let (_, abi_arity) = axiom_parser::verified_abi_layout(&linked.contract.params)
+                .map_err(|error| format!("{}:{}: {error}", linked.source.display(), name))?;
+            let params = u32::try_from(abi_arity).map_err(|_| {
+                format!(
+                    "{}:{}: WASM parameter count overflow",
+                    linked.source.display(),
+                    name
+                )
+            })?;
+            if cache_hit {
+                println!("verified: {name} (cache hit)");
+            } else {
+                println!("verified: {name}");
+            }
+            compiled_by_id.insert(
+                contract_id,
+                CompiledFunction {
+                    name,
+                    source: linked.source.clone(),
+                    params,
+                    candidate,
+                    requires,
+                    requires_export,
+                    contract: linked.contract.clone(),
                 },
             );
-            (candidate, false)
-        };
-        let requires = axiom_synth::lower_requires(&linked.contract)
-            .map_err(|error| format!("{}:{}: {error}", linked.source.display(), name))?;
-        let requires_export = requires.as_ref().map(|_| requires_export_name(&name));
-        if let Some(requires_export) = &requires_export
-            && !export_names.insert(requires_export.clone())
-        {
-            return Err(format!(
-                "{}:{}: reserved or duplicate WASM export {requires_export}",
-                linked.source.display(),
-                name
-            ));
         }
-        verified_cache_keys.insert(contract_id.clone(), key);
-        verified_summaries.insert(contract_id.clone(), linked.contract.clone());
-        let (_, abi_arity) = axiom_parser::verified_abi_layout(&linked.contract.params)
-            .map_err(|error| format!("{}:{}: {error}", linked.source.display(), name))?;
-        let params = u32::try_from(abi_arity).map_err(|_| {
-            format!(
-                "{}:{}: WASM parameter count overflow",
-                linked.source.display(),
-                name
-            )
-        })?;
-        if cache_hit {
-            println!("verified: {name} (cache hit)");
-        } else {
-            println!("verified: {name}");
-        }
-        compiled_by_id.insert(
-            contract_id,
-            CompiledFunction {
-                name,
-                source: linked.source.clone(),
-                params,
-                candidate,
-                requires,
-                requires_export,
-                contract: linked.contract.clone(),
-            },
-        );
     }
     Ok(project
         .contracts
@@ -718,6 +778,20 @@ fn element_json(
         }
         PageElement::ShowText { text } => {
             format!("{{\"kind\":\"text\",\"text\":{}}}", json_string(text))
+        }
+        PageElement::Transfers { sends, names } => {
+            let list = |items: &[String]| {
+                items
+                    .iter()
+                    .map(|item| json_string(item))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            format!(
+                "{{\"kind\":\"transfers\",\"sends\":[{}],\"names\":[{}]}}",
+                list(sends),
+                list(names)
+            )
         }
         PageElement::WhenShow { condition, text } => format!(
             "{{\"kind\":\"when-show\",\"condition\":{},\"text\":{}}}",
@@ -1157,7 +1231,7 @@ fn rebuild_if_changed(
     watched_files.push(config_path.to_path_buf());
     let mut candidate_cache = cache.clone();
     let mut guard = state.lock().expect("dev state lock poisoned");
-    match build_project(&project, output_dir, &mut candidate_cache, true, false) {
+    match build_project(&project, output_dir, &mut candidate_cache, true, Emit::None) {
         Ok(mut result) => {
             let active_ids = project
                 .contracts

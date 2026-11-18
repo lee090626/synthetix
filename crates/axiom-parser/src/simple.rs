@@ -29,7 +29,8 @@ pub fn is_simple(source: &str) -> bool {
     if line.contains('{') || line.ends_with(';') {
         return false;
     }
-    if line.starts_with("from ") || line.starts_with("page ") {
+    if line.starts_with("from ") || line.starts_with("page ") || line.starts_with("use settle for ")
+    {
         return true;
     }
     let Some((name, _)) = line.split_once('(') else {
@@ -102,6 +103,16 @@ enum Current {
 struct PageInfo {
     name: String,
     lists: Vec<(String, usize)>,
+    /// `yes`/`no` values, passed to rules as 1 and 0.
+    yes_no: Vec<String>,
+    /// Group sizes `settle(...)` is used with; each adds its rules.
+    settles: Vec<usize>,
+    /// Text values.
+    texts: Vec<String>,
+    /// Tables (`save t = table of a, b`) and their columns.
+    tables: Vec<(String, Vec<String>)>,
+    /// Record declarations for the tables, placed after the page.
+    records: String,
     /// Every value: name, whether it can be negative, decimal places.
     values: Vec<(String, bool, u32)>,
     /// The open `when "Label" is clicked` block.
@@ -129,13 +140,17 @@ impl Click {
             sets,
             ..
         } = self;
+        // Table rows (`__append`) are not rules, so they always go in a reducer.
+        let rows = sets.iter().any(|(_, value)| value.starts_with("__"));
         out[index] = match sets.as_slice() {
             [] => {
                 return Err(format!(
                     "line {line_no}: add the values to set on the lines below, like `    total = cart(prices)`"
                 ));
             }
-            [(target, value)] => format!("    button {label} updates {target} with {value};"),
+            [(target, value)] if !rows => {
+                format!("    button {label} updates {target} with {value};")
+            }
             _ => {
                 let updates: String = sets
                     .iter()
@@ -169,6 +184,10 @@ impl Current {
                     click.finish(out)?;
                 }
                 out[last_index].push_str(" }");
+                out[last_index].push_str(&page.records);
+                for size in &page.settles {
+                    out[last_index].push_str(&settle_rules(*size));
+                }
                 Ok(())
             }
         }
@@ -201,6 +220,17 @@ pub fn translate_with_decimals(source: &str) -> Result<(String, Decimals), Strin
             }
             if let Some(rest) = trimmed.strip_prefix("from ") {
                 out[index] = import(rest, line_no)?;
+            } else if let Some(size) = trimmed.strip_prefix("use settle for ") {
+                // shortcut: a file may not also have a page using settle (lemmas would repeat).
+                let size = size
+                    .trim()
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|n| (2..=SETTLE_MAX).contains(n))
+                    .ok_or(format!(
+                        "line {line_no}: write `use settle for N` with N from 2 to {SETTLE_MAX}"
+                    ))?;
+                out[index] = settle_rules(size);
             } else if let Some(name) = trimmed.strip_prefix("page ") {
                 let name = name.trim();
                 check_name(name, line_no)?;
@@ -210,6 +240,11 @@ pub fn translate_with_decimals(source: &str) -> Result<(String, Decimals), Strin
                     page: PageInfo {
                         name: name.to_string(),
                         lists: Vec::new(),
+                        yes_no: Vec::new(),
+                        settles: Vec::new(),
+                        texts: Vec::new(),
+                        tables: Vec::new(),
+                        records: String::new(),
                         values: Vec::new(),
                         click: None,
                     },
@@ -478,6 +513,11 @@ fn page_line(
     let rest = rest.trim();
     let values = page.values.clone();
     let list_names = page.lists.clone();
+    let yes_no: Vec<(String, String)> = page
+        .yes_no
+        .iter()
+        .map(|name| (name.clone(), format!("(if {name} {{ 1 }} else {{ 0 }})")))
+        .collect();
     let lists = &mut page.lists;
     let mut states =
         |text: &str, persist: bool, line_no: usize, lists: &mut Vec<(String, usize)>| {
@@ -485,6 +525,12 @@ fn page_line(
             let (line, signed) = states(text, persist, places, line_no, lists)?;
             for state in line.split(" state ").skip(1) {
                 let name = state.split(':').next().unwrap_or_default();
+                if state.contains(": bool") {
+                    page.yes_no.push(name.to_string());
+                }
+                if state.contains(": text") {
+                    page.texts.push(name.to_string());
+                }
                 page.values.push((name.to_string(), signed, places));
                 if places > 0 {
                     decimals.push((page.name.clone(), name.to_string(), places));
@@ -512,10 +558,103 @@ fn page_line(
             decimals: places,
             lists: &list_names,
         };
-        expression(text, line_no, &ctx)
+        Ok(substitute(&expression(text, line_no, &ctx)?, &yes_no))
     };
     match word {
+        "save" if rest.contains("= table of ") => {
+            let (name, columns) = rest.split_once("= table of ").unwrap_or_default();
+            let name = name.trim();
+            check_name(name, line_no)?;
+            let mut fields = Vec::new();
+            let mut columns_out = Vec::new();
+            for column in columns.split(',').map(str::trim).filter(|c| !c.is_empty()) {
+                let items: Vec<String> = match page.lists.iter().find(|(list, _)| list == column) {
+                    Some((list, size)) => {
+                        (1..=*size).map(|item| format!("{list}_{item}")).collect()
+                    }
+                    None => vec![column.to_string()],
+                };
+                for item in items {
+                    let ty = if page.yes_no.contains(&item) {
+                        "bool"
+                    } else if page.texts.contains(&item) {
+                        "text"
+                    } else {
+                        match page.values.iter().find(|(value, _, _)| *value == item) {
+                            Some((_, _, places)) if *places > 0 => {
+                                return Err(format!(
+                                    "line {line_no}: a table cannot hold `{item}`, which has decimals"
+                                ));
+                            }
+                            Some((_, true, _)) => "i32",
+                            Some(_) => "number",
+                            None => {
+                                return Err(format!(
+                                    "line {line_no}: `{column}` must be saved above the table"
+                                ));
+                            }
+                        }
+                    };
+                    fields.push(format!("{item}: {ty};"));
+                    columns_out.push(item);
+                }
+            }
+            if fields.is_empty() {
+                return Err(format!(
+                    "line {line_no}: write `save {name} = table of a, b`"
+                ));
+            }
+            page.records
+                .push_str(&format!(" record {name}_row {{ {} }}", fields.join(" ")));
+            page.tables.push((name.to_string(), columns_out));
+            Ok(format!(
+                "    state {name}: list<{name}_row> = []; persist {name};"
+            ))
+        }
+        "show" if page.tables.iter().any(|(table, _)| table == rest) => {
+            let (_, columns) = page.tables.iter().find(|(table, _)| table == rest).unwrap();
+            let shows: String = columns.iter().map(|c| format!(" show row.{c};")).collect();
+            Ok(format!("    list {rest} as row {{{shows} }}"))
+        }
         "save" => states(rest, true, line_no, lists),
+        "add" if spot.in_click && rest.contains(" to ") => {
+            let (columns, table) = rest.rsplit_once(" to ").unwrap_or_default();
+            let table = table.trim();
+            let Some((_, known)) = page.tables.iter().find(|(name, _)| name == table) else {
+                return Err(format!(
+                    "line {line_no}: `{table}` is not a table; write `save {table} = table of ...`"
+                ));
+            };
+            let mut given = Vec::new();
+            for column in columns.split(',').map(str::trim) {
+                match page.lists.iter().find(|(list, _)| list == column) {
+                    Some((list, size)) => {
+                        given.extend((1..=*size).map(|item| format!("{list}_{item}")))
+                    }
+                    None => given.push(column.to_string()),
+                }
+            }
+            if &given != known {
+                return Err(format!(
+                    "line {line_no}: add the table's columns in order: {}",
+                    columns_of(known)
+                ));
+            }
+            let fields: Vec<String> = known.iter().map(|c| format!("{c}: {c}")).collect();
+            if let Some(click) = page.click.as_mut() {
+                click.sets.push((
+                    table.to_string(),
+                    format!("__append({table}_row {{ {} }})", fields.join(", ")),
+                ));
+            }
+            Ok(String::new())
+        }
+        "clear" if spot.in_click && page.tables.iter().any(|(name, _)| name == rest) => {
+            if let Some(click) = page.click.as_mut() {
+                click.sets.push((rest.to_string(), "__empty()".to_string()));
+            }
+            Ok(String::new())
+        }
         _ if spot.in_click => {
             let (target, value) = trimmed.split_once('=').ok_or_else(|| {
                 format!("line {line_no}: expected `name = rule(...)` under `when ... is clicked`")
@@ -523,8 +662,52 @@ fn page_line(
             let target = target.trim();
             check_name(target, line_no)?;
             let value = expression(value.trim(), line_no)?;
-            if let Some(click) = page.click.as_mut() {
-                click.sets.push((target.to_string(), value));
+            if page.click.is_none() {
+                return Ok(String::new());
+            }
+            // `sends = settle(owe)`: item (i-1)*n+j is what person i sends person j.
+            if let Some(args) = value.strip_prefix("settle(") {
+                let size = args.split(',').count();
+                let fits = lists
+                    .iter()
+                    .any(|(list, n)| list == target && *n == size * size);
+                if !fits {
+                    return Err(format!(
+                        "line {line_no}: `{target}` needs {} items: one per pair of the {size} people",
+                        size * size
+                    ));
+                }
+                if !page.settles.contains(&size) {
+                    page.settles.push(size);
+                }
+                let click = page.click.as_mut().expect("checked above");
+                for from in 1..=size {
+                    for to in 1..=size {
+                        click.sets.push((
+                            format!("{target}_{}", (from - 1) * size + to),
+                            format!("settle_{size}_{from}_{to}({args}"),
+                        ));
+                    }
+                }
+                return Ok(String::new());
+            }
+            let click = page.click.as_mut().expect("checked above");
+            // `balances = to_pay(paid, share)`: a list takes a rule's answer per item.
+            match (
+                lists.iter().find(|(list, _)| list == target),
+                value.split_once('('),
+            ) {
+                (Some((_, size)), Some((rule, args)))
+                    if check_name(rule.trim(), line_no).is_ok() =>
+                {
+                    for item in 1..=*size {
+                        click.sets.push((
+                            format!("{target}_{item}"),
+                            format!("{}_{item}({args}", rule.trim()),
+                        ));
+                    }
+                }
+                _ => click.sets.push((target.to_string(), value)),
             }
             Ok(String::new())
         }
@@ -605,17 +788,27 @@ fn states(
             "line {line_no}: a text value cannot be negative or have decimals"
         ));
     }
+    let yes_no = matches!(initial, "yes" | "no");
+    if yes_no && (signed || places > 0) {
+        return Err(format!(
+            "line {line_no}: a yes/no value cannot be negative or have decimals"
+        ));
+    }
     let initial = if text_value {
         initial.to_string()
+    } else if yes_no {
+        (if initial == "yes" { "true" } else { "false" }).to_string()
     } else if !initial.is_empty() && initial.chars().all(|c| c.is_ascii_digit() || c == '.') {
         scaled_number(initial, places, line_no)?
     } else {
         return Err(format!(
-            "line {line_no}: the starting value must be a number or a text in quotes"
+            "line {line_no}: the starting value must be a number, a text in quotes, yes, or no"
         ));
     };
     let ty = if text_value {
         "text"
+    } else if yes_no {
+        "bool"
     } else if signed {
         "i32"
     } else {
@@ -929,6 +1122,7 @@ pub fn check_ranges(
             .iter()
             .map(|param| (param.name.clone(), limits.0, limits.1))
             .collect(),
+        exprs: Vec::new(),
     };
     for requirement in &contract.requires {
         facts.learn(requirement, true);
@@ -952,6 +1146,8 @@ struct Facts {
     limits: (i64, i64),
     calls: Vec<(String, i64, i64)>,
     bounds: Vec<(String, i64, i64)>,
+    /// Bounds on whole expressions, like `need sum(part) >= 1`.
+    exprs: Vec<(SpecExpr, i64, i64)>,
 }
 
 impl Facts {
@@ -985,6 +1181,29 @@ impl Facts {
                     self.bound(name, flip(op), n);
                 }
             }
+            (expr, number) => {
+                if let Some(n) = constant(number) {
+                    self.bound_expr(expr, op, n);
+                }
+            }
+        }
+    }
+
+    fn bound_expr(&mut self, expr: &SpecExpr, op: BinaryOp, number: i64) {
+        let index = match self.exprs.iter().position(|(known, _, _)| known == expr) {
+            Some(index) => index,
+            None => {
+                self.exprs
+                    .push((expr.clone(), self.limits.0, self.limits.1));
+                self.exprs.len() - 1
+            }
+        };
+        let entry = &mut self.exprs[index];
+        match op {
+            BinaryOp::Le => entry.2 = entry.2.min(number),
+            BinaryOp::Lt => entry.2 = entry.2.min(number - 1),
+            BinaryOp::Ge => entry.1 = entry.1.max(number),
+            BinaryOp::Gt => entry.1 = entry.1.max(number + 1),
             _ => {}
         }
     }
@@ -1093,7 +1312,76 @@ impl Block {
             let condition = rule.condition.as_deref().unwrap_or_default();
             chain = format!("if {condition} {{ {} }} else {{ {chain} }}", rule.value);
         }
-        out[last.index] = format!("    ensures result == ({chain}); }}");
+        let mut size = None;
+        for rule in &self.rules {
+            let text = format!(
+                "{} {}",
+                rule.condition.as_deref().unwrap_or_default(),
+                rule.value
+            );
+            if let Some(n) = item_size(&text, &self.lists, rule.line_no)? {
+                if size.is_some_and(|size| size != n) {
+                    return Err(format!(
+                        "line {}: lists calculated together must have the same size",
+                        rule.line_no
+                    ));
+                }
+                size = Some(n);
+            }
+        }
+        let Some(size) = size else {
+            out[last.index] = format!("    ensures result == ({chain}); }}");
+            return Ok(());
+        };
+        // An answer per item: rule `name` becomes `name_1` .. `name_N`, each
+        // with the same inputs and `need` lines.
+        let head = self.name_line - 1;
+        let header = out[head].clone();
+        let needs: Vec<String> = out[head + 1..last.index]
+            .iter()
+            .filter(|line| !line.is_empty())
+            .cloned()
+            .collect();
+        let contract = |item: usize| {
+            header.replacen(
+                &format!("contract {}(", self.name),
+                &format!("contract {}_{item}(", self.name),
+                1,
+            )
+        };
+        out[head] = contract(1);
+        let mut last_line = format!(
+            "    ensures result == ({}); }}",
+            pick_item(&chain, &self.lists, 1)
+        );
+        for item in 2..=size {
+            last_line.push_str(&format!(
+                " {} {} ensures result == ({}); }}",
+                contract(item),
+                needs.join(" "),
+                pick_item(&chain, &self.lists, item)
+            ));
+        }
+        out[last.index] = last_line;
+        let places = decimals
+            .rules
+            .iter()
+            .find(|(rule, _)| rule == &self.name)
+            .map(|(_, p)| *p);
+        let labels = decimals
+            .labels
+            .iter()
+            .find(|(rule, _)| rule == &self.name)
+            .map(|(_, l)| l.clone());
+        for item in 1..=size {
+            let name = format!("{}_{item}", self.name);
+            if let Some(places) = places {
+                decimals.rules.push((name.clone(), places));
+            }
+            if let Some(labels) = labels.clone() {
+                decimals.labels.push((name, labels));
+            }
+        }
         Ok(())
     }
 }
@@ -1496,12 +1784,155 @@ fn rewrite_lists(
                     "line {line_no}: lists in one `need` line must have the same size"
                 ));
             }
-            None => out.push_str(&items(word, n).join(", ")),
+            // A whole list passed to another rule fills its list input;
+            // anywhere else it means "for each item" (see `ITEM`).
+            None if passes_whole(&out, tail) => out.push_str(&items(word, n).join(", ")),
+            None => out.push_str(&format!("{word}{ITEM}")),
         }
         rest = tail;
     }
     out.push_str(rest);
     Ok((out, bare))
+}
+
+/// The largest balance `settle` takes, plus or minus.
+const SETTLE_LIMIT: u32 = 100_000_000;
+
+/// Most people `settle` takes: sums of up to this many balances of
+/// SETTLE_LIMIT stay inside i32, as the Lean proof (infinite integers) assumes.
+const SETTLE_MAX: usize = 21;
+
+/// Functions `settle_N_i_j`: how much person `i` sends person `j` so every
+/// balance (`o_k`, positive = still owes) reaches 0. People who owe pay in
+/// order, people owed are paid in order: debtor `i` covers the stretch of
+/// total debt from D(i-1) to D(i), creditor `j` the stretch from C(j-1) to
+/// C(j), and `i` sends `j` the overlap. Nobody pays more than they owe, and
+/// there are at most N - 1 transfers.
+fn settle_rules(size: usize) -> String {
+    let params: Vec<String> = (1..=size).map(|k| format!("o_{k}: i32")).collect();
+    let needs: Vec<String> = (1..=size)
+        .map(|k| format!("requires o_{k} >= (0 -% {SETTLE_LIMIT}) && o_{k} <= {SETTLE_LIMIT};"))
+        .collect();
+    let min = |a: &str, b: &str| format!("(if {a} <= {b} {{ {a} }} else {{ {b} }})");
+    let max = |a: &str, b: &str| format!("(if {a} >= {b} {{ {a} }} else {{ {b} }})");
+    let total = |upto: usize, owes: bool| -> String {
+        if upto == 0 {
+            return "0".to_string();
+        }
+        let parts: Vec<String> = (1..=upto)
+            .map(|k| {
+                if owes {
+                    format!("(if o_{k} > 0 {{ o_{k} }} else {{ 0 }})")
+                } else {
+                    format!("(if o_{k} < 0 {{ 0 -% o_{k} }} else {{ 0 }})")
+                }
+            })
+            .collect();
+        format!("({})", parts.join(" +% "))
+    };
+    let mut out = String::new();
+    for from in 1..=size {
+        for to in 1..=size {
+            let covered = min(&total(from, true), &total(to, false));
+            // Numbers never come first in a comparison, so it stays signed.
+            let before = match (from, to) {
+                (1, 1) => None,
+                (1, _) => Some(total(to - 1, false)),
+                (_, 1) => Some(total(from - 1, true)),
+                _ => Some(max(&total(from - 1, true), &total(to - 1, false))),
+            };
+            let overlap = match before {
+                None => covered,
+                Some(before) => format!("{covered} -% {before}"),
+            };
+            let amount = format!("(if ({overlap}) > 0 {{ {overlap} }} else {{ 0 }})");
+            // Not proven by Z3: proofs/lean/Settle.lean proves this formula
+            // (`t` there) brings every balance to 0 for any group size.
+            out.push_str(&format!(
+                // The grammar needs one `ensures`; this one costs Z3 nothing.
+                " export fn settle_{size}_{from}_{to}({}) -> i32 {{ {} return {}; ensures result == result; }}",
+                params.join(", "),
+                needs.join(" "),
+                amount
+            ));
+        }
+    }
+    out
+}
+
+/// `paid_1, paid_2, amount` with each list written once: `paid, amount`.
+fn columns_of(columns: &[String]) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for column in columns {
+        let base = column
+            .rsplit_once('_')
+            .filter(|(_, item)| item.parse::<usize>().is_ok())
+            .map_or(column.as_str(), |(base, _)| base);
+        if !out.iter().any(|known| known == base) {
+            out.push(base.to_string());
+        }
+    }
+    out.join(", ")
+}
+
+/// Marks a list used item by item (`share - paid`); a rule whose answer uses
+/// one becomes one rule per item, with the mark replaced by `_1`, `_2`, ...
+const ITEM: &str = "_0";
+
+/// True when a list name stands alone as an argument of a rule call
+/// (`total(prices)`), not of `min`, `max`, `up`, or `round`.
+fn passes_whole(before: &str, after: &str) -> bool {
+    let prev = before.trim_end().chars().last();
+    let next = after.trim_start().chars().next();
+    if !matches!(prev, Some('(' | ',')) || !matches!(next, Some(')' | ',')) {
+        return false;
+    }
+    let mut depth = 0;
+    for (index, c) in before.char_indices().rev() {
+        match c {
+            ')' => depth += 1,
+            '(' if depth > 0 => depth -= 1,
+            '(' => {
+                let name = before[..index]
+                    .trim_end()
+                    .rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .next()
+                    .unwrap_or_default();
+                return !name.is_empty() && !matches!(name, "min" | "max" | "up" | "round");
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Replaces each `list_0` mark with item `item` of that list.
+fn pick_item(text: &str, lists: &[(String, usize)], item: usize) -> String {
+    let marked: Vec<(String, String)> = lists
+        .iter()
+        .map(|(list, _)| (format!("{list}{ITEM}"), format!("{list}_{item}")))
+        .collect();
+    substitute(text, &marked)
+}
+
+/// The size of the lists a translated line uses item by item, if any.
+fn item_size(
+    text: &str,
+    lists: &[(String, usize)],
+    line_no: usize,
+) -> Result<Option<usize>, String> {
+    let mut size = None;
+    for (list, n) in lists {
+        if substitute(text, &[(format!("{list}{ITEM}"), String::new())]) != text {
+            if size.is_some_and(|size| size != *n) {
+                return Err(format!(
+                    "line {line_no}: lists calculated together must have the same size"
+                ));
+            }
+            size = Some(*n);
+        }
+    }
+    Ok(size)
 }
 
 /// `need prices <= 100` holds for every item: one condition per item.
@@ -1749,6 +2180,15 @@ fn range(expr: &SpecExpr, facts: &Facts, name: &str) -> Result<(i64, i64), Strin
         SpecExpr::Binary(op, left, right) => {
             let (l_low, l_high) = range(left, facts, name)?;
             let (r_low, r_high) = range(right, facts, name)?;
+            let known = |(low, high): (i64, i64), side: &SpecExpr| {
+                facts
+                    .exprs
+                    .iter()
+                    .find(|(expr, _, _)| expr == side)
+                    .map_or((low, high), |(_, l, h)| (low.max(*l), high.min(*h)))
+            };
+            let (l_low, l_high) = known((l_low, l_high), left);
+            let (r_low, r_high) = known((r_low, r_high), right);
             match op {
                 BinaryOp::AddWrap => fits(l_low + r_low, l_high + r_high, "+")?,
                 BinaryOp::SubWrap => fits(l_low - r_high, l_high - r_low, "-")?,
@@ -1831,8 +2271,89 @@ mod tests {
         assert!(err("f(a, b)\n  always -> a mod b\n").contains("divide by 0"));
         assert!(err("f(p[3])\n  always -> p[4]\n").contains("items 1 to 3"));
         assert!(err("f(p[0])\n  always -> 1\n").contains("size from 1"));
+        assert!(err("f(a[2], b[3])\n  always -> a + b\n").contains("same size"));
         assert!(err("f(a) with 1 decimal\n  always -> a * 1.25\n").contains("more than 1"));
         assert!(err("page P\n  save a = 0\n  show a if a > 1\n").contains("only a text"));
+    }
+
+    #[test]
+    fn list_answer_becomes_one_rule_per_item() {
+        let out = translate("f(a[2], b[2])\n  need a <= 9\n  always -> a + b + sum(b)\n").unwrap();
+        assert!(
+            out.contains("contract f_1(a_1: u32, a_2: u32, b_1: u32, b_2: u32)"),
+            "{out}"
+        );
+        assert!(out.contains("contract f_2("), "{out}");
+        assert!(
+            out.contains("ensures result == (a_2 +% b_2 +% (b_1 +% b_2))"),
+            "{out}"
+        );
+        let page =
+            translate("page P\n  save x[2], y[2] = 0\n  when \"Go\" is clicked\n    y = f(x)\n")
+                .unwrap();
+        assert!(page.contains("updates y_2 with f_2(x_1, x_2)"), "{page}");
+    }
+
+    #[test]
+    fn tables_keep_rows() {
+        let page = translate(
+            "page P\n  save a = 0\n  save j[2] = no\n  save t = table of a, j\n  when \"Go\" is clicked\n    add a, j to t\n  when \"New\" is clicked\n    clear t\n  show t\n",
+        )
+        .unwrap();
+        assert!(
+            page.contains("state t: list<t_row> = []; persist t;"),
+            "{page}"
+        );
+        assert!(
+            page.contains("record t_row { a: number; j_1: bool; j_2: bool; }"),
+            "{page}"
+        );
+        assert!(
+            page.contains("updates t with __append(t_row { a: a, j_1: j_1, j_2: j_2 });"),
+            "{page}"
+        );
+        assert!(page.contains("updates t with __empty();"), "{page}");
+        assert!(
+            page.contains("list t as row { show row.a; show row.j_1; show row.j_2; }"),
+            "{page}"
+        );
+        let err = translate(
+            "page P\n  save a, b = 0\n  save t = table of a, b\n  when \"Go\" is clicked\n    add b, a to t\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("columns in order: a, b"), "{err}");
+    }
+
+    #[test]
+    fn settle_in_a_rules_file() {
+        let out = translate("use settle for 3\n").unwrap();
+        assert!(out.contains("export fn settle_3_3_3("));
+        assert!(translate("use settle for 1\n").is_err());
+        assert!(translate("use settle for 22\n").is_err());
+    }
+
+    #[test]
+    fn yes_no_and_settle_on_pages() {
+        let page = translate(
+            "page P\n  save j[2] = no\n  n = 0\n  when \"Go\" is clicked\n    n = f(j)\n",
+        )
+        .unwrap();
+        assert!(page.contains("state j_1: bool = false;"), "{page}");
+        assert!(page.contains("f((if j_1 { 1 } else { 0 })"), "{page}");
+        let page = translate(
+            "page P\n  o[2], s[4] = 0 can be negative\n  when \"Go\" is clicked\n    s = settle(o)\n",
+        )
+        .unwrap();
+        assert!(
+            page.contains("updates s_2 with settle_2_1_2(o_1, o_2)"),
+            "{page}"
+        );
+        assert!(page.contains("fn settle_2_2_1("), "{page}");
+        let err = translate(
+            "page P\n  o[2], s[3] = 0 can be negative\n  when \"Go\" is clicked\n    s = settle(o)\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("needs 4 items"), "{err}");
     }
 
     #[test]

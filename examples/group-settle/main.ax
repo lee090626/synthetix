@@ -1,0 +1,47 @@
+from rules: part, share, add_up, owe, clear, next, zero
+
+page Gathering
+  save names[4] = ""
+  save unit = 100
+  ask "이름" for names
+  ask "단위 (1, 10, 100원)" for unit
+
+  # 이번 결제
+  save amount = 0
+  save paid[4], fixed[4] = 0
+  save joined[4] = yes
+  save weight[4] = 1
+  ask "금액" for amount
+  ask "낸 돈" for paid
+  ask "참여" for joined
+  ask "비율" for weight
+  ask "따로 정한 금액" for fixed
+
+  # 결제 기록: 얼마, 누가 얼마 냈나, 누가 참여했나
+  save payments = table of amount, paid, joined
+
+  # 지금까지
+  save count = 0
+  save shares[4], spent[4] = 0
+  save balance[4], sends[16] = 0 can be negative
+  part_now[4], share_now[4] = 0
+
+  when "결제 추가" is clicked
+    part_now = part(joined, weight)
+    share_now = share(amount, part_now, fixed, unit)
+    shares = add_up(shares, share_now)
+    spent = add_up(spent, paid)
+    count = next(count)
+    add amount, paid, joined to payments
+    balance = owe(shares, spent)
+    sends = settle(balance)
+  when "새 모임" is clicked
+    shares = clear(shares)
+    spent = clear(spent)
+    count = zero(count)
+    clear payments
+    balance = owe(shares, spent)
+    sends = settle(balance)
+  show count
+  show transfers(sends, names)
+  show payments

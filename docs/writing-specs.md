@@ -92,6 +92,19 @@ cart(prices[3])
 
 A list has a fixed size from 1 to 16.
 
+Calculating with a whole list works item by item, and the answer is a list of
+the same size. Lists used together must have the same size:
+
+```
+# What each person still has to pay
+to_pay(paid[3], share[3]) can be negative
+  need paid >= 0 and paid <= 1000000
+  need share >= 0 and share <= 1000000
+  always -> share - paid
+```
+
+A page stores such an answer in a list: `owe = to_pay(paid, share)`.
+
 ### Decimals
 
 Add `with 2 decimals` (1 to 6 places) to the name line. Every value in the rule,
@@ -171,6 +184,15 @@ page Shop
 | `save price = 0 with 2 decimals` | Values typed and shown with 2 decimal places |
 | `save d = 0 can be negative with 2 decimals` | Both |
 | `save grade = ""` | A text value, for a rule with text answers |
+| `save joined = yes` | A yes/no value (a check box); a rule gets 1 for yes, 0 for no |
+| `save names[4] = ""` | Text values, like people's names |
+| `    owe = to_pay(paid, share)` | (under `when`) Fill list `owe` from a rule with a list answer |
+| `    sends = settle(owe)` | (under `when`) Who sends whom how much so every `owe` reaches 0 |
+| `show transfers(sends, names)` | "name → name amount" lines, a copy button, and saved past results |
+| `save payments = table of amount, paid` | A table: one column per value (a list gives one per item), kept after reload |
+| `    add amount, paid to payments` | (under `when`) Add a row with the current values, columns in order |
+| `    clear payments` | (under `when`) Remove every row |
+| `show payments` | The table, one row per line |
 | `when "Label" is clicked` | A button; on click, the lines below it run in order |
 | `    a = rule(...)` | (under `when`) Set `a` to the rule's answer |
 
@@ -184,6 +206,19 @@ when "Calc" is clicked
 ```
 
 Pass a list to a rule by name: `total = cart(prices)`.
+
+`settle(owe)` takes the list of what each person still owes (below 0: is owed)
+and fills a list with one item per pair of people, so `owe[4]` needs
+`sends[16]`; item `(i - 1) * 4 + j` is what person `i` sends person `j`.
+People who owe pay in list order to people who are owed, in list order.
+`settle` is built in and proven once, in Lean, for any number of people:
+[proofs/lean/Settle.lean](../proofs/lean/Settle.lean) shows that when the
+balances add up to 0, what each person sends is what they owe and what each
+receives is what they are owed, so every balance ends at exactly 0. It is not
+proven again on each build. Tests check the generated code against this on
+random balances, and that there are at most n - 1 transfers. Up to 21 people,
+each balance within ±100,000,000. It does not promise the fewest
+transfers. See [examples/group-settle](../examples/group-settle).
 A value with decimals goes only into a rule with the same places. On a page,
 values can be calculated and compared (`show price + tax`,
 `show "Pricey" if price > 10.5`); values with fewer places are raised to the
@@ -242,3 +277,24 @@ axiom build      # static output in dist/
 ```
 
 Use `axiom run file.ax -- <inputs>` to try a single rule.
+
+## Using rules from JavaScript, TypeScript or Rust
+
+`axiom build --emit js` also writes `dist/contracts.js` and `dist/contracts.d.ts`,
+one function per proven rule. A rule with a list answer takes and returns arrays:
+
+```ts
+import { share } from "./dist/contracts.js";
+share(10000, [1, 1, 2, 0], [0, 0, 0, 0], 100); // [2500, 2500, 5000, 0]
+```
+
+A wrong array length or a value outside the `need` lines throws.
+
+Add `use settle for 4` to a rules file to prove `settle` for 4 people there;
+then `settle(owe)` takes the 4 balances and returns the 16 transfers, item
+`(i - 1) * 4 + j` from person `i` to person `j`.
+
+`axiom build --emit rust` writes `dist/contracts.rs` instead: put it in your
+crate as `mod contracts;`. Each rule returns `Result<_, AxiomError>`, lists are
+arrays (`share(10000, [1, 1, 2, 0], [0; 4], 100)`), and `settle(&owe)` returns
+a `Vec<i32>`. It needs no other crate.

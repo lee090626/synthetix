@@ -171,3 +171,45 @@ fn project_build_emits_all_contracts() {
     assert!(!js.exists(), "plain build must remove stale contracts.js");
     fs::remove_dir_all(dir).ok();
 }
+
+#[test]
+fn list_answer_rules_take_and_return_arrays() {
+    if !node_available() {
+        eprintln!("SKIPPED js_emit::list: node not found");
+        return;
+    }
+    let dir = scratch("list");
+    let example = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/group-settle");
+    fs::copy(example.join("rules.ax"), dir.join("rules.ax")).unwrap();
+    let mut rules = fs::read_to_string(dir.join("rules.ax")).unwrap();
+    rules += "\nuse settle for 4\n";
+    fs::write(dir.join("rules.ax"), rules).unwrap();
+    fs::write(
+        dir.join("synthetix.toml"),
+        "[project]\nentry = \"rules.ax\"\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_axiom"))
+        .args(["build", "--emit", "js"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let dts = fs::read_to_string(dir.join("dist/contracts.d.ts")).unwrap();
+    assert!(dts.contains(
+        "export function share(amount: number, part: number[], fixed: number[], unit: number): number[];"
+    ));
+    let script = format!(
+        "import('{}').then(m=>{{const p=m.part([1,1,1,0],[1,1,2,1]);console.log(JSON.stringify([p,m.share(10000,p,[0,0,0,0],100),m.owe([3000,3000,4000,0],[10000,0,0,0]),m.settle([-7000,3000,4000,0])]));try{{m.share(1,[1],[0,0,0,0],1)}}catch(e){{console.log(e.constructor.name)}}}})",
+        dir.join("dist/contracts.js").display()
+    );
+    let out = Command::new("node").args(["-e", &script]).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "[[1,1,2,0],[2500,2500,5000,0],[-7000,3000,4000,0],[0,0,0,0,3000,0,0,0,4000,0,0,0,0,0,0,0]]\nTypeError\n"
+    );
+}

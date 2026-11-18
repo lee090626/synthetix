@@ -8,6 +8,8 @@ does not. The detailed rules are in [semantics.md](semantics.md) and
 
 - **Platforms:** CLI binaries for Linux x64, Windows x64, macOS arm64, and
   macOS x64. The VSCode extension bundles all four CLIs.
+- **Install:** GitHub Release assets, npm (`npm install -g synthetix-cli`),
+  and the VSCode extension (see [setup.md](setup.md)).
 - **Values:** whole numbers from 0 to 4294967295; negative numbers
   (`can be negative`), decimals with 1 to 6 places (`with 2 decimals`),
   fixed-size lists up to 16 items (`prices[3]`), and text answers. Arithmetic must be provably
@@ -28,14 +30,17 @@ does not. The detailed rules are in [semantics.md](semantics.md) and
   exactly what the rule says; whether the rule matches your intent is for you
   to read and judge.
 - **Old syntax removed from user files.** Loops, recursion, records,
-  growable lists, text, and property-only results (`ensures`) exist in the
-  engine but have no simple syntax yet.
+  growable lists, and property-only results (`ensures`) exist in the engine
+  but have no simple syntax yet. Tables (`table of`) keep rows on the page but
+  cannot be passed to a rule; add each row's numbers into running totals
+  instead (see examples/group-settle).
 - **Some number forms do not mix.** A button passes values only to a rule with
   the same decimal places, and a rule uses a rule from another file only with
   the same places; pages calculate only with values that cannot be negative.
 - **Text answers are for pages.** A rule with text answers cannot be used by
   another rule, and `contracts.js` returns the answer's position, not the text.
-- **No published packages.** Releases are GitHub Release assets only; there is
-  no crates.io, npm, or VSCode Marketplace distribution.
+- **Settling is not the fewest transfers.** `settle` uses at most n - 1
+  transfers, not always the fewest. Its proof is in Lean and covers the formula;
+  that the generated code matches the formula is checked by tests, not proven.
 - **Not validated with real users.** Ergonomics and error messages reflect
   internal testing only.

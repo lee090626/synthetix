@@ -1,0 +1,41 @@
+# 결제마다 사람별 비율: 빠진 사람(no)은 0
+part(joined[4], weight[4])
+  need joined <= 1
+  need weight <= 4
+  always -> joined * weight
+
+# 한 결제에서 사람마다 낼 몫
+# 따로 정한 금액(fixed)을 먼저 내고, 나머지는 비율대로 나눠 unit원 단위로 올림
+share(amount, part[4], fixed[4], unit)
+  need amount <= 5000000
+  need part <= 4
+  need sum(part) >= 1
+  need fixed <= 5000000
+  need sum(fixed) <= amount
+  need unit >= 1 and unit <= 100
+  always -> fixed + up(up((amount - sum(fixed)) * part / sum(part)) / unit) * unit
+
+# 지금까지의 합에 이번 결제를 더함
+add_up(total[4], more[4])
+  need total <= 100000000
+  need more <= 10000000
+  always -> total + more
+
+# 사람마다 더 낼 돈 (음수면 돌려받을 돈)
+owe(shares[4], paid[4]) can be negative
+  need shares >= 0 and shares <= 100000000
+  need paid >= 0 and paid <= 100000000
+  always -> shares - paid
+
+# 새 모임: 모두 0으로
+clear(total[4])
+  always -> total * 0
+
+# 결제 수 하나 늘리기
+next(count)
+  need count <= 1000
+  always -> count + 1
+
+# 결제 수를 0으로
+zero(count)
+  always -> 0

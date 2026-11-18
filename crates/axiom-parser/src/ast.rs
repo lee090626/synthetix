@@ -191,6 +191,12 @@ pub enum PageElement {
     Use {
         name: String,
     },
+    /// `show transfers(sends, names)`: one line per non-zero `sends` item,
+    /// item (i-1)*n+j reading "name i → name j amount".
+    Transfers {
+        sends: Vec<String>,
+        names: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

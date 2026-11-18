@@ -39,3 +39,18 @@ jobs:
         run: cargo nextest run --locked --workspace
       - name: Run doctests
         run: cargo test --locked --workspace --doc
+
+  lean:
+    name: lean proofs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install elan
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Check settle proof
+        working-directory: proofs/lean
+        run: |
+          lean Settle.lean
+          ! grep -n "sorry" Settle.lean

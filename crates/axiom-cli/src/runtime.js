@@ -369,6 +369,15 @@ function applyReducerTransition(element) {
   try {
     for (; updateIndex < element.updates.length; updateIndex++) {
       const update = element.updates[updateIndex];
+      // Table rows are page bookkeeping, not rules.
+      if (update.function === '__append') {
+        getPath(nextState, update.state).push(evaluate(update.args[0], nextState));
+        continue;
+      }
+      if (update.function === '__empty') {
+        setPath(nextState, update.state, []);
+        continue;
+      }
       functionName = update.function;
       const value = callContract(update.function, update.args.map((arg) => evaluate(arg, nextState)));
       setPath(nextState, update.state, value);
@@ -481,6 +490,49 @@ function renderElement(element, root, scope) {
       catch (error) { reportApplicationError(error, element.function); }
     });
     root.append(button);
+    return;
+  }
+  if (element.kind === 'transfers') {
+    // "name → name amount" for every pair that sends money; copy and keep past results.
+    const size = element.names.length;
+    const lines = [];
+    element.sends.forEach((state, index) => {
+      const amount = getPath(scope, state) ?? 0;
+      if (amount <= 0) return;
+      const from = getPath(scope, element.names[Math.floor(index / size)]) || `${Math.floor(index / size) + 1}`;
+      const to = getPath(scope, element.names[index % size]) || `${(index % size) + 1}`;
+      lines.push(`${from} → ${to} ${display(amount, decimalsOf(state))}`);
+    });
+    const text = lines.join('\n');
+    for (const line of lines) {
+      const row = document.createElement('p');
+      row.textContent = line;
+      root.append(row);
+    }
+    const historyKey = `${__storagePrefix}history`;
+    const readHistory = () => {
+      try { return JSON.parse(storageAdapter().getItem(historyKey) ?? '[]'); } catch { return []; }
+    };
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.textContent = '복사';
+    copy.addEventListener('click', () => { navigator.clipboard?.writeText(text); });
+    const keep = document.createElement('button');
+    keep.type = 'button';
+    keep.textContent = '기록 저장';
+    keep.addEventListener('click', () => {
+      if (!text) return;
+      const history = readHistory();
+      history.unshift({ at: new Date().toISOString().slice(0, 10), text });
+      storageAdapter().setItem(historyKey, JSON.stringify(history.slice(0, 50)));
+      render();
+    });
+    root.append(copy, keep);
+    for (const entry of readHistory()) {
+      const past = document.createElement('pre');
+      past.textContent = `${entry.at}\n${entry.text}`;
+      root.append(past);
+    }
     return;
   }
   if (element.kind === 'add') {
