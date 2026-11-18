@@ -1555,8 +1555,11 @@ fn scaled_number(text: &str, decimals: u32, line_no: usize) -> Result<String, St
     }
     let digits = format!("{whole}{fraction:0<width$}", width = decimals as usize);
     let value = digits
-        .parse::<u32>()
+        .parse::<u64>()
         .map_err(|_| format!("line {line_no}: `{text}` is too large"))?;
+    if decimals > 0 && value > u64::from(u32::MAX) {
+        return Err(format!("line {line_no}: `{text}` is too large"));
+    }
     Ok(value.to_string())
 }
 
