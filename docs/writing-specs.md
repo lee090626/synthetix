@@ -276,7 +276,7 @@ axiom build      # static output in dist/
 
 Use `axiom run file.ax -- <inputs>` to try a single rule.
 
-## Using rules from JavaScript or TypeScript
+## Using rules from JavaScript, TypeScript or Rust
 
 `axiom build --emit js` also writes `dist/contracts.js` and `dist/contracts.d.ts`,
 one function per proven rule. A rule with a list answer takes and returns arrays:
@@ -291,3 +291,8 @@ A wrong array length or a value outside the `need` lines throws.
 Add `use settle for 4` to a rules file to prove `settle` for 4 people there;
 then `settle(owe)` takes the 4 balances and returns the 16 transfers, item
 `(i - 1) * 4 + j` from person `i` to person `j`.
+
+`axiom build --emit rust` writes `dist/contracts.rs` instead: put it in your
+crate as `mod contracts;`. Each rule returns `Result<_, AxiomError>`, lists are
+arrays (`share(10000, [1, 1, 2, 0], [0; 4], 100)`), and `settle(&owe)` returns
+a `Vec<i32>`. It needs no other crate.

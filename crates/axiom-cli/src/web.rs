@@ -74,18 +74,28 @@ struct DevState {
 
 #[cfg(test)]
 pub fn build(config_path: &Path, output_dir: &Path) -> Result<BuildResult, String> {
-    build_with_options(config_path, output_dir, false)
+    build_with_options(config_path, output_dir, Emit::None)
 }
 
-/// Static build; with `emit_js`, also writes `contracts.js` and `contracts.d.ts`.
+/// Extra library output next to the web app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Emit {
+    None,
+    /// `contracts.js` and `contracts.d.ts`.
+    Js,
+    /// `contracts.rs`.
+    Rust,
+}
+
+/// Static build; `emit` adds library files for the proven rules.
 pub fn build_with_options(
     config_path: &Path,
     output_dir: &Path,
-    emit_js: bool,
+    emit: Emit,
 ) -> Result<BuildResult, String> {
     let mut cache = VerificationCache::default();
     let result = axiom_project::load(config_path)
-        .and_then(|project| build_project(&project, output_dir, &mut cache, false, emit_js));
+        .and_then(|project| build_project(&project, output_dir, &mut cache, false, emit));
     if result.is_err() {
         remove_verified_outputs(output_dir)?;
     }
@@ -101,6 +111,7 @@ const VERIFIED_OUTPUTS: &[&str] = &[
     "app.proof.json",
     "contracts.js",
     "contracts.d.ts",
+    "contracts.rs",
 ];
 
 /// After a failed static build, an older bundle must not pass for the current spec.
@@ -123,7 +134,7 @@ fn build_with_cache(
     dev_runtime: bool,
 ) -> Result<BuildResult, String> {
     let project = axiom_project::load(config_path)?;
-    build_project(&project, output_dir, cache, dev_runtime, false)
+    build_project(&project, output_dir, cache, dev_runtime, Emit::None)
 }
 
 fn build_project(
@@ -131,7 +142,7 @@ fn build_project(
     output_dir: &Path,
     cache: &mut VerificationCache,
     dev_runtime: bool,
-    emit_js: bool,
+    emit: Emit,
 ) -> Result<BuildResult, String> {
     let compiled = compile_contracts_with_cache(
         project,
@@ -155,14 +166,17 @@ fn build_project(
         .map(|(name, expression, params)| (name.as_str(), *expression, *params))
         .collect::<Vec<_>>();
     let wasm = axiom_wasm::emit_functions(&functions)?;
-    let js_module = if emit_js {
-        let items = compiled
-            .iter()
-            .map(|f| (&f.contract, &f.candidate, f.requires.as_ref()))
-            .collect::<Vec<_>>();
-        Some(crate::js::emit_modules(&items, crate::js::PROOF_NOTE)?)
-    } else {
-        None
+    let items = compiled
+        .iter()
+        .map(|f| (&f.contract, &f.candidate, f.requires.as_ref()))
+        .collect::<Vec<_>>();
+    let library: Vec<(&str, String)> = match emit {
+        Emit::None => Vec::new(),
+        Emit::Js => {
+            let (js, dts) = crate::js::emit_modules(&items, crate::js::PROOF_NOTE)?;
+            vec![("contracts.js", js), ("contracts.d.ts", dts)]
+        }
+        Emit::Rust => vec![("contracts.rs", crate::rs::emit_module(&items)?)],
     };
 
     fs::create_dir_all(output_dir)
@@ -185,20 +199,14 @@ fn build_project(
         &output_dir.join("app.proof.json"),
         proof_json(project, &compiled).as_bytes(),
     )?;
-    let (js_path, dts_path) = (
-        output_dir.join("contracts.js"),
-        output_dir.join("contracts.d.ts"),
-    );
-    if let Some((js, dts)) = js_module {
-        write_file(&js_path, js.as_bytes())?;
-        write_file(&dts_path, dts.as_bytes())?;
-    } else {
-        // A build without --emit js must not leave JS from an older spec behind.
-        for path in [&js_path, &dts_path] {
-            if path.exists() {
-                fs::remove_file(path)
-                    .map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
-            }
+    // Library files not emitted this time must not survive from an older spec.
+    for name in ["contracts.js", "contracts.d.ts", "contracts.rs"] {
+        let path = output_dir.join(name);
+        if let Some((_, text)) = library.iter().find(|(file, _)| *file == name) {
+            write_file(&path, text.as_bytes())?;
+        } else if path.exists() {
+            fs::remove_file(&path)
+                .map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
         }
     }
 
@@ -242,7 +250,8 @@ pub fn dev(config_path: &Path, port: u16, open_browser: bool, once: bool) -> Res
     // The server also starts on a failed first build and shows the error until a
     // fix rebuilds, the same as a failed rebuild; `--once` still reports it.
     let initial = retained_loader.load(config_path).and_then(|(project, _)| {
-        build_project(&project, &output_dir, &mut cache, true, false).map(|result| result.files)
+        build_project(&project, &output_dir, &mut cache, true, Emit::None)
+            .map(|result| result.files)
     });
     let (mut watched_files, error) = match initial {
         Ok(files) => (files, None),
@@ -1171,7 +1180,7 @@ fn rebuild_if_changed(
     watched_files.push(config_path.to_path_buf());
     let mut candidate_cache = cache.clone();
     let mut guard = state.lock().expect("dev state lock poisoned");
-    match build_project(&project, output_dir, &mut candidate_cache, true, false) {
+    match build_project(&project, output_dir, &mut candidate_cache, true, Emit::None) {
         Ok(mut result) => {
             let active_ids = project
                 .contracts
