@@ -1676,7 +1676,7 @@ fn rewrite_lists(
 /// The largest balance `settle` takes, plus or minus.
 const SETTLE_LIMIT: u32 = 100_000_000;
 
-/// Rules `settle_N_i_j`: how much person `i` sends person `j` so every
+/// Functions `settle_N_i_j`: how much person `i` sends person `j` so every
 /// balance (`o_k`, positive = still owes) reaches 0. People who owe pay in
 /// order, people owed are paid in order: debtor `i` covers the stretch of
 /// total debt from D(i-1) to D(i), creditor `j` the stretch from C(j-1) to
@@ -1708,19 +1708,29 @@ fn settle_rules(size: usize) -> String {
     for from in 1..=size {
         for to in 1..=size {
             let covered = min(&total(from, true), &total(to, false));
-            let overlap = if from == 1 && to == 1 {
-                covered
-            } else {
-                format!(
-                    "{covered} -% {}",
-                    max(&total(from - 1, true), &total(to - 1, false))
-                )
+            // Numbers never come first in a comparison, so it stays signed.
+            let before = match (from, to) {
+                (1, 1) => None,
+                (1, _) => Some(total(to - 1, false)),
+                (_, 1) => Some(total(from - 1, true)),
+                _ => Some(max(&total(from - 1, true), &total(to - 1, false))),
             };
+            let overlap = match before {
+                None => covered,
+                Some(before) => format!("{covered} -% {before}"),
+            };
+            let amount = format!("(if ({overlap}) > 0 {{ {overlap} }} else {{ 0 }})");
+            // The formula is the implementation; the proof covers what each
+            // transfer promises: never negative, at most what `from` owes, and
+            // only from someone who owes to someone who is owed.
             out.push_str(&format!(
-                " export contract settle_{size}_{from}_{to}({}) -> i32 {{ {} ensures result == ({}); }}",
+                " export fn settle_{size}_{from}_{to}({}) -> i32 {{ {} return {}; \
+                 ensures result >= 0; \
+                 ensures result <= (if o_{from} > 0 {{ o_{from} }} else {{ 0 }}); \
+                 ensures result == 0 || (o_{from} > 0 && o_{to} < 0); }}",
                 params.join(", "),
                 needs.join(" "),
-                max("0", &format!("({overlap})"))
+                amount
             ));
         }
     }
@@ -2162,7 +2172,7 @@ mod tests {
             page.contains("updates s_2 with settle_2_1_2(o_1, o_2)"),
             "{page}"
         );
-        assert!(page.contains("contract settle_2_2_1("), "{page}");
+        assert!(page.contains("fn settle_2_2_1("), "{page}");
         let err = translate(
             "page P\n  o[2], s[3] = 0 can be negative\n  when \"Go\" is clicked\n    s = settle(o)\n",
         )

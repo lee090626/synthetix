@@ -1,5 +1,5 @@
-//! Builds examples/group-settle and settles a two-round gathering in node:
-//! several payments (A), people left out (B), transfers (C), ratio and
+//! Builds examples/group-settle and settles a three-payment gathering in
+//! node: payments added one by one (A), people left out (B), transfers (C), ratio and
 //! rounding (D), and copying and keeping the result (E).
 
 use std::{fs, path::PathBuf, process::Command};
@@ -59,21 +59,30 @@ function type(values) {
     input.dispatch('change');
   };
   ['민수', '지영', '철수', '영희'].forEach((name, index) => set(index, name));
+  // inputs: names 0-3, unit 4, amount 5, paid 6-9, joined 10-13, weight 14-17, fixed 18-21
   set(5, 40000);            // 1차 40000, 민수가 냄
   set(6, 40000);
-  set(22, 30000);           // 2차 30000, 지영이 냄, 철수는 빠짐
-  set(24, 30000);
-  set(29, false);
-  press('정산');
-  const lines = [texts().join('|')];
+  press('결제 추가');
+  set(5, 30000);            // 2차 30000, 지영이 냄, 철수는 빠짐
+  set(6, 0);
+  set(7, 30000);
+  set(12, false);
+  press('결제 추가');
+  const lines = [`${outputs()[0]}:${texts().join('|')}`];
   press('복사');
   lines.push(copied.split('\n').join('|'));
   press('기록 저장');
   lines.push(String(root.children.filter((node) => node.tagName === 'pre').length));
-  set(31, 2);               // 2차에서 민수 몫 두 배, 10원 단위
+  set(5, 10000);            // 3차 10000, 철수가 냄, 민수 몫 두 배, 10원 단위
+  set(7, 0);
+  set(8, 10000);
+  set(12, true);
+  set(14, 2);
   set(4, 10);
-  press('정산');
-  lines.push(texts().join('|'));
+  press('결제 추가');
+  lines.push(`${outputs()[0]}:${texts().join('|')}`);
+  press('새 모임');
+  lines.push(`${outputs()[0]}:${texts().join('|')}`);
   process.stdout.write(lines.join('\n'));
 })().catch((failure) => { console.error(failure); process.exitCode = 1; });
 "#;
@@ -114,10 +123,11 @@ fn group_settle_example_settles_a_gathering() {
     );
     assert_eq!(
         String::from_utf8(run.stdout).unwrap(),
-        "철수 → 민수 10000|영희 → 민수 10000|영희 → 지영 10000\n\
+        "2:철수 → 민수 10000|영희 → 민수 10000|영희 → 지영 10000\n\
          철수 → 민수 10000|영희 → 민수 10000|영희 → 지영 10000\n\
          1\n\
-         철수 → 민수 10000|영희 → 민수 5000|영희 → 지영 12500"
+         3:철수 → 민수 2000|영희 → 민수 14000|영희 → 지영 8000\n\
+         0:"
     );
     fs::remove_dir_all(dir).ok();
 }
