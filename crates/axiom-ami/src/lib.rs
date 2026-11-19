@@ -1,13 +1,14 @@
 //! Axiom Machine IR (AMI) v0.1
 //!
-//! Minimal expression tree targeting modulo 2^32 bit-vector semantics.
+//! Minimal expression tree targeting modulo 2^32 bit-vector semantics, or
+//! 2^64 for contracts with `wide` (64-bit) words.
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Expr {
     /// Function argument by index (e.g. arg 0 = x)
     Arg(u8),
-    /// 32-bit unsigned constant
-    Const(u32),
+    /// Unsigned constant (a 64-bit word in `wide` contracts)
+    Const(u64),
     /// Addition with wrap-around (modulo 2^32)
     Add(Box<Expr>, Box<Expr>),
     /// Subtraction with wrap-around (modulo 2^32)
@@ -67,89 +68,126 @@ impl Expr {
             .expect("invalid AMI expression evaluation")
     }
 
+    /// 32-bit evaluation; see [`Expr::try_eval_bits`].
     pub fn try_eval(&self, args: &[u32]) -> Result<u32, String> {
-        match self {
+        let args: Vec<u64> = args.iter().map(|arg| u64::from(*arg)).collect();
+        self.try_eval_bits(&args, 32).map(|value| value as u32)
+    }
+
+    /// Evaluates with `bits`-wide words (32 or 64, `Contract::wide`): every
+    /// result wraps modulo 2^bits, and signed operations read words as
+    /// two's complement of that width.
+    pub fn try_eval_bits(&self, args: &[u64], bits: u32) -> Result<u64, String> {
+        let mask = if bits == 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        };
+        let signed = |value: u64| -> i64 {
+            let shift = 64 - bits;
+            ((value << shift) as i64) >> shift
+        };
+        let eval = |expr: &Expr| expr.try_eval_bits(args, bits);
+        let pair =
+            |lhs: &Expr, rhs: &Expr| -> Result<(u64, u64), String> { Ok((eval(lhs)?, eval(rhs)?)) };
+        let flag = |value: bool| u64::from(value);
+        let signed_op = |lhs: &Expr, rhs: &Expr, op: fn(i64, i64) -> Option<i64>| {
+            let (l, r) = pair(lhs, rhs)?;
+            let (l, r) = (signed(l), signed(r));
+            // i32::MIN / -1 (or i64::MIN / -1) does not fit and traps in WebAssembly.
+            let min = signed(1u64 << (bits - 1));
+            if r == 0 || (l == min && r == -1) {
+                return Err("division by zero or overflow".to_string());
+            }
+            op(l, r)
+                .map(|value| value as u64 & mask)
+                .ok_or_else(|| "division by zero or overflow".to_string())
+        };
+        let value = match self {
             Expr::Arg(idx) => args
                 .get(*idx as usize)
                 .copied()
-                .ok_or_else(|| format!("missing argument {idx}")),
-            Expr::Const(val) => Ok(*val),
-            Expr::Add(lhs, rhs) => Ok(lhs.try_eval(args)?.wrapping_add(rhs.try_eval(args)?)),
-            Expr::Sub(lhs, rhs) => Ok(lhs.try_eval(args)?.wrapping_sub(rhs.try_eval(args)?)),
-            Expr::Mul(lhs, rhs) => Ok(lhs.try_eval(args)?.wrapping_mul(rhs.try_eval(args)?)),
-            Expr::Div(lhs, rhs) => lhs
-                .try_eval(args)?
-                .checked_div(rhs.try_eval(args)?)
-                .ok_or_else(|| "division by zero".to_string()),
-            Expr::Rem(lhs, rhs) => lhs
-                .try_eval(args)?
-                .checked_rem(rhs.try_eval(args)?)
-                .ok_or_else(|| "division by zero".to_string()),
-            Expr::SDiv(lhs, rhs) => (lhs.try_eval(args)? as i32)
-                .checked_div(rhs.try_eval(args)? as i32)
-                .map(|value| value as u32)
-                .ok_or_else(|| "division by zero or overflow".to_string()),
-            Expr::SRem(lhs, rhs) => (lhs.try_eval(args)? as i32)
-                .checked_rem(rhs.try_eval(args)? as i32)
-                .map(|value| value as u32)
-                .ok_or_else(|| "division by zero or overflow".to_string()),
-            Expr::Shl(lhs, rhs) => {
-                let shift = rhs.try_eval(args)? & 31;
-                Ok(lhs.try_eval(args)?.wrapping_shl(shift))
+                .ok_or_else(|| format!("missing argument {idx}"))?,
+            Expr::Const(val) => *val,
+            Expr::Add(lhs, rhs) => {
+                let (l, r) = pair(lhs, rhs)?;
+                l.wrapping_add(r)
             }
-            Expr::BitAnd(lhs, rhs) => Ok(lhs.try_eval(args)? & rhs.try_eval(args)?),
-            Expr::BitOr(lhs, rhs) => Ok(lhs.try_eval(args)? | rhs.try_eval(args)?),
-            Expr::BitXor(lhs, rhs) => Ok(lhs.try_eval(args)? ^ rhs.try_eval(args)?),
-            Expr::Eq(lhs, rhs) => Ok(u32::from(lhs.try_eval(args)? == rhs.try_eval(args)?)),
-            Expr::Ne(lhs, rhs) => Ok(u32::from(lhs.try_eval(args)? != rhs.try_eval(args)?)),
-            Expr::Lt(lhs, rhs) => Ok(u32::from(lhs.try_eval(args)? < rhs.try_eval(args)?)),
-            Expr::Le(lhs, rhs) => Ok(u32::from(lhs.try_eval(args)? <= rhs.try_eval(args)?)),
-            Expr::Gt(lhs, rhs) => Ok(u32::from(lhs.try_eval(args)? > rhs.try_eval(args)?)),
-            Expr::Ge(lhs, rhs) => Ok(u32::from(lhs.try_eval(args)? >= rhs.try_eval(args)?)),
-            Expr::SLt(lhs, rhs) => Ok(u32::from(
-                (lhs.try_eval(args)? as i32) < (rhs.try_eval(args)? as i32),
-            )),
-            Expr::SLe(lhs, rhs) => Ok(u32::from(
-                (lhs.try_eval(args)? as i32) <= (rhs.try_eval(args)? as i32),
-            )),
-            Expr::SGt(lhs, rhs) => Ok(u32::from(
-                (lhs.try_eval(args)? as i32) > (rhs.try_eval(args)? as i32),
-            )),
-            Expr::SGe(lhs, rhs) => Ok(u32::from(
-                (lhs.try_eval(args)? as i32) >= (rhs.try_eval(args)? as i32),
-            )),
-            Expr::And(lhs, rhs) => Ok(u32::from(
-                lhs.try_eval(args)? != 0 && rhs.try_eval(args)? != 0,
-            )),
-            Expr::Or(lhs, rhs) => Ok(u32::from(
-                lhs.try_eval(args)? != 0 || rhs.try_eval(args)? != 0,
-            )),
+            Expr::Sub(lhs, rhs) => {
+                let (l, r) = pair(lhs, rhs)?;
+                l.wrapping_sub(r)
+            }
+            Expr::Mul(lhs, rhs) => {
+                let (l, r) = pair(lhs, rhs)?;
+                l.wrapping_mul(r)
+            }
+            Expr::Div(lhs, rhs) => {
+                let (l, r) = pair(lhs, rhs)?;
+                l.checked_div(r)
+                    .ok_or_else(|| "division by zero".to_string())?
+            }
+            Expr::Rem(lhs, rhs) => {
+                let (l, r) = pair(lhs, rhs)?;
+                l.checked_rem(r)
+                    .ok_or_else(|| "division by zero".to_string())?
+            }
+            Expr::SDiv(lhs, rhs) => signed_op(lhs, rhs, i64::checked_div)?,
+            Expr::SRem(lhs, rhs) => signed_op(lhs, rhs, i64::checked_rem)?,
+            Expr::Shl(lhs, rhs) => {
+                let (l, r) = pair(lhs, rhs)?;
+                l.wrapping_shl((r & u64::from(bits - 1)) as u32)
+            }
+            Expr::BitAnd(lhs, rhs) => {
+                let (l, r) = pair(lhs, rhs)?;
+                l & r
+            }
+            Expr::BitOr(lhs, rhs) => {
+                let (l, r) = pair(lhs, rhs)?;
+                l | r
+            }
+            Expr::BitXor(lhs, rhs) => {
+                let (l, r) = pair(lhs, rhs)?;
+                l ^ r
+            }
+            Expr::Eq(lhs, rhs) => pair(lhs, rhs).map(|(l, r)| flag(l == r))?,
+            Expr::Ne(lhs, rhs) => pair(lhs, rhs).map(|(l, r)| flag(l != r))?,
+            Expr::Lt(lhs, rhs) => pair(lhs, rhs).map(|(l, r)| flag(l < r))?,
+            Expr::Le(lhs, rhs) => pair(lhs, rhs).map(|(l, r)| flag(l <= r))?,
+            Expr::Gt(lhs, rhs) => pair(lhs, rhs).map(|(l, r)| flag(l > r))?,
+            Expr::Ge(lhs, rhs) => pair(lhs, rhs).map(|(l, r)| flag(l >= r))?,
+            Expr::SLt(lhs, rhs) => pair(lhs, rhs).map(|(l, r)| flag(signed(l) < signed(r)))?,
+            Expr::SLe(lhs, rhs) => pair(lhs, rhs).map(|(l, r)| flag(signed(l) <= signed(r)))?,
+            Expr::SGt(lhs, rhs) => pair(lhs, rhs).map(|(l, r)| flag(signed(l) > signed(r)))?,
+            Expr::SGe(lhs, rhs) => pair(lhs, rhs).map(|(l, r)| flag(signed(l) >= signed(r)))?,
+            Expr::And(lhs, rhs) => flag(eval(lhs)? != 0 && eval(rhs)? != 0),
+            Expr::Or(lhs, rhs) => flag(eval(lhs)? != 0 || eval(rhs)? != 0),
             Expr::Select {
                 condition,
                 then_branch,
                 else_branch,
             } => {
-                if condition.try_eval(args)? != 0 {
-                    then_branch.try_eval(args)
+                if eval(condition)? != 0 {
+                    eval(then_branch)?
                 } else {
-                    else_branch.try_eval(args)
+                    eval(else_branch)?
                 }
             }
             Expr::ArrayGet { elements, index } => {
-                let index = index.try_eval(args)? as usize;
-                let element = elements
-                    .get(index)
+                let index = eval(index)?;
+                let element = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| elements.get(index))
                     .ok_or_else(|| format!("fixed array index {index} is out of bounds"))?;
-                element.try_eval(args)
+                eval(element)?
             }
             Expr::Guard { condition, value } => {
-                if condition.try_eval(args)? == 0 {
-                    Err("verified runtime guard failed".to_string())
-                } else {
-                    value.try_eval(args)
+                if eval(condition)? == 0 {
+                    return Err("verified runtime guard failed".to_string());
                 }
+                eval(value)?
             }
-        }
+        };
+        Ok(value & mask)
     }
 }
 
@@ -169,6 +207,30 @@ mod tests {
 
         // Test modulo 2^32 wrapping behavior
         assert_eq!(expr.eval(&[u32::MAX]), u32::MAX.wrapping_mul(8));
+        assert_eq!(
+            expr.try_eval_bits(&[u64::MAX], 64).unwrap(),
+            u64::MAX.wrapping_mul(8)
+        );
+    }
+
+    #[test]
+    fn wide_words_wrap_and_divide_at_64_bits() {
+        let add = Expr::Add(Box::new(Expr::Arg(0)), Box::new(Expr::Const(1)));
+        assert_eq!(
+            add.try_eval_bits(&[u64::from(u32::MAX)], 64).unwrap(),
+            1 << 32
+        );
+        assert_eq!(add.try_eval_bits(&[u64::MAX], 64).unwrap(), 0);
+        let div = Expr::SDiv(Box::new(Expr::Arg(0)), Box::new(Expr::Arg(1)));
+        assert_eq!(
+            div.try_eval_bits(&[-7i64 as u64, 2], 64).unwrap(),
+            -3i64 as u64
+        );
+        assert!(div.try_eval_bits(&[i64::MIN as u64, u64::MAX], 64).is_err());
+        assert!(div.try_eval(&[i32::MIN as u32, u32::MAX]).is_err());
+        let lt = Expr::SLt(Box::new(Expr::Arg(0)), Box::new(Expr::Const(0)));
+        assert_eq!(lt.try_eval_bits(&[u64::MAX], 64).unwrap(), 1);
+        assert_eq!(lt.try_eval_bits(&[u64::from(u32::MAX)], 64).unwrap(), 0);
     }
 
     #[test]

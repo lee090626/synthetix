@@ -38,7 +38,7 @@ pub enum Token {
     True,
     False,
     Ident(String),
-    Number(u32),
+    Number(u64),
     String(String),
     LParen,
     RParen,
@@ -271,7 +271,7 @@ impl<'a> Lexer<'a> {
                         break;
                     }
                 }
-                let val: u32 = num_str
+                let val: u64 = num_str
                     .parse()
                     .map_err(|e| self.error(format!("Invalid integer: {e}")))?;
                 Ok(Token::Number(val))

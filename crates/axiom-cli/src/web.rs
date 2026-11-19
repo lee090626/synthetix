@@ -85,6 +85,10 @@ pub enum Emit {
     Js,
     /// `contracts.rs`.
     Rust,
+    /// `contracts.py`.
+    Python,
+    /// `contracts.go` (`package contracts`).
+    Go,
 }
 
 /// Static build; `emit` adds library files for the proven rules.
@@ -112,6 +116,8 @@ const VERIFIED_OUTPUTS: &[&str] = &[
     "contracts.js",
     "contracts.d.ts",
     "contracts.rs",
+    "contracts.py",
+    "contracts.go",
 ];
 
 /// After a failed static build, an older bundle must not pass for the current spec.
@@ -153,9 +159,9 @@ fn build_project(
     if compiled.is_empty() {
         return Err("web project must contain at least one contract".to_string());
     }
-
     let mut exports = Vec::with_capacity(compiled.len() * 2);
-    for function in &compiled {
+    // Pages cannot call rules with big numbers, so only TS and Rust get them.
+    for function in compiled.iter().filter(|function| !function.contract.wide) {
         exports.push((function.name.clone(), &function.candidate, function.params));
         if let (Some(requires), Some(name)) = (&function.requires, &function.requires_export) {
             exports.push((name.clone(), requires, function.params));
@@ -165,7 +171,12 @@ fn build_project(
         .iter()
         .map(|(name, expression, params)| (name.as_str(), *expression, *params))
         .collect::<Vec<_>>();
-    let wasm = axiom_wasm::emit_functions(&functions)?;
+    // Every rule may use big numbers (TS/Rust only); then there is no WebAssembly.
+    let wasm = if functions.is_empty() {
+        None
+    } else {
+        Some(axiom_wasm::emit_functions(&functions)?)
+    };
     let items = compiled
         .iter()
         .map(|f| (&f.contract, &f.candidate, f.requires.as_ref()))
@@ -177,11 +188,19 @@ fn build_project(
             vec![("contracts.js", js), ("contracts.d.ts", dts)]
         }
         Emit::Rust => vec![("contracts.rs", crate::rs::emit_module(&items)?)],
+        Emit::Python => vec![("contracts.py", crate::py::emit_module(&items)?)],
+        Emit::Go => vec![("contracts.go", crate::go::emit_module(&items)?)],
     };
 
     fs::create_dir_all(output_dir)
         .map_err(|error| format!("cannot create {}: {error}", output_dir.display()))?;
-    write_file(&output_dir.join("app.wasm"), &wasm)?;
+    let wasm_path = output_dir.join("app.wasm");
+    match &wasm {
+        Some(wasm) => write_file(&wasm_path, wasm)?,
+        None if wasm_path.exists() => fs::remove_file(&wasm_path)
+            .map_err(|error| format!("cannot remove {}: {error}", wasm_path.display()))?,
+        None => {}
+    }
     write_file(
         &output_dir.join("index.html"),
         page_html(project, compiled.len()).as_bytes(),
@@ -200,7 +219,13 @@ fn build_project(
         proof_json(project, &compiled).as_bytes(),
     )?;
     // Library files not emitted this time must not survive from an older spec.
-    for name in ["contracts.js", "contracts.d.ts", "contracts.rs"] {
+    for name in [
+        "contracts.js",
+        "contracts.d.ts",
+        "contracts.rs",
+        "contracts.py",
+        "contracts.go",
+    ] {
         let path = output_dir.join(name);
         if let Some((_, text)) = library.iter().find(|(file, _)| *file == name) {
             write_file(&path, text.as_bytes())?;
@@ -419,7 +444,23 @@ fn compile_contracts_inner(
         let prove = |linked: &axiom_project::LinkedContract| -> Result<Expr, String> {
             let name = &linked.contract.name;
             let candidate = axiom_synth::synthesize_with_options(&linked.contract, options)
-                .map_err(|error| format!("{}:{}: {error}", linked.source.display(), name))?;
+                .map_err(|error| {
+                    // The answer lines fix the answer, so with `promise` lines a
+                    // failed search means a promise does not always hold.
+                    let source = linked.source.display();
+                    if linked.contract.ensures.len() <= 1 {
+                        return format!("{source}:{name}: {error}");
+                    }
+                    // The search failed only because of the promise: say that, not the search limit.
+                    match promise_counterexample(&linked.contract, options) {
+                        Some(counterexample) => format!(
+                            "{source}:{name}: a `promise` line does not always hold ({error}){counterexample}\nhint: fix the `->` line or the promise, or add a `need` line that rules out this input"
+                        ),
+                        None => format!(
+                            "{source}:{name}: {error}\nhint: a `promise` line may not hold for every allowed input"
+                        ),
+                    }
+                })?;
             let composition = project
                 .verify_compositional_with_verified_summaries(
                     linked,
@@ -564,6 +605,46 @@ fn compile_contracts_inner(
         .iter()
         .filter_map(|linked| compiled_by_id.remove(&ContractId::from(linked)))
         .collect())
+}
+
+/// For a rule whose `promise` lines failed: the first promise (counted from
+/// 1) that an allowed input breaks, with that input and the answer.
+fn promise_counterexample(
+    contract: &axiom_parser::Contract,
+    options: axiom_synth::SynthesisOptions,
+) -> Option<String> {
+    let mut answer_only = contract.clone();
+    answer_only.ensures.truncate(1);
+    let candidate = axiom_synth::synthesize_with_options(&answer_only, options).ok()?;
+    for (index, promise) in contract.ensures.iter().enumerate().skip(1) {
+        let mut one = answer_only.clone();
+        one.ensures.push(promise.clone());
+        if let Ok(axiom_verify::ProofResult::Counterexample(values)) =
+            axiom_verify::verify(&one, &candidate)
+        {
+            let bits = if contract.wide { 64 } else { 32 };
+            let show = |ty: &Type, v: u64| match ty {
+                Type::I32 if contract.wide => (v as i64).to_string(),
+                Type::I32 => (v as u32 as i32).to_string(),
+                _ => v.to_string(),
+            };
+            let inputs: Vec<String> = contract
+                .params
+                .iter()
+                .zip(&values)
+                .map(|(p, v)| format!("{}={}", p.name, show(&p.ty, *v)))
+                .collect();
+            let answer = candidate
+                .try_eval_bits(&values, bits)
+                .map(|v| show(&contract.return_type, v))
+                .unwrap_or_else(|e| e);
+            return Some(format!(
+                "\npromise {index} does not hold for {} (answer {answer})",
+                inputs.join(", ")
+            ));
+        }
+    }
+    None
 }
 
 fn proof_cache_key(
@@ -3659,7 +3740,7 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
             .map(|(index, param)| {
                 let value = match &param.ty {
                     Type::Bool => SpecExpr::Bool(inputs[index] != 0),
-                    _ => SpecExpr::Number(inputs[index]),
+                    _ => SpecExpr::Number(inputs[index].into()),
                 };
                 SpecExpr::Binary(
                     BinaryOp::Eq,
@@ -3671,7 +3752,7 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
         let expected = if contract.return_type == Type::Bool {
             SpecExpr::Bool(expected != 0)
         } else {
-            SpecExpr::Number(expected)
+            SpecExpr::Number(expected.into())
         };
         point.ensures = vec![SpecExpr::Binary(
             BinaryOp::Eq,

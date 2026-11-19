@@ -190,6 +190,24 @@ fn synthesize_result_inner(
             candidates_checked: 0,
         });
     }
+    if contract.wide {
+        // The search samples 32-bit inputs; 64-bit rules take the answer
+        // their `result ==` line gives and prove it directly.
+        let Some(candidate) = candidate_from_contract(contract)? else {
+            return Err("a rule `with big numbers` needs a `result ==` answer".to_string());
+        };
+        return Ok(match verify_for_search(contract, &candidate, metrics)? {
+            ProofResult::Verified => SynthesisResult::Found {
+                candidate,
+                diagnostic: None,
+                candidates_checked: 1,
+            },
+            _ => SynthesisResult::NoCandidate {
+                candidates_checked: 1,
+                last_counterexample: None,
+            },
+        });
+    }
     search_with_options(contract, options, metrics, PreconditionsSatisfiable)
 }
 
@@ -315,8 +333,13 @@ fn search_with_options(
                             metrics.peak_sample_count.max(cegis.samples.len() + 1);
                     }
                     let sample_eval_started = metrics.as_ref().is_some().then(Instant::now);
-                    let observe =
-                        cegis.observe(contract, values, reusable_offsets, started, options.timeout);
+                    let observe = cegis.observe(
+                        contract,
+                        values.iter().map(|value| *value as u32).collect(),
+                        reusable_offsets,
+                        started,
+                        options.timeout,
+                    );
                     if let (Some(metrics), Some(started)) =
                         (metrics.as_deref_mut(), sample_eval_started)
                     {
@@ -502,8 +525,13 @@ fn search_with_options(
                             metrics.peak_sample_count.max(cegis.samples.len() + 1);
                     }
                     let sample_eval_started = metrics.as_ref().is_some().then(Instant::now);
-                    let observe =
-                        cegis.observe(contract, values, reusable_offsets, started, options.timeout);
+                    let observe = cegis.observe(
+                        contract,
+                        values.iter().map(|value| *value as u32).collect(),
+                        reusable_offsets,
+                        started,
+                        options.timeout,
+                    );
                     if let (Some(metrics), Some(started)) =
                         (metrics.as_deref_mut(), sample_eval_started)
                     {
@@ -847,7 +875,11 @@ pub fn synthesize_wasm_with_metrics(
         result => return Err(format_synthesis_result(&result)),
     };
     let (_, arity) = axiom_parser::verified_abi_layout(&contract.params)?;
-    let module = axiom_wasm::emit(&candidate, arity as u32)?;
+    let module = if contract.wide {
+        axiom_wasm::emit_wide(&candidate, arity as u32)?
+    } else {
+        axiom_wasm::emit(&candidate, arity as u32)?
+    };
     Ok((candidate, module, diagnostic, candidates_checked))
 }
 
@@ -948,7 +980,7 @@ fn array_read_candidates(
             }
             candidates.push(Expr::ArrayGet {
                 elements: elements.clone(),
-                index: Box::new(Expr::Const(index as u32)),
+                index: Box::new(Expr::Const(index as u64)),
             });
         }
     }
@@ -1656,7 +1688,7 @@ fn eval_spec(
                 _ => Ok(Value::U32(value)),
             }
         }
-        SpecExpr::Number(value) => Ok(Value::U32(*value)),
+        SpecExpr::Number(value) => Ok(Value::U32(*value as u32)),
         SpecExpr::Bool(value) => Ok(Value::Bool(*value)),
         SpecExpr::Field(value, field) => {
             match eval_spec(value, contract, args, result, locals, offsets)? {
@@ -1944,12 +1976,12 @@ fn lower_spec_expr(
             })?))
         }
         SpecExpr::Number(value) => Ok(Expr::Const(*value)),
-        SpecExpr::Bool(value) => Ok(Expr::Const(u32::from(*value))),
+        SpecExpr::Bool(value) => Ok(Expr::Const(u64::from(*value))),
         SpecExpr::Field(array, field) if field == "length" => {
             let (elements, defined) = lower_array_spec_expr(array, contract, locals)?;
             Ok(Expr::Guard {
                 condition: Box::new(defined),
-                value: Box::new(Expr::Const(elements.len() as u32)),
+                value: Box::new(Expr::Const(elements.len() as u64)),
             })
         }
         SpecExpr::Index(array, index) => {
@@ -1959,7 +1991,7 @@ fn lower_spec_expr(
                 array_defined,
                 Expr::Lt(
                     Box::new(index.clone()),
-                    Box::new(Expr::Const(elements.len() as u32)),
+                    Box::new(Expr::Const(elements.len() as u64)),
                 ),
             );
             Ok(Expr::Guard {
@@ -2065,7 +2097,7 @@ fn lower_array_spec_expr(
             let value = lower_spec_expr(value, contract, locals)?;
             let in_bounds = Expr::Lt(
                 Box::new(index.clone()),
-                Box::new(Expr::Const(elements.len() as u32)),
+                Box::new(Expr::Const(elements.len() as u64)),
             );
             let updated = elements
                 .into_iter()
@@ -2073,7 +2105,7 @@ fn lower_array_spec_expr(
                 .map(|(position, element)| Expr::Select {
                     condition: Box::new(Expr::Eq(
                         Box::new(index.clone()),
-                        Box::new(Expr::Const(position as u32)),
+                        Box::new(Expr::Const(position as u64)),
                     )),
                     then_branch: Box::new(value.clone()),
                     else_branch: Box::new(element),

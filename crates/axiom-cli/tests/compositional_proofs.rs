@@ -171,7 +171,7 @@ fn resolve_calls(
                 requires_satisfied,
                 ensures_satisfied: callee_ensures.iter().all(|value| *value),
             });
-            Ok(SpecExpr::Number(callee_result))
+            Ok(SpecExpr::Number(callee_result.into()))
         }
         SpecExpr::Binary(op, lhs, rhs) => Ok(SpecExpr::Binary(
             op.clone(),

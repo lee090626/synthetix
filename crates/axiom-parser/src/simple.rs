@@ -173,6 +173,8 @@ pub struct Decimals {
     pub states: Vec<(String, String, u32)>,
     /// Rules whose answers are texts: answer `n` means `labels[n]`.
     pub labels: Vec<(String, Vec<String>)>,
+    /// Rules with 64-bit numbers (`with big numbers`).
+    pub wide: Vec<String>,
 }
 
 impl Current {
@@ -255,6 +257,9 @@ pub fn translate_with_decimals(source: &str) -> Result<(String, Decimals), Strin
                 if header.decimals > 0 {
                     decimals.rules.push((header.rule.clone(), header.decimals));
                 }
+                if header.wide {
+                    decimals.wide.push(header.rule.clone());
+                }
                 current = Some(Current::Rule(Block {
                     name: header.rule,
                     labels: Vec::new(),
@@ -264,6 +269,7 @@ pub fn translate_with_decimals(source: &str) -> Result<(String, Decimals), Strin
                     signed: header.signed,
                     decimals: header.decimals,
                     lists: header.lists,
+                    promises: Vec::new(),
                 }));
             }
             continue;
@@ -353,6 +359,14 @@ fn rule_line(
         }
         let condition = each_item(condition, &block.lists, line_no)?;
         out[index] = format!("    requires {};", expr(&condition)?);
+    } else if let Some(condition) = trimmed.strip_prefix("promise ") {
+        if block.rules.is_empty() {
+            return Err(format!(
+                "line {line_no}: put `promise` lines after the `->` lines"
+            ));
+        }
+        let condition = answer_as_result(condition);
+        block.promises.push(expr(&condition)?);
     } else if let Some((condition, value)) = trimmed.split_once("->") {
         // `->` always has something on its left, so it reads as "if this, the answer is".
         let condition = match condition.trim() {
@@ -409,10 +423,27 @@ fn rule_line(
         });
     } else {
         return Err(format!(
-            "line {line_no}: expected `need ...`, `name = value`, `condition -> value`, `else -> value`, or `always -> value`"
+            "line {line_no}: expected `need ...`, `name = value`, `condition -> value`, `else -> value`, `always -> value`, or `promise ...`"
         ));
     }
     Ok(())
+}
+
+/// `answer` (the rule's answer) as the contract's `result`, whole words only.
+fn answer_as_result(text: &str) -> String {
+    let mut out = String::new();
+    let mut word = String::new();
+    for c in text.chars().chain(std::iter::once(' ')) {
+        if c.is_alphanumeric() || c == '_' {
+            word.push(c);
+        } else {
+            out.push_str(if word == "answer" { "result" } else { &word });
+            word.clear();
+            out.push(c);
+        }
+    }
+    out.pop();
+    out
 }
 
 /// Splits `name = value` (a single `=`, not part of `<=` or `>=`).
@@ -900,6 +931,7 @@ pub fn apply_decimals(module: &mut crate::ast::Module, decimals: &Decimals) -> R
         .collect();
     for contract in &mut module.contracts {
         contract.decimals = places_of(&contract.name);
+        contract.wide = decimals.wide.contains(&contract.name);
         contract.labels = decimals
             .labels
             .iter()
@@ -1017,7 +1049,11 @@ fn change_places(expr: SpecExpr, from: u32, to: u32) -> SpecExpr {
         std::cmp::Ordering::Less => (BinaryOp::MulWrap, 10u32.pow(to - from)),
         std::cmp::Ordering::Greater => (BinaryOp::Div, 10u32.pow(from - to)),
     };
-    SpecExpr::Binary(op, Box::new(expr), Box::new(SpecExpr::Number(factor)))
+    SpecExpr::Binary(
+        op,
+        Box::new(expr),
+        Box::new(SpecExpr::Number(factor.into())),
+    )
 }
 
 /// Wraps calls to rules with other places: inputs go to the callee's places,
@@ -1074,14 +1110,14 @@ fn rescale(expr: SpecExpr, scale: u32) -> SpecExpr {
                 boxed(*left),
                 boxed(*right),
             )),
-            Box::new(SpecExpr::Number(scale)),
+            Box::new(SpecExpr::Number(scale.into())),
         ),
         SpecExpr::Binary(BinaryOp::Div, left, right) => SpecExpr::Binary(
             BinaryOp::Div,
             Box::new(SpecExpr::Binary(
                 BinaryOp::MulWrap,
                 boxed(*left),
-                Box::new(SpecExpr::Number(scale)),
+                Box::new(SpecExpr::Number(scale.into())),
             )),
             boxed(*right),
         ),
@@ -1098,7 +1134,7 @@ fn rescale(expr: SpecExpr, scale: u32) -> SpecExpr {
 }
 
 /// Proves that `+`, `-`, `*`, and `/` stay in range: `0..=u32::MAX`, or the
-/// i32 range for `can be negative` rules. Facts come from `need` lines and,
+/// i32 range for `can be negative` rules (u64 and i64 `with big numbers`). Facts come from `need` lines and,
 /// inside a rule, from that rule's condition (and the failed conditions of the
 /// rules above it).
 ///
@@ -1107,12 +1143,13 @@ fn rescale(expr: SpecExpr, scale: u32) -> SpecExpr {
 /// rule is returned for the rules after it.
 pub fn check_ranges(
     contract: &Contract,
-    known: &[(String, i64, i64)],
-) -> Result<(i64, i64), String> {
-    let limits = if contract.return_type == Type::I32 {
-        (i64::from(i32::MIN), i64::from(i32::MAX))
-    } else {
-        (0, i64::from(u32::MAX))
+    known: &[(String, i128, i128)],
+) -> Result<(i128, i128), String> {
+    let limits = match (contract.return_type == Type::I32, contract.wide) {
+        (true, false) => (i128::from(i32::MIN), i128::from(i32::MAX)),
+        (false, false) => (0, i128::from(u32::MAX)),
+        (true, true) => (i128::from(i64::MIN), i128::from(i64::MAX)),
+        (false, true) => (0, i128::from(u64::MAX)),
     };
     let mut facts = Facts {
         limits,
@@ -1123,6 +1160,7 @@ pub fn check_ranges(
             .map(|param| (param.name.clone(), limits.0, limits.1))
             .collect(),
         exprs: Vec::new(),
+        order: Vec::new(),
     };
     for requirement in &contract.requires {
         facts.learn(requirement, true);
@@ -1133,6 +1171,10 @@ pub fn check_ranges(
             && matches!(left.as_ref(), SpecExpr::Ident(name) if name == "result")
         {
             answer = range(right, &facts, &contract.name)?;
+            // `promise` lines after it may use the answer's range.
+            facts
+                .bounds
+                .push(("result".to_string(), answer.0, answer.1));
         } else {
             range(ensures, &facts, &contract.name)?;
         }
@@ -1143,11 +1185,14 @@ pub fn check_ranges(
 /// What is known about the inputs: value bounds and answers of earlier rules.
 #[derive(Clone)]
 struct Facts {
-    limits: (i64, i64),
-    calls: Vec<(String, i64, i64)>,
-    bounds: Vec<(String, i64, i64)>,
+    limits: (i128, i128),
+    calls: Vec<(String, i128, i128)>,
+    bounds: Vec<(String, i128, i128)>,
     /// Bounds on whole expressions, like `need sum(part) >= 1`.
-    exprs: Vec<(SpecExpr, i64, i64)>,
+    exprs: Vec<(SpecExpr, i128, i128)>,
+    /// `a <= b` (or `<`) between two inputs: `a`'s top follows `b`'s and
+    /// `b`'s bottom follows `a`'s. The `bool` marks strict `<`.
+    order: Vec<(String, String, bool)>,
 }
 
 impl Facts {
@@ -1171,6 +1216,22 @@ impl Facts {
             negate(op.clone())
         };
         match (left.as_ref(), right.as_ref()) {
+            (SpecExpr::Ident(a), SpecExpr::Ident(b)) => {
+                match op {
+                    BinaryOp::Le | BinaryOp::Lt => {
+                        self.order.push((a.clone(), b.clone(), op == BinaryOp::Lt))
+                    }
+                    BinaryOp::Ge | BinaryOp::Gt => {
+                        self.order.push((b.clone(), a.clone(), op == BinaryOp::Gt))
+                    }
+                    BinaryOp::Eq => {
+                        self.order.push((a.clone(), b.clone(), false));
+                        self.order.push((b.clone(), a.clone(), false));
+                    }
+                    _ => {}
+                }
+                self.propagate();
+            }
             (SpecExpr::Ident(name), number) => {
                 if let Some(n) = constant(number) {
                     self.bound(name, op, n);
@@ -1189,7 +1250,7 @@ impl Facts {
         }
     }
 
-    fn bound_expr(&mut self, expr: &SpecExpr, op: BinaryOp, number: i64) {
+    fn bound_expr(&mut self, expr: &SpecExpr, op: BinaryOp, number: i128) {
         let index = match self.exprs.iter().position(|(known, _, _)| known == expr) {
             Some(index) => index,
             None => {
@@ -1208,7 +1269,44 @@ impl Facts {
         }
     }
 
-    fn bound(&mut self, name: &str, op: BinaryOp, number: i64) {
+    fn bound(&mut self, name: &str, op: BinaryOp, number: i128) {
+        self.bound_only(name, op, number);
+        self.propagate();
+    }
+
+    /// Carries bounds along `order` until nothing changes, so `need used <= days`
+    /// and `need days <= 31` give `used <= 31` in either order.
+    fn propagate(&mut self) {
+        // Each pass moves a bound one step along a chain; inputs are few.
+        for _ in 0..=self.order.len() {
+            let mut changed = false;
+            for (a, b, strict) in self.order.clone() {
+                let get = |name: &str| {
+                    self.bounds
+                        .iter()
+                        .find(|(p, _, _)| p == name)
+                        .map(|e| (e.1, e.2))
+                };
+                let (Some((a_low, a_high)), Some((b_low, b_high))) = (get(&a), get(&b)) else {
+                    continue;
+                };
+                let gap = i128::from(strict);
+                if b_high - gap < a_high {
+                    self.bound_only(&a, BinaryOp::Le, b_high - gap);
+                    changed = true;
+                }
+                if a_low + gap > b_low {
+                    self.bound_only(&b, BinaryOp::Ge, a_low + gap);
+                    changed = true;
+                }
+            }
+            if !changed {
+                return;
+            }
+        }
+    }
+
+    fn bound_only(&mut self, name: &str, op: BinaryOp, number: i128) {
         let Some(entry) = self.bounds.iter_mut().find(|(param, _, _)| param == name) else {
             return;
         };
@@ -1240,6 +1338,8 @@ struct Block {
     decimals: u32,
     /// List inputs (`prices[3]`) and their sizes.
     lists: Vec<(String, usize)>,
+    /// `promise` lines, translated: extra facts the answer must always meet.
+    promises: Vec<String>,
 }
 
 /// What an expression may use: signed arithmetic and list names.
@@ -1329,10 +1429,22 @@ impl Block {
                 size = Some(n);
             }
         }
+        let promises: String = self
+            .promises
+            .iter()
+            .map(|p| format!(" ensures {p};"))
+            .collect();
         let Some(size) = size else {
-            out[last.index] = format!("    ensures result == ({chain}); }}");
+            out[last.index] = format!("    ensures result == ({chain});{promises} }}");
             return Ok(());
         };
+        if !promises.is_empty() {
+            // shortcut: promises only on rules with one answer; add per-item when needed.
+            return Err(format!(
+                "line {}: `promise` works only in a rule with one answer, not a list",
+                self.name_line
+            ));
+        }
         // An answer per item: rule `name` becomes `name_1` .. `name_N`, each
         // with the same inputs and `need` lines.
         let head = self.name_line - 1;
@@ -1402,14 +1514,25 @@ struct Header {
     rule: String,
     text: String,
     signed: bool,
+    wide: bool,
     decimals: u32,
     lists: Vec<(String, usize)>,
 }
 
 /// Parses `name(a, b)`, `name(prices[3])`, `name(a, b) can be negative`, and
-/// `name(a, b) with 2 decimals`.
+/// `name(a, b) with 2 decimals`, and `name(a, b) with big numbers`.
 fn header(line: &str, line_no: usize) -> Result<Header, String> {
     let (line, decimals) = strip_decimals(line, line_no)?;
+    let (line, wide) = match line.strip_suffix("with big numbers") {
+        Some(rest) => (rest.trim_end(), true),
+        None => (line, false),
+    };
+    if wide && decimals > 0 {
+        // shortcut: decimals scale by 10^N in u32; allow both once scaling is 64-bit.
+        return Err(format!(
+            "line {line_no}: a rule cannot have both `with big numbers` and decimals yet"
+        ));
+    }
     let (line, signed) = match line.strip_suffix("can be negative") {
         Some(rest) => (rest.trim_end(), true),
         None => (line, false),
@@ -1443,6 +1566,7 @@ fn header(line: &str, line_no: usize) -> Result<Header, String> {
         rule: name.to_string(),
         text: format!("export contract {name}({}) -> {ty} {{", typed.join(", ")),
         signed,
+        wide,
         decimals,
         lists,
     })
@@ -1488,8 +1612,11 @@ fn scaled_number(text: &str, decimals: u32, line_no: usize) -> Result<String, St
     }
     let digits = format!("{whole}{fraction:0<width$}", width = decimals as usize);
     let value = digits
-        .parse::<u32>()
+        .parse::<u64>()
         .map_err(|_| format!("line {line_no}: `{text}` is too large"))?;
+    if decimals > 0 && value > u64::from(u32::MAX) {
+        return Err(format!("line {line_no}: `{text}` is too large"));
+    }
     Ok(value.to_string())
 }
 
@@ -2100,9 +2227,9 @@ fn find_call(text: &str) -> Option<usize> {
 }
 
 /// The value of a number expression such as `0 - 5` (a written `-5`).
-fn constant(expr: &SpecExpr) -> Option<i64> {
+fn constant(expr: &SpecExpr) -> Option<i128> {
     match expr {
-        SpecExpr::Number(n) => Some(i64::from(*n)),
+        SpecExpr::Number(n) => Some(i128::from(*n)),
         SpecExpr::Binary(BinaryOp::SubWrap | BinaryOp::SubChecked, left, right) => {
             Some(constant(left)? - constant(right)?)
         }
@@ -2141,17 +2268,17 @@ fn flip(op: BinaryOp) -> BinaryOp {
     }
 }
 
-fn range(expr: &SpecExpr, facts: &Facts, name: &str) -> Result<(i64, i64), String> {
+fn range(expr: &SpecExpr, facts: &Facts, name: &str) -> Result<(i128, i128), String> {
     let (min, max) = facts.limits;
-    let fits = |low: i64, high: i64, op: &str| {
+    let fits = |low: i128, high: i128, op: &str| {
         if low < min || high > max {
-            Err(out_of_range(name, op, facts.limits))
+            Err(out_of_range(name, op, expr, facts))
         } else {
             Ok((low, high))
         }
     };
     Ok(match expr {
-        SpecExpr::Number(n) => (i64::from(*n), i64::from(*n)),
+        SpecExpr::Number(n) => (i128::from(*n), i128::from(*n)),
         SpecExpr::Ident(ident) => facts
             .bounds
             .iter()
@@ -2180,7 +2307,7 @@ fn range(expr: &SpecExpr, facts: &Facts, name: &str) -> Result<(i64, i64), Strin
         SpecExpr::Binary(op, left, right) => {
             let (l_low, l_high) = range(left, facts, name)?;
             let (r_low, r_high) = range(right, facts, name)?;
-            let known = |(low, high): (i64, i64), side: &SpecExpr| {
+            let known = |(low, high): (i128, i128), side: &SpecExpr| {
                 facts
                     .exprs
                     .iter()
@@ -2193,18 +2320,19 @@ fn range(expr: &SpecExpr, facts: &Facts, name: &str) -> Result<(i64, i64), Strin
                 BinaryOp::AddWrap => fits(l_low + r_low, l_high + r_high, "+")?,
                 BinaryOp::SubWrap => fits(l_low - r_high, l_high - r_low, "-")?,
                 BinaryOp::MulWrap => {
+                    // Bounds stay within ±2^64, so products fit in i128.
                     let corners = [
-                        i128::from(l_low) * i128::from(r_low),
-                        i128::from(l_low) * i128::from(r_high),
-                        i128::from(l_high) * i128::from(r_low),
-                        i128::from(l_high) * i128::from(r_high),
+                        l_low * r_low,
+                        l_low * r_high,
+                        l_high * r_low,
+                        l_high * r_high,
                     ];
                     let low = corners.iter().min().copied().unwrap_or_default();
                     let high = corners.iter().max().copied().unwrap_or_default();
-                    if low < i128::from(min) || high > i128::from(max) {
-                        return Err(out_of_range(name, "*", facts.limits));
+                    if low < min || high > max {
+                        return Err(out_of_range(name, "*", expr, facts));
                     }
-                    (low as i64, high as i64)
+                    (low, high)
                 }
                 BinaryOp::Div | BinaryOp::Rem if min < 0 && (r_low > 0 || r_high < 0) => {
                     if *op == BinaryOp::Rem {
@@ -2243,10 +2371,48 @@ fn range(expr: &SpecExpr, facts: &Facts, name: &str) -> Result<(i64, i64), Strin
     })
 }
 
-fn out_of_range(name: &str, op: &str, (min, max): (i64, i64)) -> String {
-    format!(
-        "{name}: `{op}` may go outside {min} to {max}; add `need name <= limit` lines for its inputs"
-    )
+fn out_of_range(name: &str, op: &str, expr: &SpecExpr, facts: &Facts) -> String {
+    let (min, max) = facts.limits;
+    let mut open = Vec::new();
+    unbounded_inputs(expr, facts, &mut open);
+    let hint = if open.is_empty() {
+        "add `need name <= limit` lines for its inputs".to_string()
+    } else {
+        let lines: Vec<String> = open
+            .iter()
+            .map(|input| format!("`need {input} <= limit`"))
+            .collect();
+        format!("add {}", lines.join(", "))
+    };
+    format!("{name}: `{op}` may go outside {min} to {max}; {hint}")
+}
+
+/// Inputs in `expr` that no `need` line keeps away from the number limits.
+fn unbounded_inputs(expr: &SpecExpr, facts: &Facts, out: &mut Vec<String>) {
+    match expr {
+        SpecExpr::Ident(ident) => {
+            let open = facts.bounds.iter().any(|(param, low, high)| {
+                param == ident
+                    && (*high == facts.limits.1 || *low == facts.limits.0 && facts.limits.0 < 0)
+            });
+            if open && !out.contains(ident) {
+                out.push(ident.clone());
+            }
+        }
+        SpecExpr::Binary(_, left, right) => {
+            unbounded_inputs(left, facts, out);
+            unbounded_inputs(right, facts, out);
+        }
+        SpecExpr::Call(_, args) => args
+            .iter()
+            .for_each(|arg| unbounded_inputs(arg, facts, out)),
+        SpecExpr::If(condition, then, otherwise) => {
+            unbounded_inputs(condition, facts, out);
+            unbounded_inputs(then, facts, out);
+            unbounded_inputs(otherwise, facts, out);
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -2254,6 +2420,28 @@ mod tests {
     use super::*;
 
     const FIT: &str = "# note\nfit_price(price, min, max)\n  need min <= max\n\n  price < min -> min\n  price > max -> max\n  else -> price\n";
+
+    /// #151: `need used <= days` with `need days <= 31` bounds `used`, in either order.
+    #[test]
+    fn need_lines_between_inputs_carry_bounds() {
+        for needs in [
+            "  need used <= days\n  need days >= 28 and days <= 31\n",
+            "  need days >= 28 and days <= 31\n  need used <= days\n",
+            "  need days >= 28 and days <= 31\n  need days >= used\n",
+        ] {
+            let src = format!(
+                "prorate(price, used, days)\n{needs}  need price <= 10000000\n  always -> price * used / days\n"
+            );
+            assert!(crate::parse_module(&src).is_ok(), "{needs}");
+        }
+        // Without a bound on `days`, `used` stays open and the error names it.
+        let error = crate::parse_module(
+            "prorate(price, used, days)\n  need used <= days\n  need days >= 1\n  need price <= 10000000\n  always -> price * used / days\n",
+        )
+        .unwrap_err();
+        assert!(error.contains("`need used <= limit`"), "{error}");
+        assert!(!error.contains("`need price <= limit`"), "{error}");
+    }
 
     #[test]
     fn new_features_reject_misuse() {
@@ -2322,6 +2510,28 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("columns in order: a, b"), "{err}");
+    }
+
+    #[test]
+    fn promise_lines_become_ensures() {
+        let out =
+            translate("f(x)\n  need x <= 10\n  always -> x * 2\n  promise answer >= x\n").unwrap();
+        assert!(
+            out.contains("ensures result == (x *% 2); ensures result >= x; }"),
+            "{out}"
+        );
+        assert!(translate("f(x)\n  promise answer >= x\n  always -> x\n").is_err());
+        assert!(translate("f(a[2])\n  always -> a + 1\n  promise answer >= 1\n").is_err());
+        assert_eq!(answer_as_result("answer + answers"), "result + answers");
+    }
+
+    #[test]
+    fn big_numbers_on_the_name_line() {
+        let (_, decimals) =
+            translate_with_decimals("f(a) can be negative with big numbers\n  always -> a\n")
+                .unwrap();
+        assert_eq!(decimals.wide, ["f"]);
+        assert!(translate("f(a) with big numbers with 2 decimals\n  always -> a\n").is_err());
     }
 
     #[test]

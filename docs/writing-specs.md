@@ -24,6 +24,7 @@ fit_price(price, min, max)
 | Name a value | `name = value` | Gives a part of the computation a name; must come before the `->` lines |
 | Otherwise | `else -> value` | The answer when no line above matches; must be last |
 | Only answer | `always -> value` | A rule with one answer and no conditions |
+| Promise | `promise condition` | After the `->` lines: Synthetix proves `condition` holds for every allowed input; `answer` is the rule's answer |
 | Note | `# text` | Ignored by the computation |
 
 Rules are read top to bottom; the first one that matches gives the answer.
@@ -76,6 +77,25 @@ Write negative numbers with a minus sign: `-5`, `x < -100`, `-x`. In these
 rules `/` and `mod` round toward 0 (`-7 / 2` is -3, `-7 mod 2` is -1), and the
 divisor must stay above 0 or below 0. `round` rounds half away from 0
 (`round(-7 / 2)` is -4).
+
+### Big numbers
+
+Add `with big numbers` to the name line for amounts above 4294967295. Values
+then go from 0 to 18446744073709551615, or, with `can be negative`, from
+-9223372036854775808 to 9223372036854775807:
+
+```
+total(price, quantity) with big numbers
+  need price <= 1000000000000
+  need quantity <= 1000
+  always -> price * quantity
+```
+
+Only these rules use 64-bit numbers, so other rules are proven as fast as
+before. A rule with big numbers can use only other rules with big numbers.
+`axiom build --emit js` gives them `bigint` inputs and answers
+(`total(1000000000000n, 3n)`), `--emit rust` and `--emit go` give `u64`/`uint64` or `i64`/`int64`, and `--emit python` gives `int`. For now
+pages and `axiom app-run` cannot use them (`axiom run` can), and they cannot have decimals.
 
 ### Lists
 
@@ -142,7 +162,9 @@ cannot use it.
 
 - `+` and `*` must not go above 4294967295 (or outside -2147483648 to
   2147483647 in `can be negative` rules): add `need name <= limit` lines for
-  their inputs.
+  their inputs. The error names the inputs that have no limit. A limit also
+  carries through `need` lines that compare inputs: `need used <= days` and
+  `need days <= 31` keep `used` at 31 or below.
 - `/` must not divide by 0: add `need divisor >= 1`, unless the divisor is a
   number like `100`.
 - `-` must not go below 0. Synthetix proves this for every allowed input,
@@ -233,7 +255,7 @@ sets a text value: `grade = grade_of(score)`.
 | --- | --- |
 | `the last line must be else -> value` | Add a final `else -> value` line for when no line above matches |
 | `` `->` needs a condition, `else`, or `always` before it `` | Write `else -> value` after other `->` lines, or `always -> value` for a rule with one answer |
-| `may go outside 0 to 4294967295` | Add `need name <= limit` lines for the inputs |
+| `may go outside 0 to 4294967295` | Add the `need` lines the error names |
 | `may divide by 0` | Add `need divisor >= 1` |
 | `is not defined for inputs [...]` | A `-` can go below 0 for those inputs; add a `need` line or a condition |
 | `is a reserved word` | Rename the input |
@@ -247,6 +269,16 @@ On a failed build, earlier verified output is removed, so a broken rule never
 keeps serving an old result. Fix the file and save; `axiom dev` rebuilds and
 reloads. It starts even when the first build fails and shows the error in the
 browser until then.
+
+A `promise` that some allowed input breaks is reported with that input:
+
+```text
+promise 2 does not hold for total=294896131 (answer 268087391)
+```
+
+`axiom check --report check.json` also writes the outcome as JSON for tools and
+AI agents: `{"ok": true}`, or `{"ok": false, "error": {...}}` with `message`
+and, when known, `file`, `rule`, `line`, `promise`, `inputs`, `answer`, `hint`.
 
 ## Checking what a rule does
 
@@ -278,7 +310,7 @@ axiom build      # static output in dist/
 
 Use `axiom run file.ax -- <inputs>` to try a single rule.
 
-## Using rules from JavaScript, TypeScript or Rust
+## Using rules from JavaScript, TypeScript, Rust, Python or Go
 
 `axiom build --emit js` also writes `dist/contracts.js` and `dist/contracts.d.ts`,
 one function per proven rule. A rule with a list answer takes and returns arrays:
@@ -298,3 +330,16 @@ then `settle(owe)` takes the 4 balances and returns the 16 transfers, item
 crate as `mod contracts;`. Each rule returns `Result<_, AxiomError>`, lists are
 arrays (`share(10000, [1, 1, 2, 0], [0; 4], 100)`), and `settle(&owe)` returns
 a `Vec<i32>`. It needs no other crate.
+
+`axiom build --emit python` writes `dist/contracts.py`: `import contracts`.
+Inputs are `int` (`bool` for yes/no inputs), lists are Python lists
+(`share(10000, [1, 1, 2, 0], [0] * 4, 100)`), and `settle(owe)` returns a list.
+A value outside the `need` lines raises `contracts.AxiomError`; a value of the
+wrong type or size raises `TypeError`. It needs only the standard library.
+
+`axiom build --emit go` writes `dist/contracts.go` (`package contracts`): put
+it in a `contracts` folder of your module. Names are exported (`fee_first`
+becomes `FeeFirst`), each rule returns `(answer, error)` with a
+`*contracts.AxiomError` outside the `need` lines, lists are arrays
+(`Share(10000, [4]uint32{1, 1, 2, 0}, [4]uint32{}, 100)`), and `Settle(owe)`
+takes and returns `[]int32`. It needs only the standard library.

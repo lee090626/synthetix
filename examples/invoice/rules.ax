@@ -1,0 +1,64 @@
+# 한 달 요금 중 쓴 날만큼 (원 미만 버림)
+prorate(price, used, days) with big numbers
+  need days >= 28 and days <= 31
+  need used <= days
+  need price <= 1000000000000
+  always -> price * used / days
+
+# 달 중간에 플랜을 바꿀 때 남은 날만큼 더 낼 돈 (내리면 음수: 돌려줄 돈)
+change(old, new, used, days) can be negative with big numbers
+  need days >= 28 and days <= 31
+  need used >= 0 and used <= days
+  need old >= 0 and old <= 1000000000000
+  need new >= 0 and new <= 1000000000000
+  always -> (new - old) * (days - used) / days
+
+# 부가세: 공급가액의 10%, 원 미만 버림
+vat(supply) with big numbers
+  need supply <= 1000000000000
+  always -> supply / 10
+
+# 부가세 포함 금액에서 공급가액 (원 미만 버림), 세액은 나머지
+supply_of(total) with big numbers
+  need total <= 1000000000000
+  always -> total * 10 / 11
+  # 공급가액과 그 부가세를 더해도 낸 돈을 넘지 않고, 모자라도 1원 이하
+  promise answer + answer / 10 <= total
+  promise answer + answer / 10 + 1 >= total
+
+tax_of(total) with big numbers
+  need total <= 1000000000000
+  always -> total - supply_of(total)
+
+# 원천징수: 소득세 3%, 10원 미만 버림
+income_tax(pay) with big numbers
+  need pay <= 1000000000000
+  always -> pay * 3 / 100 / 10 * 10
+
+# 지방소득세: 소득세의 10%, 10원 미만 버림
+local_tax(pay) with big numbers
+  need pay <= 1000000000000
+  always -> income_tax(pay) / 10 / 10 * 10
+
+# PG 수수료: 결제 금액 × 수수료율(1만분의 1 단위, 330 = 3.3%), 원 미만 버림
+fee(amount, rate) with big numbers
+  need amount <= 1000000000000
+  need rate <= 1000
+  always -> amount * rate / 10000
+
+# 가맹점이 받는 돈: 수수료와 합치면 정확히 결제 금액
+payout(amount, rate) with big numbers
+  need amount <= 1000000000000
+  need rate <= 1000
+  always -> amount - fee(amount, rate)
+  promise answer + fee(amount, rate) is amount
+
+# 두 상품을 한 번에 결제했을 때 수수료를 금액 비율로 나눔: 첫 상품 몫
+# 둘째 상품 몫은 fee(a + b, rate) - fee_first(a, b, rate): 나눠도 합계가 1원도 안 틀림
+fee_first(a, b, rate) with big numbers
+  need a <= 100000000
+  need b <= 100000000
+  need a + b >= 1
+  need rate <= 1000
+  always -> fee(a + b, rate) * a / (a + b)
+  promise answer <= fee(a + b, rate)

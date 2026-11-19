@@ -1,7 +1,7 @@
 //! Rust source emitter for verified AMI candidates.
 //!
 //! The proof covers the AMI expression; this module prints it with the same
-//! u32 wrapping semantics as `axiom_verify::eval_ami`. Equivalence is checked
+//! wrapping semantics as `Expr::try_eval_bits` (u32, or u64 for `wide` rules). Equivalence is checked
 //! by `tests/rust_emit.rs`, not proven.
 
 use axiom_ami::Expr;
@@ -9,89 +9,103 @@ use axiom_parser::{Contract, Type};
 
 use crate::js::{list_parts, param_groups, settle_sizes};
 
-fn bin(method: &str, lhs: &Expr, rhs: &Expr) -> String {
-    format!("({}).{method}({})", expr(lhs), expr(rhs))
-}
-
-fn cmp(op: &str, lhs: &Expr, rhs: &Expr, signed: bool) -> String {
-    let (l, r) = (expr(lhs), expr(rhs));
-    if signed {
-        format!("u32::from((({l}) as i32) {op} (({r}) as i32))")
+/// Word types: `(unsigned, signed, shift mask)` for 32- or 64-bit contracts.
+fn words(wide: bool) -> (&'static str, &'static str, u32) {
+    if wide {
+        ("u64", "i64", 63)
     } else {
-        format!("u32::from(({l}) {op} ({r}))")
+        ("u32", "i32", 31)
     }
 }
 
-fn checked(method: &str, lhs: &Expr, rhs: &Expr, signed: bool) -> String {
-    let (l, r) = (expr(lhs), expr(rhs));
+fn bin(method: &str, lhs: &Expr, rhs: &Expr, wide: bool) -> String {
+    format!("({}).{method}({})", expr(lhs, wide), expr(rhs, wide))
+}
+
+fn cmp(op: &str, lhs: &Expr, rhs: &Expr, signed: bool, wide: bool) -> String {
+    let (l, r) = (expr(lhs, wide), expr(rhs, wide));
+    let (u, i, _) = words(wide);
+    if signed {
+        format!("{u}::from((({l}) as {i}) {op} (({r}) as {i}))")
+    } else {
+        format!("{u}::from(({l}) {op} ({r}))")
+    }
+}
+
+fn checked(method: &str, lhs: &Expr, rhs: &Expr, signed: bool, wide: bool) -> String {
+    let (l, r) = (expr(lhs, wide), expr(rhs, wide));
+    let (u, i, _) = words(wide);
     if signed {
         format!(
-            "((({l}) as i32).{method}(({r}) as i32).ok_or(AxiomError(\"division by zero or overflow\"))? as u32)"
+            "((({l}) as {i}).{method}(({r}) as {i}).ok_or(AxiomError(\"division by zero or overflow\"))? as {u})"
         )
     } else {
         format!("({l}).{method}({r}).ok_or(AxiomError(\"division by zero\"))?")
     }
 }
 
-/// Prints one AMI expression; every sub-expression is a `u32`.
-fn expr(e: &Expr) -> String {
+/// Prints one AMI expression; every sub-expression is a `u32` (`u64` when wide).
+fn expr(e: &Expr, wide: bool) -> String {
+    let (u, _, shift) = words(wide);
+    let x = |e: &Expr| expr(e, wide);
     match e {
         Expr::Arg(i) => format!("a{i}"),
-        Expr::Const(v) => format!("{v}u32"),
-        Expr::Add(l, r) => bin("wrapping_add", l, r),
-        Expr::Sub(l, r) => bin("wrapping_sub", l, r),
-        Expr::Mul(l, r) => bin("wrapping_mul", l, r),
-        Expr::Div(l, r) => checked("checked_div", l, r, false),
-        Expr::Rem(l, r) => checked("checked_rem", l, r, false),
-        Expr::SDiv(l, r) => checked("checked_div", l, r, true),
-        Expr::SRem(l, r) => checked("checked_rem", l, r, true),
-        Expr::Shl(l, r) => format!("({}).wrapping_shl(({}) & 31)", expr(l), expr(r)),
-        Expr::BitAnd(l, r) => format!("(({}) & ({}))", expr(l), expr(r)),
-        Expr::BitOr(l, r) => format!("(({}) | ({}))", expr(l), expr(r)),
-        Expr::BitXor(l, r) => format!("(({}) ^ ({}))", expr(l), expr(r)),
-        Expr::Eq(l, r) => cmp("==", l, r, false),
-        Expr::Ne(l, r) => cmp("!=", l, r, false),
-        Expr::Lt(l, r) => cmp("<", l, r, false),
-        Expr::Le(l, r) => cmp("<=", l, r, false),
-        Expr::Gt(l, r) => cmp(">", l, r, false),
-        Expr::Ge(l, r) => cmp(">=", l, r, false),
-        Expr::SLt(l, r) => cmp("<", l, r, true),
-        Expr::SLe(l, r) => cmp("<=", l, r, true),
-        Expr::SGt(l, r) => cmp(">", l, r, true),
-        Expr::SGe(l, r) => cmp(">=", l, r, true),
-        Expr::And(l, r) => format!("u32::from(({}) != 0 && ({}) != 0)", expr(l), expr(r)),
-        Expr::Or(l, r) => format!("u32::from(({}) != 0 || ({}) != 0)", expr(l), expr(r)),
+        Expr::Const(v) => format!("{v}{u}"),
+        Expr::Add(l, r) => bin("wrapping_add", l, r, wide),
+        Expr::Sub(l, r) => bin("wrapping_sub", l, r, wide),
+        Expr::Mul(l, r) => bin("wrapping_mul", l, r, wide),
+        Expr::Div(l, r) => checked("checked_div", l, r, false, wide),
+        Expr::Rem(l, r) => checked("checked_rem", l, r, false, wide),
+        Expr::SDiv(l, r) => checked("checked_div", l, r, true, wide),
+        Expr::SRem(l, r) => checked("checked_rem", l, r, true, wide),
+        Expr::Shl(l, r) => format!("({}).wrapping_shl((({}) & {shift}) as u32)", x(l), x(r)),
+        Expr::BitAnd(l, r) => format!("(({}) & ({}))", x(l), x(r)),
+        Expr::BitOr(l, r) => format!("(({}) | ({}))", x(l), x(r)),
+        Expr::BitXor(l, r) => format!("(({}) ^ ({}))", x(l), x(r)),
+        Expr::Eq(l, r) => cmp("==", l, r, false, wide),
+        Expr::Ne(l, r) => cmp("!=", l, r, false, wide),
+        Expr::Lt(l, r) => cmp("<", l, r, false, wide),
+        Expr::Le(l, r) => cmp("<=", l, r, false, wide),
+        Expr::Gt(l, r) => cmp(">", l, r, false, wide),
+        Expr::Ge(l, r) => cmp(">=", l, r, false, wide),
+        Expr::SLt(l, r) => cmp("<", l, r, true, wide),
+        Expr::SLe(l, r) => cmp("<=", l, r, true, wide),
+        Expr::SGt(l, r) => cmp(">", l, r, true, wide),
+        Expr::SGe(l, r) => cmp(">=", l, r, true, wide),
+        Expr::And(l, r) => format!("{u}::from(({}) != 0 && ({}) != 0)", x(l), x(r)),
+        Expr::Or(l, r) => format!("{u}::from(({}) != 0 || ({}) != 0)", x(l), x(r)),
         Expr::Select {
             condition,
             then_branch,
             else_branch,
         } => format!(
             "(if ({}) != 0 {{ {} }} else {{ {} }})",
-            expr(condition),
-            expr(then_branch),
-            expr(else_branch)
+            x(condition),
+            x(then_branch),
+            x(else_branch)
         ),
         Expr::ArrayGet { elements, index } => {
             let arms: String = elements
                 .iter()
                 .enumerate()
-                .map(|(i, e)| format!("{i} => {}, ", expr(e)))
+                .map(|(i, e)| format!("{i} => {}, ", x(e)))
                 .collect();
             format!(
                 "(match {} {{ {arms}_ => return Err(AxiomError(\"fixed array index is out of bounds\")) }})",
-                expr(index)
+                x(index)
             )
         }
         Expr::Guard { condition, value } => format!(
             "(if ({}) != 0 {{ {} }} else {{ return Err(AxiomError(\"verified runtime guard failed\")) }})",
-            expr(condition),
-            expr(value)
+            x(condition),
+            x(value)
         ),
     }
 }
 
-fn rs_type(ty: &Type) -> Result<&'static str, String> {
+fn rs_type(ty: &Type, wide: bool) -> Result<&'static str, String> {
     match ty {
+        Type::U32 | Type::I32 if wide => Ok(if *ty == Type::U32 { "u64" } else { "i64" }),
         Type::U32 => Ok("u32"),
         Type::I32 => Ok("i32"),
         Type::Bool => Ok("bool"),
@@ -154,27 +168,29 @@ fn emit_function(
     candidate: &Expr,
     guard: Option<&Expr>,
 ) -> Result<String, String> {
-    let ret = rs_type(&contract.return_type)?;
+    let wide = contract.wide;
+    let (u, i, _) = words(wide);
+    let ret = rs_type(&contract.return_type, wide)?;
     let mut params = Vec::new();
     let mut lowered = String::new();
-    for (i, p) in contract.params.iter().enumerate() {
-        params.push(format!("p{i}: {}", rs_type(&p.ty)?));
-        lowered += &format!("    let a{i} = p{i} as u32;\n");
+    for (index, p) in contract.params.iter().enumerate() {
+        params.push(format!("p{index}: {}", rs_type(&p.ty, wide)?));
+        lowered += &format!("    let a{index} = p{index} as {u};\n");
     }
     let docs: Vec<&str> = contract.params.iter().map(|p| p.name.as_str()).collect();
     let guard = guard
         .map(|g| {
             format!(
                 "    if ({}) == 0 {{\n        return Err(AxiomError(\"{}: input violates a requires clause\"));\n    }}\n",
-                expr(g),
+                expr(g, wide),
                 contract.name
             )
         })
         .unwrap_or_default();
-    let result = expr(candidate);
+    let result = expr(candidate, wide);
     let result = match contract.return_type {
         Type::Bool => format!("({result}) != 0"),
-        Type::I32 => format!("({result}) as i32"),
+        Type::I32 => format!("({result}) as {i}"),
         _ => result,
     };
     Ok(format!(
@@ -190,7 +206,7 @@ fn list_wrapper(base: &str, parts: &[&Contract]) -> Result<String, String> {
     let mut params = Vec::new();
     let mut args = Vec::new();
     for (i, (_, size, ty)) in param_groups(first).iter().enumerate() {
-        let ty = rs_type(ty)?;
+        let ty = rs_type(ty, first.wide)?;
         if *size > 0 {
             params.push(format!("p{i}: [{ty}; {size}]"));
             args.extend((0..*size).map(|k| format!("p{i}[{k}]")));
@@ -207,7 +223,7 @@ fn list_wrapper(base: &str, parts: &[&Contract]) -> Result<String, String> {
         "pub fn {}({}) -> Result<[{}; {}], AxiomError> {{\n    Ok([{}])\n}}\n",
         ident(base)?,
         params.join(", "),
-        rs_type(&first.return_type)?,
+        rs_type(&first.return_type, first.wide)?,
         parts.len(),
         calls.join(", ")
     ))
