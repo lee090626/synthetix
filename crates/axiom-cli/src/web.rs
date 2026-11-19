@@ -433,15 +433,19 @@ fn compile_contracts_inner(
                 .map_err(|error| {
                     // The answer lines fix the answer, so with `promise` lines a
                     // failed search means a promise does not always hold.
-                    let hint = if linked.contract.ensures.len() > 1 {
-                        promise_counterexample(&linked.contract, options).unwrap_or_else(|| {
-                            "\nhint: a `promise` line may not hold for every allowed input"
-                                .to_string()
-                        })
-                    } else {
-                        String::new()
-                    };
-                    format!("{}:{}: {error}{hint}", linked.source.display(), name)
+                    let source = linked.source.display();
+                    if linked.contract.ensures.len() <= 1 {
+                        return format!("{source}:{name}: {error}");
+                    }
+                    // The search failed only because of the promise: say that, not the search limit.
+                    match promise_counterexample(&linked.contract, options) {
+                        Some(counterexample) => format!(
+                            "{source}:{name}: a `promise` line does not always hold{counterexample}\nhint: fix the `->` line or the promise, or add a `need` line that rules out this input"
+                        ),
+                        None => format!(
+                            "{source}:{name}: {error}\nhint: a `promise` line may not hold for every allowed input"
+                        ),
+                    }
                 })?;
             let composition = project
                 .verify_compositional_with_verified_summaries(
