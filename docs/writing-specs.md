@@ -94,7 +94,7 @@ total(price, quantity) with big numbers
 Only these rules use 64-bit numbers, so other rules are proven as fast as
 before. A rule with big numbers can use only other rules with big numbers.
 `axiom build --emit js` gives them `bigint` inputs and answers
-(`total(1000000000000n, 3n)`), and `--emit rust` gives `u64` or `i64`. For now
+(`total(1000000000000n, 3n)`), `--emit rust` gives `u64` or `i64`, and `--emit python` gives `int`. For now
 pages and `axiom app-run` cannot use them (`axiom run` can), and they cannot have decimals.
 
 ### Lists
@@ -310,7 +310,7 @@ axiom build      # static output in dist/
 
 Use `axiom run file.ax -- <inputs>` to try a single rule.
 
-## Using rules from JavaScript, TypeScript or Rust
+## Using rules from JavaScript, TypeScript, Rust or Python
 
 `axiom build --emit js` also writes `dist/contracts.js` and `dist/contracts.d.ts`,
 one function per proven rule. A rule with a list answer takes and returns arrays:
@@ -330,3 +330,9 @@ then `settle(owe)` takes the 4 balances and returns the 16 transfers, item
 crate as `mod contracts;`. Each rule returns `Result<_, AxiomError>`, lists are
 arrays (`share(10000, [1, 1, 2, 0], [0; 4], 100)`), and `settle(&owe)` returns
 a `Vec<i32>`. It needs no other crate.
+
+`axiom build --emit python` writes `dist/contracts.py`: `import contracts`.
+Inputs are `int` (`bool` for yes/no inputs), lists are Python lists
+(`share(10000, [1, 1, 2, 0], [0] * 4, 100)`), and `settle(owe)` returns a list.
+A value outside the `need` lines raises `contracts.AxiomError`; a value of the
+wrong type or size raises `TypeError`. It needs only the standard library.
