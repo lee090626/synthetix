@@ -1160,6 +1160,7 @@ pub fn check_ranges(
             .map(|param| (param.name.clone(), limits.0, limits.1))
             .collect(),
         exprs: Vec::new(),
+        order: Vec::new(),
     };
     for requirement in &contract.requires {
         facts.learn(requirement, true);
@@ -1189,6 +1190,9 @@ struct Facts {
     bounds: Vec<(String, i128, i128)>,
     /// Bounds on whole expressions, like `need sum(part) >= 1`.
     exprs: Vec<(SpecExpr, i128, i128)>,
+    /// `a <= b` (or `<`) between two inputs: `a`'s top follows `b`'s and
+    /// `b`'s bottom follows `a`'s. The `bool` marks strict `<`.
+    order: Vec<(String, String, bool)>,
 }
 
 impl Facts {
@@ -1212,6 +1216,22 @@ impl Facts {
             negate(op.clone())
         };
         match (left.as_ref(), right.as_ref()) {
+            (SpecExpr::Ident(a), SpecExpr::Ident(b)) => {
+                match op {
+                    BinaryOp::Le | BinaryOp::Lt => {
+                        self.order.push((a.clone(), b.clone(), op == BinaryOp::Lt))
+                    }
+                    BinaryOp::Ge | BinaryOp::Gt => {
+                        self.order.push((b.clone(), a.clone(), op == BinaryOp::Gt))
+                    }
+                    BinaryOp::Eq => {
+                        self.order.push((a.clone(), b.clone(), false));
+                        self.order.push((b.clone(), a.clone(), false));
+                    }
+                    _ => {}
+                }
+                self.propagate();
+            }
             (SpecExpr::Ident(name), number) => {
                 if let Some(n) = constant(number) {
                     self.bound(name, op, n);
@@ -1250,6 +1270,43 @@ impl Facts {
     }
 
     fn bound(&mut self, name: &str, op: BinaryOp, number: i128) {
+        self.bound_only(name, op, number);
+        self.propagate();
+    }
+
+    /// Carries bounds along `order` until nothing changes, so `need used <= days`
+    /// and `need days <= 31` give `used <= 31` in either order.
+    fn propagate(&mut self) {
+        // Each pass moves a bound one step along a chain; inputs are few.
+        for _ in 0..=self.order.len() {
+            let mut changed = false;
+            for (a, b, strict) in self.order.clone() {
+                let get = |name: &str| {
+                    self.bounds
+                        .iter()
+                        .find(|(p, _, _)| p == name)
+                        .map(|e| (e.1, e.2))
+                };
+                let (Some((a_low, a_high)), Some((b_low, b_high))) = (get(&a), get(&b)) else {
+                    continue;
+                };
+                let gap = i128::from(strict);
+                if b_high - gap < a_high {
+                    self.bound_only(&a, BinaryOp::Le, b_high - gap);
+                    changed = true;
+                }
+                if a_low + gap > b_low {
+                    self.bound_only(&b, BinaryOp::Ge, a_low + gap);
+                    changed = true;
+                }
+            }
+            if !changed {
+                return;
+            }
+        }
+    }
+
+    fn bound_only(&mut self, name: &str, op: BinaryOp, number: i128) {
         let Some(entry) = self.bounds.iter_mut().find(|(param, _, _)| param == name) else {
             return;
         };
@@ -2215,7 +2272,7 @@ fn range(expr: &SpecExpr, facts: &Facts, name: &str) -> Result<(i128, i128), Str
     let (min, max) = facts.limits;
     let fits = |low: i128, high: i128, op: &str| {
         if low < min || high > max {
-            Err(out_of_range(name, op, facts.limits))
+            Err(out_of_range(name, op, expr, facts))
         } else {
             Ok((low, high))
         }
@@ -2273,7 +2330,7 @@ fn range(expr: &SpecExpr, facts: &Facts, name: &str) -> Result<(i128, i128), Str
                     let low = corners.iter().min().copied().unwrap_or_default();
                     let high = corners.iter().max().copied().unwrap_or_default();
                     if low < min || high > max {
-                        return Err(out_of_range(name, "*", facts.limits));
+                        return Err(out_of_range(name, "*", expr, facts));
                     }
                     (low, high)
                 }
@@ -2314,10 +2371,48 @@ fn range(expr: &SpecExpr, facts: &Facts, name: &str) -> Result<(i128, i128), Str
     })
 }
 
-fn out_of_range(name: &str, op: &str, (min, max): (i128, i128)) -> String {
-    format!(
-        "{name}: `{op}` may go outside {min} to {max}; add `need name <= limit` lines for its inputs"
-    )
+fn out_of_range(name: &str, op: &str, expr: &SpecExpr, facts: &Facts) -> String {
+    let (min, max) = facts.limits;
+    let mut open = Vec::new();
+    unbounded_inputs(expr, facts, &mut open);
+    let hint = if open.is_empty() {
+        "add `need name <= limit` lines for its inputs".to_string()
+    } else {
+        let lines: Vec<String> = open
+            .iter()
+            .map(|input| format!("`need {input} <= limit`"))
+            .collect();
+        format!("add {}", lines.join(", "))
+    };
+    format!("{name}: `{op}` may go outside {min} to {max}; {hint}")
+}
+
+/// Inputs in `expr` that no `need` line keeps away from the number limits.
+fn unbounded_inputs(expr: &SpecExpr, facts: &Facts, out: &mut Vec<String>) {
+    match expr {
+        SpecExpr::Ident(ident) => {
+            let open = facts.bounds.iter().any(|(param, low, high)| {
+                param == ident
+                    && (*high == facts.limits.1 || *low == facts.limits.0 && facts.limits.0 < 0)
+            });
+            if open && !out.contains(ident) {
+                out.push(ident.clone());
+            }
+        }
+        SpecExpr::Binary(_, left, right) => {
+            unbounded_inputs(left, facts, out);
+            unbounded_inputs(right, facts, out);
+        }
+        SpecExpr::Call(_, args) => args
+            .iter()
+            .for_each(|arg| unbounded_inputs(arg, facts, out)),
+        SpecExpr::If(condition, then, otherwise) => {
+            unbounded_inputs(condition, facts, out);
+            unbounded_inputs(then, facts, out);
+            unbounded_inputs(otherwise, facts, out);
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -2325,6 +2420,28 @@ mod tests {
     use super::*;
 
     const FIT: &str = "# note\nfit_price(price, min, max)\n  need min <= max\n\n  price < min -> min\n  price > max -> max\n  else -> price\n";
+
+    /// #151: `need used <= days` with `need days <= 31` bounds `used`, in either order.
+    #[test]
+    fn need_lines_between_inputs_carry_bounds() {
+        for needs in [
+            "  need used <= days\n  need days >= 28 and days <= 31\n",
+            "  need days >= 28 and days <= 31\n  need used <= days\n",
+            "  need days >= 28 and days <= 31\n  need days >= used\n",
+        ] {
+            let src = format!(
+                "prorate(price, used, days)\n{needs}  need price <= 10000000\n  always -> price * used / days\n"
+            );
+            assert!(crate::parse_module(&src).is_ok(), "{needs}");
+        }
+        // Without a bound on `days`, `used` stays open and the error names it.
+        let error = crate::parse_module(
+            "prorate(price, used, days)\n  need used <= days\n  need days >= 1\n  need price <= 10000000\n  always -> price * used / days\n",
+        )
+        .unwrap_err();
+        assert!(error.contains("`need used <= limit`"), "{error}");
+        assert!(!error.contains("`need price <= limit`"), "{error}");
+    }
 
     #[test]
     fn new_features_reject_misuse() {
