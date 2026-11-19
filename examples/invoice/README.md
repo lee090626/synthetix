@@ -18,3 +18,80 @@
 64비트 규칙은 아직 페이지와 `axiom app-run`에서 쓸 수 없습니다(`axiom run`은 됩니다).
 
 다른 언어에서: `axiom build --emit js`(`bigint`), `--emit rust`(`u64`/`i64`), `--emit python`(`int`), `--emit go`(`uint64`/`int64`).
+
+## 앱에서 쓰기
+
+`app/`에 같은 청구서(월 49,000원 플랜, 31일 중 12일 사용, PG 수수료 3.3%)를
+TypeScript와 Rust로 계산하는 예제가 있습니다. 이 폴더에서:
+
+```sh
+axiom build --emit js && node app/main.ts        # Node 23.6 이상
+axiom build --emit rust && rustc --edition 2024 app/main.rs -o bill && ./bill
+```
+
+둘 다 같은 결과를 냅니다:
+
+```text
+청구액 18967
+공급가액 17242 세액 1725
+PG 수수료 625 정산액 18342
+거부: prorate: input violates a requires clause
+```
+
+## 손으로 짜면 생기는 버그를 증명이 잡는 사례
+
+아래 규칙들은 흔한 손구현을 그대로 옮기고, 지켜야 할 성질을 `promise`로 적은
+것입니다. `axiom check`가 각 버그를 깨는 입력을 찾아 보여 줍니다.
+
+**일할 계산: 나누기를 먼저 하면 원 미만이 매번 버려짐**
+
+```text
+prorate(price, used, days)
+  need days >= 28 and days <= 31
+  need used <= days
+  need price <= 10000000
+  always -> price / days * used
+  promise answer * days <= price * used
+  promise answer * days + days > price * used
+```
+
+```text
+promise 2 does not hold for price=9388880, used=31, days=31 (answer 9388877)
+```
+
+한 달을 다 썼는데 3원이 사라집니다. 이 예제의 `prorate`는 `price * used / days`
+(곱하기 먼저)로 증명을 통과합니다.
+
+**수수료 분배: 상품마다 따로 떼면 합계가 1원 틀림**
+
+```text
+second_fee(a, b, rate)
+  ...
+  always -> fee(b, rate)
+  promise fee(a, rate) + answer is fee(a + b, rate)
+```
+
+```text
+promise 1 does not hold for a=7084, b=8897, rate=943 (answer 838)
+```
+
+따로 떼면 668 + 838 = 1,506원, 한 번에 결제한 수수료는 1,507원입니다. 이 예제의
+`fee_first`는 둘째 몫을 `fee(a + b, rate) - fee_first(a, b, rate)`로 정해 합계가
+항상 맞습니다.
+
+**부가세 분리: 합계에서 10%를 빼면 공급가액이 틀림**
+
+```text
+supply_of(total)
+  need total <= 400000000
+  always -> total - total / 10
+  promise answer + answer / 10 <= total
+  promise answer + answer / 10 + 1 >= total
+```
+
+```text
+promise 2 does not hold for total=369098700 (answer 332188830)
+```
+
+공급가액은 합계의 10/11입니다. 이 예제의 `supply_of`는 `total * 10 / 11`로 두
+약속을 모두 지킵니다.
