@@ -94,7 +94,7 @@ total(price, quantity) with big numbers
 Only these rules use 64-bit numbers, so other rules are proven as fast as
 before. A rule with big numbers can use only other rules with big numbers.
 `axiom build --emit js` gives them `bigint` inputs and answers
-(`total(1000000000000n, 3n)`), `--emit rust` gives `u64` or `i64`, and `--emit python` gives `int`. For now
+(`total(1000000000000n, 3n)`), `--emit rust` and `--emit go` give `u64`/`uint64` or `i64`/`int64`, and `--emit python` gives `int`. For now
 pages and `axiom app-run` cannot use them (`axiom run` can), and they cannot have decimals.
 
 ### Lists
@@ -310,7 +310,7 @@ axiom build      # static output in dist/
 
 Use `axiom run file.ax -- <inputs>` to try a single rule.
 
-## Using rules from JavaScript, TypeScript, Rust or Python
+## Using rules from JavaScript, TypeScript, Rust, Python or Go
 
 `axiom build --emit js` also writes `dist/contracts.js` and `dist/contracts.d.ts`,
 one function per proven rule. A rule with a list answer takes and returns arrays:
@@ -336,3 +336,10 @@ Inputs are `int` (`bool` for yes/no inputs), lists are Python lists
 (`share(10000, [1, 1, 2, 0], [0] * 4, 100)`), and `settle(owe)` returns a list.
 A value outside the `need` lines raises `contracts.AxiomError`; a value of the
 wrong type or size raises `TypeError`. It needs only the standard library.
+
+`axiom build --emit go` writes `dist/contracts.go` (`package contracts`): put
+it in a `contracts` folder of your module. Names are exported (`fee_first`
+becomes `FeeFirst`), each rule returns `(answer, error)` with a
+`*contracts.AxiomError` outside the `need` lines, lists are arrays
+(`Share(10000, [4]uint32{1, 1, 2, 0}, [4]uint32{}, 100)`), and `Settle(owe)`
+takes and returns `[]int32`. It needs only the standard library.
