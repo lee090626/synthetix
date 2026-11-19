@@ -1231,8 +1231,9 @@ mod tests {
     fn check_report_fields() {
         assert_eq!(check_report(&Ok(())), serde_json::json!({ "ok": true }));
         let report = check_report(&Err(
-            "a/rules.ax:supply_of: RESOURCE_LIMIT: x\npromise 2 does not hold for total=9, d=-1 (answer 8)".into(),
+            "a/rules.ax:supply_of: a `promise` line does not always hold\npromise 2 does not hold for total=9, d=-1 (answer 8)\nhint: fix it".into(),
         ));
+        assert_eq!(report["error"]["hint"], "fix it");
         assert_eq!(report["error"]["rule"], "supply_of");
         assert_eq!(report["error"]["promise"], 2);
         assert_eq!(
