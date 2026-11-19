@@ -95,7 +95,7 @@ Only these rules use 64-bit numbers, so other rules are proven as fast as
 before. A rule with big numbers can use only other rules with big numbers.
 `axiom build --emit js` gives them `bigint` inputs and answers
 (`total(1000000000000n, 3n)`), and `--emit rust` gives `u64` or `i64`. For now
-pages and `axiom run` cannot use them, and they cannot have decimals.
+pages and `axiom app-run` cannot use them (`axiom run` can), and they cannot have decimals.
 
 ### Lists
 
