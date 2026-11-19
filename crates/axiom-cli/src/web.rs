@@ -440,7 +440,7 @@ fn compile_contracts_inner(
                     // The search failed only because of the promise: say that, not the search limit.
                     match promise_counterexample(&linked.contract, options) {
                         Some(counterexample) => format!(
-                            "{source}:{name}: a `promise` line does not always hold{counterexample}\nhint: fix the `->` line or the promise, or add a `need` line that rules out this input"
+                            "{source}:{name}: a `promise` line does not always hold ({error}){counterexample}\nhint: fix the `->` line or the promise, or add a `need` line that rules out this input"
                         ),
                         None => format!(
                             "{source}:{name}: {error}\nhint: a `promise` line may not hold for every allowed input"
