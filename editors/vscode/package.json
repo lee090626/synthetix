@@ -2,7 +2,7 @@
   "name": "synthetix-vscode",
   "displayName": "Synthetix",
   "description": "Build and run Synthetix .ax web projects with verified logic.",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "publisher": "synthetix-lang",
   "license": "MIT OR Apache-2.0",
   "engines": {
