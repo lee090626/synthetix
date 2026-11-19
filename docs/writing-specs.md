@@ -162,7 +162,9 @@ cannot use it.
 
 - `+` and `*` must not go above 4294967295 (or outside -2147483648 to
   2147483647 in `can be negative` rules): add `need name <= limit` lines for
-  their inputs.
+  their inputs. The error names the inputs that have no limit. A limit also
+  carries through `need` lines that compare inputs: `need used <= days` and
+  `need days <= 31` keep `used` at 31 or below.
 - `/` must not divide by 0: add `need divisor >= 1`, unless the divisor is a
   number like `100`.
 - `-` must not go below 0. Synthetix proves this for every allowed input,
@@ -253,7 +255,7 @@ sets a text value: `grade = grade_of(score)`.
 | --- | --- |
 | `the last line must be else -> value` | Add a final `else -> value` line for when no line above matches |
 | `` `->` needs a condition, `else`, or `always` before it `` | Write `else -> value` after other `->` lines, or `always -> value` for a rule with one answer |
-| `may go outside 0 to 4294967295` | Add `need name <= limit` lines for the inputs |
+| `may go outside 0 to 4294967295` | Add the `need` lines the error names |
 | `may divide by 0` | Add `need divisor >= 1` |
 | `is not defined for inputs [...]` | A `-` can go below 0 for those inputs; add a `need` line or a condition |
 | `is a reserved word` | Rename the input |

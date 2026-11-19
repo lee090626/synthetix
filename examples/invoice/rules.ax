@@ -2,14 +2,13 @@
 prorate(price, used, days) with big numbers
   need days >= 28 and days <= 31
   need used <= days
-  need used <= 31
   need price <= 1000000000000
   always -> price * used / days
 
 # 달 중간에 플랜을 바꿀 때 남은 날만큼 더 낼 돈 (내리면 음수: 돌려줄 돈)
 change(old, new, used, days) can be negative with big numbers
   need days >= 28 and days <= 31
-  need used >= 0 and used <= days and used <= 31
+  need used >= 0 and used <= days
   need old >= 0 and old <= 1000000000000
   need new >= 0 and new <= 1000000000000
   always -> (new - old) * (days - used) / days
