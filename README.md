@@ -152,11 +152,6 @@ See [writing specs](docs/writing-specs.md) for the full syntax and
 `examples/rules`, `examples/web-counter`, `examples/policy-calculator`, and
 `examples/split-bill`.
 
-AI agents: the Claude Code skill
-[`write-axiom-rules`](.claude/skills/write-axiom-rules/SKILL.md) runs the
-write → `axiom check --report` → fix loop. Copy it into another project's
-`.claude/skills/` to use it there.
-
 The old contract syntax (`contract`, `ensures`, `{ }`) is no longer accepted in
 user files. It remains only as the internal format and in `tests/legacy`.
 
