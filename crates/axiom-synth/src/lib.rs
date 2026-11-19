@@ -865,13 +865,6 @@ pub fn synthesize_wasm_with_metrics(
     contract: &Contract,
     options: SynthesisOptions,
 ) -> Result<(Expr, Vec<u8>, Option<axiom_verify::Diagnostic>, usize), String> {
-    if contract.wide {
-        // shortcut: WebAssembly lowering is 32-bit; lift once i64 lowering lands (#159).
-        return Err(format!(
-            "{}: rules `with big numbers` can be checked with `axiom check` but not run or built yet",
-            contract.name
-        ));
-    }
     let result = synthesize_result_with_options(contract, options)?;
     let (candidate, diagnostic, candidates_checked) = match result {
         SynthesisResult::Found {
@@ -882,7 +875,11 @@ pub fn synthesize_wasm_with_metrics(
         result => return Err(format_synthesis_result(&result)),
     };
     let (_, arity) = axiom_parser::verified_abi_layout(&contract.params)?;
-    let module = axiom_wasm::emit(&candidate, arity as u32)?;
+    let module = if contract.wide {
+        axiom_wasm::emit_wide(&candidate, arity as u32)?
+    } else {
+        axiom_wasm::emit(&candidate, arity as u32)?
+    };
     Ok((candidate, module, diagnostic, candidates_checked))
 }
 

@@ -384,10 +384,10 @@ fn run_command(args: &[String]) -> Result<(), String> {
         .zip(&contract.params)
         .map(|(value, param)| {
             let value = unscale(value, contract.decimals)?;
-            parse_input_value(&value, &param.ty)
+            parse_input_value(&value, &param.ty, contract.wide)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    if let Err(error) = axiom_synth::check_requires(&contract, &values) {
+    if let Err(error) = check_requires(&contract, &values) {
         if let Some(report) = &options.report {
             write_failure_report(
                 report,
@@ -440,7 +440,12 @@ fn run_command(args: &[String]) -> Result<(), String> {
         };
     fs::write(&options.output, &module)
         .map_err(|error| format!("cannot write {}: {error}", options.output.display()))?;
-    let result = axiom_wasm::run_with_args(&module, &values)?;
+    let result = if contract.wide {
+        axiom_wasm::run_wide(&module, &values)?
+    } else {
+        let narrow: Vec<u32> = values.iter().map(|value| *value as u32).collect();
+        u64::from(axiom_wasm::run_with_args(&module, &narrow)?)
+    };
     if let Some(report) = &options.report {
         write_report(
             report,
@@ -526,9 +531,23 @@ fn application_run_command(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// `need` lines for one input. Wide rules check the lowered `need` at 64 bits.
+fn check_requires(contract: &axiom_parser::Contract, values: &[u64]) -> Result<(), String> {
+    if !contract.wide {
+        let narrow: Vec<u32> = values.iter().map(|value| *value as u32).collect();
+        return axiom_synth::check_requires(contract, &narrow);
+    }
+    match axiom_synth::lower_requires(contract)? {
+        Some(requires) if requires.try_eval_bits(values, 64)? == 0 => {
+            Err("input violates a requires clause".to_string())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// A value as written in the rule: with its decimal places (`12.50`).
-fn shown(contract: &axiom_parser::Contract, ty: &axiom_parser::Type, value: u32) -> String {
-    let text = display_result(ty, value);
+fn shown(contract: &axiom_parser::Contract, ty: &axiom_parser::Type, value: u64) -> String {
+    let text = display_result(ty, value, contract.wide);
     let places = contract.decimals as usize;
     if places == 0 || !matches!(ty, axiom_parser::Type::U32 | axiom_parser::Type::I32) {
         return text;
@@ -569,23 +588,31 @@ fn unscale(value: &str, places: u32) -> Result<String, String> {
     ))
 }
 
-fn display_result(ty: &axiom_parser::Type, result: u32) -> String {
+fn display_result(ty: &axiom_parser::Type, result: u64, wide: bool) -> String {
     match ty {
         axiom_parser::Type::Bool => (result != 0).to_string(),
-        axiom_parser::Type::U32 => result.to_string(),
-        axiom_parser::Type::I32 => (result as i32).to_string(),
+        axiom_parser::Type::I32 if wide => (result as i64).to_string(),
+        axiom_parser::Type::I32 => (result as u32 as i32).to_string(),
         _ => result.to_string(),
     }
 }
 
-fn parse_input_value(value: &str, ty: &axiom_parser::Type) -> Result<u32, String> {
+fn parse_input_value(value: &str, ty: &axiom_parser::Type, wide: bool) -> Result<u64, String> {
     match ty {
+        axiom_parser::Type::U32 if wide => value
+            .parse::<u64>()
+            .map_err(|error| format!("invalid u64 input '{value}': {error}")),
+        axiom_parser::Type::I32 if wide => value
+            .parse::<i64>()
+            .map(|value| value as u64)
+            .map_err(|error| format!("invalid i64 input '{value}': {error}")),
         axiom_parser::Type::U32 => value
             .parse::<u32>()
+            .map(u64::from)
             .map_err(|error| format!("invalid u32 input '{value}': {error}")),
         axiom_parser::Type::I32 => value
             .parse::<i32>()
-            .map(|value| value as u32)
+            .map(|value| u64::from(value as u32))
             .map_err(|error| format!("invalid i32 input '{value}': {error}")),
         axiom_parser::Type::Bool => match value {
             "true" | "1" => Ok(1),
@@ -656,11 +683,11 @@ pub(crate) fn print_unreachable_rules(contract: &axiom_parser::Contract) {
         let args: Vec<String> = args
             .iter()
             .zip(&contract.params)
-            .map(|(value, param)| shown(contract, &param.ty, *value))
+            .map(|(value, param)| shown(contract, &param.ty, u64::from(*value)))
             .collect();
         let answer = match contract.labels.get(answer as usize) {
             Some(label) => format!("{label:?}"),
-            None => shown(contract, &contract.return_type, answer),
+            None => shown(contract, &contract.return_type, u64::from(answer)),
         };
         println!(
             "example: {}({}) = {answer}   (`->` line {rule})",
@@ -719,7 +746,7 @@ fn write_report(
         verification_artifact_hash: None,
         wasm_hash: Some(stable_hash(&wasm_bytes)),
         output: Some(output.display().to_string()),
-        inputs: details.inputs.map(<[u32]>::to_vec),
+        inputs: details.inputs.map(<[u64]>::to_vec),
         result: details.result,
     };
     write_artifact(path, &mut artifact, &source_bytes)
@@ -727,8 +754,8 @@ fn write_report(
 
 struct ReportDetails<'a> {
     source: &'a str,
-    inputs: Option<&'a [u32]>,
-    result: Option<u32>,
+    inputs: Option<&'a [u64]>,
+    result: Option<u64>,
     diagnostic: Option<&'a str>,
     timeout: Option<Duration>,
     max_candidates: usize,
@@ -786,7 +813,7 @@ fn write_failure_report(
         verification_artifact_hash: None,
         wasm_hash: None,
         output: None,
-        inputs: details.inputs.map(<[u32]>::to_vec),
+        inputs: details.inputs.map(<[u64]>::to_vec),
         result: None,
     };
     write_artifact(path, &mut artifact, &source_bytes)
@@ -817,8 +844,8 @@ struct ReportArtifact {
     verification_artifact_hash: Option<String>,
     wasm_hash: Option<String>,
     output: Option<String>,
-    inputs: Option<Vec<u32>>,
-    result: Option<u32>,
+    inputs: Option<Vec<u64>>,
+    result: Option<u64>,
 }
 
 fn write_artifact(
@@ -852,11 +879,11 @@ fn write_artifact(
         artifact.timed_out,
         option_string(&artifact.resource_status),
         option_usize(artifact.resource_limit),
-        option_u32_vec(&artifact.counterexample),
+        option_vec(&artifact.counterexample),
         option_string(&artifact.verification_artifact_hash),
         option_string(&artifact.wasm_hash),
         option_string(&artifact.output),
-        option_u32_vec(&artifact.inputs),
+        option_vec(&artifact.inputs),
         artifact
             .result
             .map_or_else(|| "null".to_string(), |value| value.to_string()),
@@ -879,7 +906,7 @@ fn option_usize(value: Option<usize>) -> String {
     value.map_or_else(|| "null".to_string(), |value| value.to_string())
 }
 
-fn option_u32_vec(value: &Option<Vec<u32>>) -> String {
+fn option_vec<T: ToString>(value: &Option<Vec<T>>) -> String {
     value
         .as_ref()
         .map(|values| {
@@ -887,7 +914,7 @@ fn option_u32_vec(value: &Option<Vec<u32>>) -> String {
                 "[{}]",
                 values
                     .iter()
-                    .map(u32::to_string)
+                    .map(T::to_string)
                     .collect::<Vec<_>>()
                     .join(",")
             )
@@ -1249,12 +1276,34 @@ mod tests {
     }
 
     #[test]
+    fn checks_need_lines_of_big_number_rules_at_64_bits() {
+        let contract = axiom_parser::parse(
+            "total(price, quantity) with big numbers\n  need price <= 1000000000000\n  need quantity <= 1000\n  always -> price * quantity\n",
+        )
+        .unwrap();
+        assert!(check_requires(&contract, &[1_000_000_000_000, 3]).is_ok());
+        // 2^32 + 1000000000000 would pass if the check cut values to 32 bits.
+        assert!(check_requires(&contract, &[(1 << 32) + 1_000_000_000_000, 3]).is_err());
+    }
+
+    #[test]
     fn parses_signed_i32_input() {
         assert_eq!(
-            parse_input_value("-1", &axiom_parser::Type::I32).unwrap(),
-            u32::MAX
+            parse_input_value("-1", &axiom_parser::Type::I32, false).unwrap(),
+            u64::from(u32::MAX)
         );
-        assert_eq!(display_result(&axiom_parser::Type::I32, u32::MAX), "-1");
+        assert_eq!(
+            display_result(&axiom_parser::Type::I32, u64::from(u32::MAX), false),
+            "-1"
+        );
+        assert_eq!(
+            parse_input_value("-1", &axiom_parser::Type::I32, true).unwrap(),
+            u64::MAX
+        );
+        assert_eq!(
+            display_result(&axiom_parser::Type::I32, u64::MAX, true),
+            "-1"
+        );
     }
 
     #[test]
