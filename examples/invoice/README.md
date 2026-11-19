@@ -13,8 +13,8 @@
 | `payout(amount, rate)` | 가맹점 정산액. `promise`: 수수료와 합치면 정확히 결제 금액 |
 | `fee_first(a, b, rate)` | 한 번 결제한 두 상품의 수수료 중 첫 상품 몫. 둘째 몫은 `fee(a + b, rate) - fee_first(a, b, rate)` |
 
-금액은 4억 원 이하(수수료는 400만 원, 상품별 분배는 1만 원 이하)입니다. 더 크면
-`*`가 넘칠 수 있어 증명이 거부합니다. 숫자가 32비트라서 생기는 한계이고,
-`fee_first`는 범위 검사가 `fee`의 전체 범위로 판단해 더 좁습니다.
+모든 규칙이 `with big numbers`(64비트)라서 금액은 1조 원 이하(상품별 수수료 분배는
+1억 원 이하)입니다. `fee_first`는 범위 검사가 `fee`의 전체 범위로 판단해 더 좁습니다.
+64비트 규칙은 아직 페이지와 `axiom run`에서 쓸 수 없습니다.
 
-다른 언어에서: `axiom build --emit js` 또는 `--emit rust`.
+다른 언어에서: `axiom build --emit js`(`bigint`) 또는 `--emit rust`(`u64`/`i64`).
