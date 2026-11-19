@@ -85,6 +85,8 @@ pub enum Emit {
     Js,
     /// `contracts.rs`.
     Rust,
+    /// `contracts.py`.
+    Python,
 }
 
 /// Static build; `emit` adds library files for the proven rules.
@@ -112,6 +114,7 @@ const VERIFIED_OUTPUTS: &[&str] = &[
     "contracts.js",
     "contracts.d.ts",
     "contracts.rs",
+    "contracts.py",
 ];
 
 /// After a failed static build, an older bundle must not pass for the current spec.
@@ -182,6 +185,7 @@ fn build_project(
             vec![("contracts.js", js), ("contracts.d.ts", dts)]
         }
         Emit::Rust => vec![("contracts.rs", crate::rs::emit_module(&items)?)],
+        Emit::Python => vec![("contracts.py", crate::py::emit_module(&items)?)],
     };
 
     fs::create_dir_all(output_dir)
@@ -211,7 +215,12 @@ fn build_project(
         proof_json(project, &compiled).as_bytes(),
     )?;
     // Library files not emitted this time must not survive from an older spec.
-    for name in ["contracts.js", "contracts.d.ts", "contracts.rs"] {
+    for name in [
+        "contracts.js",
+        "contracts.d.ts",
+        "contracts.rs",
+        "contracts.py",
+    ] {
         let path = output_dir.join(name);
         if let Some((_, text)) = library.iter().find(|(file, _)| *file == name) {
             write_file(&path, text.as_bytes())?;

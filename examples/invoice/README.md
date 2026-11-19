@@ -17,4 +17,4 @@
 1억 원 이하)입니다. `fee_first`는 범위 검사가 `fee`의 전체 범위로 판단해 더 좁습니다.
 64비트 규칙은 아직 페이지와 `axiom app-run`에서 쓸 수 없습니다(`axiom run`은 됩니다).
 
-다른 언어에서: `axiom build --emit js`(`bigint`) 또는 `--emit rust`(`u64`/`i64`).
+다른 언어에서: `axiom build --emit js`(`bigint`), `--emit rust`(`u64`/`i64`), `--emit python`(`int`).

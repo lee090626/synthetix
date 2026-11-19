@@ -21,6 +21,7 @@ type SynthesisOutput = (
 );
 
 mod js;
+mod py;
 mod rs;
 mod web;
 
@@ -247,9 +248,10 @@ fn build_command(args: &[String]) -> Result<(), String> {
             [] => web::Emit::None,
             [flag, target] if flag == "--emit" && target == "js" => web::Emit::Js,
             [flag, target] if flag == "--emit" && target == "rust" => web::Emit::Rust,
+            [flag, target] if flag == "--emit" && target == "python" => web::Emit::Python,
             [flag, target] if flag == "--emit" => {
                 return Err(format!(
-                    "unknown emit target: {target} (supported: js, rust)"
+                    "unknown emit target: {target} (supported: js, rust, python)"
                 ));
             }
             _ => return Err(format!("unknown project build option: {}", args.join(" "))),
