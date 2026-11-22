@@ -74,28 +74,70 @@ struct DevState {
 
 #[cfg(test)]
 pub fn build(config_path: &Path, output_dir: &Path) -> Result<BuildResult, String> {
-    build_with_options(config_path, output_dir, Emit::None)
+    build_with_options(config_path, output_dir, None)
 }
 
-/// Extra library output next to the web app.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Emit {
-    None,
-    /// `contracts.js` and `contracts.d.ts`.
-    Js,
-    /// `contracts.rs`.
-    Rust,
-    /// `contracts.py`.
-    Python,
-    /// `contracts.go` (`package contracts`).
-    Go,
+type Items<'a> = [(&'a axiom_parser::Contract, &'a Expr, Option<&'a Expr>)];
+
+/// One library output language: its `--emit` name, the files it writes, and
+/// the emitter returning their texts in the same order.
+#[derive(Debug)]
+pub struct Emit {
+    pub name: &'static str,
+    files: &'static [&'static str],
+    emit: fn(&Items) -> Result<Vec<String>, String>,
+}
+
+fn emit_js(items: &Items) -> Result<Vec<String>, String> {
+    let (js, dts) = crate::js::emit_modules(items, crate::js::PROOF_NOTE)?;
+    Ok(vec![js, dts])
+}
+
+/// Every output language. Adding one here is the whole registration.
+pub const EMITS: &[Emit] = &[
+    Emit {
+        name: "js",
+        files: &["contracts.js", "contracts.d.ts"],
+        emit: emit_js,
+    },
+    Emit {
+        name: "rust",
+        files: &["contracts.rs"],
+        emit: |i| crate::rs::emit_module(i).map(|s| vec![s]),
+    },
+    Emit {
+        name: "python",
+        files: &["contracts.py"],
+        emit: |i| crate::py::emit_module(i).map(|s| vec![s]),
+    },
+    Emit {
+        name: "go",
+        files: &["contracts.go"],
+        emit: |i| crate::go::emit_module(i).map(|s| vec![s]),
+    },
+];
+
+/// The output language named by `--emit`.
+pub fn emit_named(name: &str) -> Result<&'static Emit, String> {
+    EMITS.iter().find(|e| e.name == name).ok_or_else(|| {
+        let names: Vec<&str> = EMITS.iter().map(|e| e.name).collect();
+        format!(
+            "unknown emit target: {name} (supported: {})",
+            names.join(", ")
+        )
+    })
+}
+
+/// Every file any output language can write.
+fn library_files() -> impl Iterator<Item = &'static str> {
+    EMITS.iter().flat_map(|e| e.files.iter().copied())
 }
 
 /// Static build; `emit` adds library files for the proven rules.
 pub fn build_with_options(
     config_path: &Path,
     output_dir: &Path,
-    emit: Emit,
+    emit: Option<&Emit>,
 ) -> Result<BuildResult, String> {
     let mut cache = VerificationCache::default();
     let result = axiom_project::load(config_path)
@@ -108,21 +150,11 @@ pub fn build_with_options(
 
 /// Files whose presence implies "built from the current spec and verified".
 /// `app.config.js` (deployment settings) and `app.css` are left in place.
-const VERIFIED_OUTPUTS: &[&str] = &[
-    "app.wasm",
-    "app.js",
-    "index.html",
-    "app.proof.json",
-    "contracts.js",
-    "contracts.d.ts",
-    "contracts.rs",
-    "contracts.py",
-    "contracts.go",
-];
+const VERIFIED_OUTPUTS: &[&str] = &["app.wasm", "app.js", "index.html", "app.proof.json"];
 
 /// After a failed static build, an older bundle must not pass for the current spec.
 fn remove_verified_outputs(output_dir: &Path) -> Result<(), String> {
-    for name in VERIFIED_OUTPUTS {
+    for name in VERIFIED_OUTPUTS.iter().copied().chain(library_files()) {
         let path = output_dir.join(name);
         if path.exists() {
             fs::remove_file(&path)
@@ -140,7 +172,7 @@ fn build_with_cache(
     dev_runtime: bool,
 ) -> Result<BuildResult, String> {
     let project = axiom_project::load(config_path)?;
-    build_project(&project, output_dir, cache, dev_runtime, Emit::None)
+    build_project(&project, output_dir, cache, dev_runtime, None)
 }
 
 fn build_project(
@@ -148,7 +180,7 @@ fn build_project(
     output_dir: &Path,
     cache: &mut VerificationCache,
     dev_runtime: bool,
-    emit: Emit,
+    emit: Option<&Emit>,
 ) -> Result<BuildResult, String> {
     let compiled = compile_contracts_with_cache(
         project,
@@ -182,14 +214,8 @@ fn build_project(
         .map(|f| (&f.contract, &f.candidate, f.requires.as_ref()))
         .collect::<Vec<_>>();
     let library: Vec<(&str, String)> = match emit {
-        Emit::None => Vec::new(),
-        Emit::Js => {
-            let (js, dts) = crate::js::emit_modules(&items, crate::js::PROOF_NOTE)?;
-            vec![("contracts.js", js), ("contracts.d.ts", dts)]
-        }
-        Emit::Rust => vec![("contracts.rs", crate::rs::emit_module(&items)?)],
-        Emit::Python => vec![("contracts.py", crate::py::emit_module(&items)?)],
-        Emit::Go => vec![("contracts.go", crate::go::emit_module(&items)?)],
+        None => Vec::new(),
+        Some(e) => e.files.iter().copied().zip((e.emit)(&items)?).collect(),
     };
 
     fs::create_dir_all(output_dir)
@@ -219,13 +245,7 @@ fn build_project(
         proof_json(project, &compiled).as_bytes(),
     )?;
     // Library files not emitted this time must not survive from an older spec.
-    for name in [
-        "contracts.js",
-        "contracts.d.ts",
-        "contracts.rs",
-        "contracts.py",
-        "contracts.go",
-    ] {
+    for name in library_files() {
         let path = output_dir.join(name);
         if let Some((_, text)) = library.iter().find(|(file, _)| *file == name) {
             write_file(&path, text.as_bytes())?;
@@ -275,8 +295,7 @@ pub fn dev(config_path: &Path, port: u16, open_browser: bool, once: bool) -> Res
     // The server also starts on a failed first build and shows the error until a
     // fix rebuilds, the same as a failed rebuild; `--once` still reports it.
     let initial = retained_loader.load(config_path).and_then(|(project, _)| {
-        build_project(&project, &output_dir, &mut cache, true, Emit::None)
-            .map(|result| result.files)
+        build_project(&project, &output_dir, &mut cache, true, None).map(|result| result.files)
     });
     let (mut watched_files, error) = match initial {
         Ok(files) => (files, None),
@@ -1312,7 +1331,7 @@ fn rebuild_if_changed(
     watched_files.push(config_path.to_path_buf());
     let mut candidate_cache = cache.clone();
     let mut guard = state.lock().expect("dev state lock poisoned");
-    match build_project(&project, output_dir, &mut candidate_cache, true, Emit::None) {
+    match build_project(&project, output_dir, &mut candidate_cache, true, None) {
         Ok(mut result) => {
             let active_ids = project
                 .contracts
@@ -2596,7 +2615,7 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
         // not leave the older verified bundle behind.
         std::fs::write(output.join("app.config.js"), "window.custom = 1;\n").unwrap();
         build(&config, &output).unwrap_err();
-        for name in VERIFIED_OUTPUTS {
+        for name in VERIFIED_OUTPUTS.iter().copied().chain(library_files()) {
             assert!(
                 !output.join(name).exists(),
                 "stale {name} survived a failed build"
@@ -2605,6 +2624,44 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
         assert_eq!(
             std::fs::read_to_string(output.join("app.config.js")).unwrap(),
             "window.custom = 1;\n"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn every_emit_target_writes_its_files_and_a_plain_build_removes_them() {
+        let root = std::env::temp_dir().join(format!("axiom-emit-all-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("rules.ax"),
+            "contract twice(x: u32) -> u32 { ensures result == x *% 2; }\n",
+        )
+        .unwrap();
+        let config = root.join("synthetix.toml");
+        std::fs::write(&config, "[project]\nentry = \"rules.ax\"\n").unwrap();
+        let output = root.join("dist");
+        for target in EMITS {
+            build_with_options(&config, &output, Some(target)).unwrap();
+            for name in target.files {
+                assert!(
+                    output.join(name).is_file(),
+                    "--emit {} did not write {name}",
+                    target.name
+                );
+            }
+            build_with_options(&config, &output, None).unwrap();
+            for name in target.files {
+                assert!(
+                    !output.join(name).exists(),
+                    "stale {name} survived a plain build"
+                );
+            }
+        }
+        assert!(
+            emit_named("cobol")
+                .unwrap_err()
+                .contains("supported: js, rust, python, go")
         );
         std::fs::remove_dir_all(root).unwrap();
     }

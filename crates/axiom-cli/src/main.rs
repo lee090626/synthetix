@@ -246,16 +246,8 @@ fn analyze_command(args: &[String]) -> Result<(), String> {
 fn build_command(args: &[String]) -> Result<(), String> {
     if args.is_empty() || args[0].starts_with("--") {
         let emit = match args {
-            [] => web::Emit::None,
-            [flag, target] if flag == "--emit" && target == "js" => web::Emit::Js,
-            [flag, target] if flag == "--emit" && target == "rust" => web::Emit::Rust,
-            [flag, target] if flag == "--emit" && target == "python" => web::Emit::Python,
-            [flag, target] if flag == "--emit" && target == "go" => web::Emit::Go,
-            [flag, target] if flag == "--emit" => {
-                return Err(format!(
-                    "unknown emit target: {target} (supported: js, rust, python, go)"
-                ));
-            }
+            [] => None,
+            [flag, target] if flag == "--emit" => Some(web::emit_named(target)?),
             _ => return Err(format!("unknown project build option: {}", args.join(" "))),
         };
         let config =
