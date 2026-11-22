@@ -1,7 +1,7 @@
 # Synthetix
 
 > **"No Implementation Code. Just Verified Contracts."**
-> Target: machine-checked program synthesis from formal specifications into executable web applications.
+> Target: proven calculation rules that apps in JS/TS, Rust, Python and Go import as ordinary code (`axiom build --emit js|rust|python|go`).
 
 ---
 
@@ -11,7 +11,7 @@ In traditional software development and early AI coding tools, humans and LLMs p
 
 **Synthetix replaces implementation code with mathematical contracts.**
 
-Developers write only *what* must hold true (preconditions, invariants, postconditions). The v1 core contains CLI input, parsing, cost-ordered candidate synthesis, SMT verification, direct WASM emission, and embedded runtime execution. v2 extends that core into a browser-first workflow: multiple `.ax` modules, generated web assets, and a local `axiom dev` loop. A minimal VSCode extension runs the same CLI for `.ax` files.
+Developers write only *what* must hold true (preconditions, invariants, postconditions). The v1 core contains CLI input, parsing, cost-ordered candidate synthesis, SMT verification, direct WASM emission, and embedded runtime execution. v2 added multiple `.ax` modules, generated web pages, and a local `axiom dev` loop. Since v3 the direction is use from other languages: proven rules are emitted as JS/TS, Rust, Python and Go libraries. Pages are kept working but are not extended. A minimal VSCode extension runs the same CLI for `.ax` files.
 
 > *"AI does not generate code. AI guesses search priorities; mathematics determines correctness."*
 
