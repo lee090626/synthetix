@@ -140,8 +140,12 @@ cart(prices[n])
   promise answer <= sum(prices)
 ```
 
-- Use the list only inside `sum(...)` and `count(...)`. `sum` may calculate
-  item by item: `sum(paid - share)`. `count(prices)` is `n`.
+- Use the list inside `sum(...)`, `min(...)`, `max(...)` and `count(...)`.
+  They may calculate item by item: `sum(paid - share)`, `min(paid - share)`.
+  `count(prices)` is `n`. `min` and `max` need `need n >= 1`; `min(a, b)` of
+  two numbers works as usual.
+- An answer line that uses an item outside those makes the answer a list, one
+  per item: `always -> prices - min(prices)`.
 - Lists in one rule share the length: `balance(paid[n], share[n])`. Other
   inputs work as usual: `order(prices[n], fee)`.
 - A `need` line about a list holds for every item. Keep it apart from lines
@@ -149,12 +153,13 @@ cart(prices[n])
 - The sum must stay in range for the longest list: with `need n <= 1000` and
   `need prices <= 100000` it can reach 100000000. If it could go past the
   number range, the error says so; lower the limit or add `with big numbers`.
-- `prices[1]`, `min(prices)`, `max(prices)`, decimals, list answers, pages,
-  and calling the rule from another rule do not work with these lists yet.
+- `prices[1]`, decimals, pages, and calling the rule from another rule do not
+  work with these lists yet.
 
 How it is proven: each item is proven like a rule of its own, and the rest of
 the rule is proven for every sum that the items allow: between `n` times the
-smallest and `n` times the largest item. That every sum stays in that range,
+smallest and `n` times the largest item; `min` and `max` lie between the
+smallest and largest item, and `min <= every item <= max`. That every sum stays in that range,
 for any length, is proven once in Lean (`proofs/lean/Lists.lean`). A promise
 that needs more than that range, like `sum(paid - share) <= sum(paid)`, fails
 with an input whose sums no real list can give; write a promise that follows

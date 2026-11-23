@@ -61,3 +61,56 @@ theorem loop_sum_exact (f : Int → Int) (lo hi a b : Int)
   have := fold_exact f (fun y => lo ≤ y ∧ y ≤ hi) (fun y hy => hf y hy.1 hy.2) xs 0
     (fun k => by have := prefix_bounds a b xs h k; simp only [Int.zero_add]; omega)
   simpa using this
+
+/-- `min(xs)` and `max(xs)` (issue #190): a loop that starts at the first item
+and keeps one of its two numbers each step (`min`, `max`) ends between a and b
+when every item does. -/
+theorem pick_bounds (f : Int → Int → Int) (hf : ∀ x y, f x y = x ∨ f x y = y) (a b : Int) :
+    ∀ (x : Int) (xs : List Int), (∀ y ∈ x :: xs, a ≤ y ∧ y ≤ b) →
+    a ≤ xs.foldl f x ∧ xs.foldl f x ≤ b
+  | x, [], h => h x (by simp)
+  | x, y :: ys, h => by
+    simp only [List.foldl_cons]
+    apply pick_bounds f hf a b (f x y) ys
+    intro z hz
+    rcases List.mem_cons.mp hz with rfl | hz
+    · rcases hf x y with e | e <;> rw [e]
+      · exact h x (by simp)
+      · exact h y (by simp)
+    · exact h z (by simp [hz])
+
+theorem min_bounds (a b x : Int) (xs : List Int) (h : ∀ y ∈ x :: xs, a ≤ y ∧ y ≤ b) :
+    a ≤ xs.foldl min x ∧ xs.foldl min x ≤ b :=
+  pick_bounds min (fun x y => by omega) a b x xs h
+
+theorem max_bounds (a b x : Int) (xs : List Int) (h : ∀ y ∈ x :: xs, a ≤ y ∧ y ≤ b) :
+    a ≤ xs.foldl max x ∧ xs.foldl max x ≤ b :=
+  pick_bounds max (fun x y => by omega) a b x xs h
+
+/-- `min(xs)` is at most every item, so at most `max(xs)` (`max_ge`). -/
+theorem min_le (x : Int) : ∀ (xs : List Int), ∀ y ∈ x :: xs, xs.foldl min x ≤ y
+  | [], y, hy => by simp at hy; simp [hy]
+  | z :: zs, y, hy => by
+    simp only [List.foldl_cons]
+    have hm := min_le (min x z) zs (min x z) (by simp)
+    rcases List.mem_cons.mp hy with h | hy
+    · omega
+    rcases List.mem_cons.mp hy with h | hy
+    · omega
+    exact min_le (min x z) zs y (by simp [hy])
+
+theorem max_ge (x : Int) : ∀ (xs : List Int), ∀ y ∈ x :: xs, y ≤ xs.foldl max x
+  | [], y, hy => by simp at hy; simp [hy]
+  | z :: zs, y, hy => by
+    simp only [List.foldl_cons]
+    have hm := max_ge (max x z) zs (max x z) (by simp)
+    rcases List.mem_cons.mp hy with h | hy
+    · omega
+    rcases List.mem_cons.mp hy with h | hy
+    · omega
+    exact max_ge (max x z) zs y (by simp [hy])
+
+theorem min_le_max (x : Int) (xs : List Int) : xs.foldl min x ≤ xs.foldl max x := by
+  have := min_le x xs x (by simp)
+  have := max_ge x xs x (by simp)
+  omega

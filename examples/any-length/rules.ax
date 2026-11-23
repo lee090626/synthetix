@@ -39,3 +39,28 @@ share(weights[n], total)
   need weights >= 1 and weights <= 1000
   need total <= 1000000
   always -> total * weights / sum(weights)
+
+# 가장 비싼 물건과 가장 싼 물건의 값 차이
+spread(prices[n])
+  need n <= 1000
+  need n >= 1
+  need prices <= 100000
+  always -> max(prices) - min(prices)
+  promise answer <= 100000
+
+# 가장 손해 본 사람의 차액 (낸 돈 - 몫이 가장 작은 값)
+worst(paid[n], share[n]) can be negative
+  need n <= 50
+  need n >= 1
+  need paid >= 0 and paid <= 1000000
+  need share >= 0 and share <= 1000000
+  always -> min(paid - share)
+  promise answer <= 1000000
+
+# 물건마다 가장 싼 물건보다 얼마나 비싼지: 답이 목록
+above(prices[n])
+  need n <= 1000
+  need n >= 1
+  need prices <= 100000
+  always -> prices - min(prices)
+  promise answer <= prices

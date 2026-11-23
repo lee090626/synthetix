@@ -382,9 +382,21 @@ fn any_length_wrapper(
         .collect();
     let mut loop_body = String::new();
     let mut sums = String::new();
-    for (k, item) in rule.items.iter().enumerate() {
+    for (k, (item, fold)) in rule.items.iter().zip(&rule.folds).enumerate() {
         sums += &format!("  let sum{} = {zero};\n", k + 1);
-        loop_body += &format!("    sum{} += {item}({});\n", k + 1, item_args.join(", "));
+        let call = format!("{item}({})", item_args.join(", "));
+        loop_body += &match fold {
+            axiom_parser::Fold::Sum => format!("    sum{} += {call};\n", k + 1),
+            axiom_parser::Fold::Min | axiom_parser::Fold::Max => format!(
+                "    {{ const v = {call}; if (i === 0 || v {} sum{1}) sum{1} = v; }}\n",
+                if *fold == axiom_parser::Fold::Min {
+                    "<"
+                } else {
+                    ">"
+                },
+                k + 1
+            ),
+        };
     }
     let mut core_args: Vec<String> = if rule.each {
         item_args.clone()
