@@ -277,27 +277,47 @@ fn any_length_wrapper(core: &Contract, rule: &axiom_parser::ListRule) -> Result<
             item_args.join(", ")
         );
     }
-    let mut core_args: Vec<String> = rule
-        .params
-        .iter()
-        .enumerate()
-        .filter(|(_, (_, list))| !*list)
-        .map(|(i, _)| format!("p{i}"))
-        .collect();
+    let mut core_args: Vec<String> = if rule.each {
+        item_args.clone()
+    } else {
+        rule.params
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, list))| !*list)
+            .map(|(i, _)| format!("p{i}"))
+            .collect()
+    };
     core_args.push(format!("n as {ty}"));
     core_args.extend((1..=rule.items.len()).map(|k| format!("sum{k}")));
+    let call = format!("{}({})", ident(&core.name)?, core_args.join(", "));
+    let ret = rs_type(&core.return_type, core.wide)?;
+    let (ret, tail) = if rule.each {
+        (
+            format!("Vec<{ret}>"),
+            format!("(0..n).map(|i| {call}).collect()"),
+        )
+    } else {
+        (ret.to_string(), call)
+    };
     let docs: Vec<&str> = rule.params.iter().map(|(p, _)| p.as_str()).collect();
     Ok(format!(
-        "/// Inputs: {}.\npub fn {}({}) -> Result<{}, AxiomError> {{\n{checks}    let n = p{first}.len();\n    if n > {} {{\n        return Err(AxiomError(\"{}: input violates a requires clause\"));\n    }}\n{sums}    for i in 0..n {{\n{body}    }}\n    {}({})\n}}\n",
+        "/// Inputs: {}.\npub fn {}({}) -> Result<{ret}, AxiomError> {{\n{checks}    let n = p{first}.len();\n    if {}n > {} {{\n        return Err(AxiomError(\"{}: input violates a requires clause\"));\n    }}\n{sums}    for i in 0..n {{\n{body}    }}\n    {tail}\n}}\n",
         docs.join(", "),
         ident(&rule.name)?,
         params.join(", "),
-        rs_type(&core.return_type, core.wide)?,
+        too_few(rule, "n", "||"),
         rule.max,
         rule.name,
-        ident(&core.name)?,
-        core_args.join(", ")
     ))
+}
+
+/// `n < least <or> ` when the rule has `need n >= least` (shared by all emitters).
+pub(crate) fn too_few(rule: &axiom_parser::ListRule, n: &str, or: &str) -> String {
+    if rule.least == 0 {
+        String::new()
+    } else {
+        format!("{n} < {} {or} ", rule.least)
+    }
 }
 
 /// `settle(owe)`: N from the slice length, N * N transfers, item (i-1)*N+j

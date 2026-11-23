@@ -23,3 +23,19 @@ order(prices[n], fee) with big numbers
   need fee <= 100000
   always -> sum(prices) + count(prices) * fee
   promise answer >= sum(prices)
+
+# 물건마다 할인한 값: 답이 목록 (물건 수만큼)
+discount(prices[n], rate)
+  need n <= 1000
+  need prices <= 100000
+  need rate <= 100
+  always -> prices - prices * rate / 100
+  promise answer <= prices
+
+# 비율대로 나눈 몫: 항목 하나와 목록 전체 합을 섞어 씀
+share(weights[n], total)
+  need n <= 50
+  need n >= 1
+  need weights >= 1 and weights <= 1000
+  need total <= 1000000
+  always -> total * weights / sum(weights)
