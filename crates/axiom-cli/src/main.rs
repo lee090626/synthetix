@@ -366,6 +366,16 @@ fn dev_command(args: &[String]) -> Result<(), String> {
 
 fn run_command(args: &[String]) -> Result<(), String> {
     let options = parse_run_args(args)?;
+    if let Ok(source) = fs::read_to_string(options.input)
+        && let Ok(module) = axiom_parser::parse_module(&source)
+        && let Some(core) = module.contracts.iter().find(|c| c.list.is_some())
+        && core
+            .list
+            .as_ref()
+            .is_some_and(|r| r.items.len() + 1 == module.contracts.len())
+    {
+        return run_any_length(&module.contracts, core, &options.values);
+    }
     let contract = read_contract(options.input)?;
     if contract.params.len() != options.values.len() {
         return Err(format!(
@@ -528,6 +538,104 @@ fn application_run_command(args: &[String]) -> Result<(), String> {
 }
 
 /// `need` lines for one input. Wide rules check the lowered `need` at 64 bits.
+/// `axiom run` on a rule over lists of any length (lists written `[1,2,3]`):
+/// the same steps as emitted code, on the proven candidates of each item
+/// rule and the core.
+fn run_any_length(
+    all: &[axiom_parser::Contract],
+    core: &axiom_parser::Contract,
+    values: &[String],
+) -> Result<(), String> {
+    let rule = core.list.as_ref().expect("core of a list rule");
+    if values.len() != rule.params.len() {
+        return Err(format!(
+            "{} expects {} inputs, got {}",
+            rule.name,
+            rule.params.len(),
+            values.len()
+        ));
+    }
+    let ty = &core.params[0].ty;
+    let bits = if core.wide { 64 } else { 32 };
+    let mut inputs = Vec::new();
+    for (value, (name, list)) in values.iter().zip(&rule.params) {
+        let items: Vec<&str> = if *list {
+            let inner = value
+                .strip_prefix('[')
+                .and_then(|v| v.strip_suffix(']'))
+                .ok_or_else(|| format!("{name}: write a list as [1,2,3]"))?;
+            inner
+                .split(',')
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .collect()
+        } else {
+            vec![value.as_str()]
+        };
+        inputs.push(
+            items
+                .iter()
+                .map(|v| parse_input_value(v, ty, core.wide))
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+    }
+    let mut lengths = inputs
+        .iter()
+        .zip(&rule.params)
+        .filter(|(_, (_, list))| *list)
+        .map(|(v, _)| v.len());
+    let n = lengths.next().unwrap_or(0);
+    if lengths.any(|len| len != n) {
+        return Err(format!("{}: lists must have the same length", rule.name));
+    }
+    if n as u64 > rule.max {
+        return Err("input violates a requires clause".to_string());
+    }
+    let proven = |contract: &axiom_parser::Contract| {
+        axiom_synth::synthesize_with_options(contract, axiom_synth::SynthesisOptions::default())
+    };
+    let mask = if core.wide {
+        u64::MAX
+    } else {
+        u64::from(u32::MAX)
+    };
+    let mut core_args: Vec<u64> = inputs
+        .iter()
+        .zip(&rule.params)
+        .filter(|(_, (_, list))| !*list)
+        .map(|(v, _)| v[0])
+        .collect();
+    core_args.push(n as u64);
+    for item in &rule.items {
+        let contract = all
+            .iter()
+            .find(|c| &c.name == item)
+            .ok_or_else(|| format!("missing item rule {item}"))?;
+        let code = proven(contract)?;
+        let mut total = 0u64;
+        for i in 0..n {
+            let args: Vec<u64> = inputs
+                .iter()
+                .zip(&rule.params)
+                .map(|(v, (_, list))| if *list { v[i] } else { v[0] })
+                .collect();
+            check_requires(contract, &args)?;
+            total = total.wrapping_add(code.try_eval_bits(&args, bits)?) & mask;
+        }
+        core_args.push(total);
+    }
+    check_requires(core, &core_args)?;
+    let result = proven(core)?.try_eval_bits(&core_args, bits)?;
+    println!("contract: {}", rule.name);
+    println!("proof_result: VERIFIED");
+    println!("verified: true");
+    println!(
+        "result: {}",
+        display_result(&core.return_type, result, core.wide)
+    );
+    Ok(())
+}
+
 fn check_requires(contract: &axiom_parser::Contract, values: &[u64]) -> Result<(), String> {
     if !contract.wide {
         let narrow: Vec<u32> = values.iter().map(|value| *value as u32).collect();

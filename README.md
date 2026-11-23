@@ -98,7 +98,8 @@ synthetix/
     ├── web-counter/       # v2: multi-file browser example
     ├── v3-status/         # v3: typed state and conditional UI
     ├── v3-todo/           # v3: state-based checklist
-    └── v3-todo-v31/       # v3.1: input, records, lists, reducer, persistence
+    ├── v3-todo-v31/       # v3.1: input, records, lists, reducer, persistence
+    └── any-length/        # 4.0: lists of any length (prices[n]), sums proven in Lean
 ```
 
 ---

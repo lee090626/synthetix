@@ -264,6 +264,7 @@ impl<'a> Parser<'a> {
             decimals: 0,
             labels: Vec::new(),
             wide: false,
+            list: None,
         })
     }
 
@@ -375,6 +376,7 @@ impl<'a> Parser<'a> {
             decimals: 0,
             labels: Vec::new(),
             wide: false,
+            list: None,
         })
     }
 

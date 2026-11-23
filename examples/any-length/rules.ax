@@ -1,0 +1,25 @@
+# 장바구니 합계: 물건이 몇 개든, 20만 원을 넘으면 20만 원
+cart(prices[n])
+  need n <= 1000
+  need prices <= 100000
+  sum(prices) > 200000 -> 200000
+  else -> sum(prices)
+  promise answer <= sum(prices)
+  promise answer <= 200000
+
+# 모임 전체로 본 차액: 낸 돈 - 몫, 사람이 몇 명이든
+balance(paid[n], share[n]) can be negative
+  need n <= 50
+  need paid >= 0 and paid <= 1000000
+  need share >= 0 and share <= 1000000
+  always -> sum(paid - share)
+  promise answer <= n * 1000000
+  promise answer >= 0 - n * 1000000
+
+# 주문 금액: 물건값 합계 + 물건마다 붙는 배송비
+order(prices[n], fee) with big numbers
+  need n <= 10000
+  need prices <= 1000000000000
+  need fee <= 100000
+  always -> sum(prices) + count(prices) * fee
+  promise answer >= sum(prices)

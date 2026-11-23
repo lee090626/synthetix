@@ -2396,6 +2396,7 @@ mod tests {
             decimals: 0,
             labels: Vec::new(),
             wide: false,
+            list: None,
         };
         assert!(matches!(
             check_contract(&invalid).unwrap(),

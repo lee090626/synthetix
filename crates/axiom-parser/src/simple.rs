@@ -1498,7 +1498,7 @@ impl Block {
     }
 }
 
-fn strip_comment(line: &str) -> &str {
+pub(crate) fn strip_comment(line: &str) -> &str {
     let mut in_quotes = false;
     for (index, c) in line.char_indices() {
         match c {

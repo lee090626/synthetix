@@ -109,6 +109,24 @@ pub struct Contract {
     /// 64-bit words (`with big numbers`): `u32`/`i32` values, literals and
     /// arithmetic are 64 bits wide in this contract.
     pub wide: bool,
+    /// Set on the core of a rule over lists of any length (`prices[n]`).
+    pub list: Option<ListRule>,
+}
+
+/// A rule over lists of any length (`cart(prices[n])`, issue #182), split
+/// into one item rule per `sum(...)` and a core rule. Item rules take every
+/// input, with one item of each list; the core takes the inputs that are not
+/// lists, then the length, then each sum, in `items` order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListRule {
+    /// The rule name the user wrote.
+    pub name: String,
+    /// The inputs in order; `true` marks a list.
+    pub params: Vec<(String, bool)>,
+    /// Item rules, one per `sum(...)`.
+    pub items: Vec<String>,
+    /// The `need n <= max` limit on the length.
+    pub max: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

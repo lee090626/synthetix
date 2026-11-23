@@ -163,6 +163,12 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
             out += &list_wrapper(base, &parts);
         }
     }
+    for contract in &contracts {
+        if let Some(rule) = &contract.list {
+            out += "\n\n";
+            out += &any_length_wrapper(contract, rule);
+        }
+    }
     let sizes = settle_sizes(&contracts);
     if !sizes.is_empty() {
         out += "\n\n";
@@ -255,6 +261,64 @@ fn list_wrapper(base: &str, parts: &[&Contract]) -> String {
         ident(base),
         params.join(", "),
         calls.join(", ")
+    )
+}
+
+/// `cart(prices)` for a rule over lists of any length: checks the length,
+/// adds each item rule over the items in a loop, then calls the core.
+fn any_length_wrapper(core: &Contract, rule: &axiom_parser::ListRule) -> String {
+    let names: Vec<String> = rule.params.iter().map(|(p, _)| ident(p)).collect();
+    let first = rule.params.iter().position(|(_, list)| *list).unwrap_or(0);
+    let mut checks = String::new();
+    for (i, (_, list)) in rule.params.iter().enumerate() {
+        if *list {
+            checks += &format!(
+                "    if not isinstance({0}, (list, tuple)) or len({0}) != len({1}):\n        raise TypeError(\"{2}: {0} must be a list as long as the other lists\")\n",
+                names[i], names[first], rule.name
+            );
+        }
+    }
+    let item_args: Vec<String> = rule
+        .params
+        .iter()
+        .zip(&names)
+        .map(|((_, list), name)| {
+            if *list {
+                format!("{name}[_i]")
+            } else {
+                name.clone()
+            }
+        })
+        .collect();
+    let mut sums = String::new();
+    let mut body = String::new();
+    for (k, item) in rule.items.iter().enumerate() {
+        sums += &format!("    sum{} = 0\n", k + 1);
+        body += &format!(
+            "        sum{} += {}({})\n",
+            k + 1,
+            ident(item),
+            item_args.join(", ")
+        );
+    }
+    let mut core_args: Vec<String> = rule
+        .params
+        .iter()
+        .zip(&names)
+        .filter(|((_, list), _)| !*list)
+        .map(|(_, name)| name.clone())
+        .collect();
+    core_args.push("_n".into());
+    core_args.extend((1..=rule.items.len()).map(|k| format!("sum{k}")));
+    format!(
+        "def {}({}):\n{checks}    _n = len({})\n    if _n > {}:\n        _fail(\"{}: input violates a requires clause\")\n{sums}    for _i in range(_n):\n{body}    return {}({})\n",
+        ident(&rule.name),
+        names.join(", "),
+        names[first],
+        rule.max,
+        rule.name,
+        ident(&core.name),
+        core_args.join(", ")
     )
 }
 
