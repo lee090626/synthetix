@@ -588,7 +588,7 @@ fn run_any_length(
     if lengths.any(|len| len != n) {
         return Err(format!("{}: lists must have the same length", rule.name));
     }
-    if n as u64 > rule.max {
+    if (n as u64) < rule.least || n as u64 > rule.max {
         return Err("input violates a requires clause".to_string());
     }
     let proven = |contract: &axiom_parser::Contract| {
@@ -598,6 +598,13 @@ fn run_any_length(
         u64::MAX
     } else {
         u64::from(u32::MAX)
+    };
+    let item_args = |i: usize| -> Vec<u64> {
+        inputs
+            .iter()
+            .zip(&rule.params)
+            .map(|(v, (_, list))| if *list { v[i] } else { v[0] })
+            .collect()
     };
     let mut core_args: Vec<u64> = inputs
         .iter()
@@ -614,25 +621,31 @@ fn run_any_length(
         let code = proven(contract)?;
         let mut total = 0u64;
         for i in 0..n {
-            let args: Vec<u64> = inputs
-                .iter()
-                .zip(&rule.params)
-                .map(|(v, (_, list))| if *list { v[i] } else { v[0] })
-                .collect();
+            let args = item_args(i);
             check_requires(contract, &args)?;
             total = total.wrapping_add(code.try_eval_bits(&args, bits)?) & mask;
         }
         core_args.push(total);
     }
-    check_requires(core, &core_args)?;
-    let result = proven(core)?.try_eval_bits(&core_args, bits)?;
+    let code = proven(core)?;
+    let answer = |args: &[u64]| -> Result<String, String> {
+        check_requires(core, args)?;
+        let result = code.try_eval_bits(args, bits)?;
+        Ok(display_result(&core.return_type, result, core.wide))
+    };
+    let result = if rule.each {
+        let totals = core_args.split_off(core_args.len() - rule.items.len());
+        let answers = (0..n)
+            .map(|i| answer(&[item_args(i), vec![n as u64], totals.clone()].concat()))
+            .collect::<Result<Vec<_>, _>>()?;
+        format!("[{}]", answers.join(","))
+    } else {
+        answer(&core_args)?
+    };
     println!("contract: {}", rule.name);
     println!("proof_result: VERIFIED");
     println!("verified: true");
-    println!(
-        "result: {}",
-        display_result(&core.return_type, result, core.wide)
-    );
+    println!("result: {result}");
     Ok(())
 }
 

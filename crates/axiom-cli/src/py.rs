@@ -301,24 +301,35 @@ fn any_length_wrapper(core: &Contract, rule: &axiom_parser::ListRule) -> String 
             item_args.join(", ")
         );
     }
-    let mut core_args: Vec<String> = rule
-        .params
-        .iter()
-        .zip(&names)
-        .filter(|((_, list), _)| !*list)
-        .map(|(_, name)| name.clone())
-        .collect();
+    let mut core_args: Vec<String> = if rule.each {
+        item_args.clone()
+    } else {
+        rule.params
+            .iter()
+            .zip(&names)
+            .filter(|((_, list), _)| !*list)
+            .map(|(_, name)| name.clone())
+            .collect()
+    };
     core_args.push("_n".into());
     core_args.extend((1..=rule.items.len()).map(|k| format!("sum{k}")));
+    if !body.is_empty() {
+        body = format!("    for _i in range(_n):\n{body}");
+    }
+    let call = format!("{}({})", ident(&core.name), core_args.join(", "));
+    let tail = if rule.each {
+        format!("[{call} for _i in range(_n)]")
+    } else {
+        call
+    };
     format!(
-        "def {}({}):\n{checks}    _n = len({})\n    if _n > {}:\n        _fail(\"{}: input violates a requires clause\")\n{sums}    for _i in range(_n):\n{body}    return {}({})\n",
+        "def {}({}):\n{checks}    _n = len({})\n    if {}_n > {}:\n        _fail(\"{}: input violates a requires clause\")\n{sums}{body}    return {tail}\n",
         ident(&rule.name),
         names.join(", "),
         names[first],
+        crate::rs::too_few(rule, "_n", "or"),
         rule.max,
         rule.name,
-        ident(&core.name),
-        core_args.join(", ")
     )
 }
 

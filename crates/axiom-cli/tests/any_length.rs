@@ -4,6 +4,7 @@
 //! past their `need` lines. Uses `$GO` when set, else `go` on the PATH.
 
 use std::{
+    collections::HashMap,
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -111,20 +112,24 @@ impl Compiled {
 }
 
 /// The answer a caller should get, or `ERR`.
-fn expected(module: &[Contract], core: &Contract, rule: &ListRule, values: &[Vec<i128>]) -> String {
-    let compiled = |name: &str| Compiled::new(module.iter().find(|c| c.name == name).unwrap());
+fn expected(
+    compiled: &HashMap<String, Compiled>,
+    core: &Contract,
+    rule: &ListRule,
+    values: &[Vec<i128>],
+) -> String {
     let bits = if core.wide { 64 } else { 32 };
     let n = values
         .iter()
         .zip(&rule.params)
         .find(|(_, (_, list))| *list)
         .map_or(0, |(v, _)| v.len());
-    if n as u64 > rule.max {
+    if (n as u64) < rule.least || n as u64 > rule.max {
         return "ERR".into();
     }
     let mut sums = Vec::new();
     for item in &rule.items {
-        let contract = compiled(item);
+        let contract = &compiled[item];
         let mut total = 0u64;
         for i in 0..n {
             let args: Vec<u64> = values
@@ -139,6 +144,30 @@ fn expected(module: &[Contract], core: &Contract, rule: &ListRule, values: &[Vec
         }
         sums.push(total);
     }
+    let show = |v: u64| match (&core.return_type, bits) {
+        (Type::I32, 32) => (v as u32 as i32).to_string(),
+        (Type::I32, _) => (v as i64).to_string(),
+        _ => v.to_string(),
+    };
+    let core = &compiled[&core.name];
+    if rule.each {
+        // A list answer, shown as `1,2,3`: the core once per item.
+        let mut answers = Vec::new();
+        for i in 0..n {
+            let mut args: Vec<u64> = values
+                .iter()
+                .zip(&rule.params)
+                .map(|(v, (_, list))| word(if *list { v[i] } else { v[0] }, bits))
+                .collect();
+            args.push(n as u64);
+            args.extend(&sums);
+            let Some(v) = core.eval(&args) else {
+                return "ERR".into();
+            };
+            answers.push(show(v));
+        }
+        return answers.join(",");
+    }
     let mut args: Vec<u64> = values
         .iter()
         .zip(&rule.params)
@@ -147,19 +176,18 @@ fn expected(module: &[Contract], core: &Contract, rule: &ListRule, values: &[Vec
         .collect();
     args.push(n as u64);
     args.extend(sums);
-    match Compiled::new(core).eval(&args) {
-        None => "ERR".into(),
-        Some(v) => match (&core.return_type, bits) {
-            (Type::I32, 32) => (v as u32 as i32).to_string(),
-            (Type::I32, _) => (v as i64).to_string(),
-            _ => v.to_string(),
-        },
-    }
+    core.eval(&args).map_or("ERR".into(), show)
 }
 
 /// `name [1,2] 7` lines, and the answers expected for them.
 fn cases() -> (String, Vec<String>) {
     let module = parse_module(&example()).unwrap();
+    // Synthesis is the slow part: once per rule, not once per case.
+    let compiled: HashMap<String, Compiled> = module
+        .contracts
+        .iter()
+        .map(|c| (c.name.clone(), Compiled::new(c)))
+        .collect();
     let mut seed = 5u64;
     let mut input = String::new();
     let mut answers = Vec::new();
@@ -173,7 +201,12 @@ fn cases() -> (String, Vec<String>) {
                 2 => rule.max as usize + 1,
                 _ => (next(&mut seed) % 12) as usize,
             };
+            // Every few cases, items small enough for every `need` line.
+            let small = case % 4 == 3;
             let value = |seed: &mut u64| -> i128 {
+                if small {
+                    return i128::from(1 + next(seed) % 100);
+                }
                 let v = match next(seed) % 5 {
                     0 => next(seed) % 2_000_000,
                     1 => next(seed) % 1_100_000_000_000,
@@ -208,11 +241,12 @@ fn cases() -> (String, Vec<String>) {
                 })
                 .collect();
             input += &format!("{} {}\n", rule.name, shown.join(" "));
-            answers.push(expected(&module.contracts, core, rule, &values));
+            answers.push(expected(&compiled, core, rule, &values));
         }
     }
     assert!(answers.iter().any(|a| a == "ERR"));
     assert!(answers.iter().any(|a| a.starts_with('-')));
+    assert!(answers.iter().any(|a| a.contains(',')));
     (input, answers)
 }
 
@@ -253,7 +287,8 @@ for line in sys.stdin:
     name, *args = line.split()
     parsed = [[int(v) for v in a[1:-1].split(",") if v] if a.startswith("[") else int(a) for a in args]
     try:
-        print(getattr(c, name)(*parsed))
+        r = getattr(c, name)(*parsed)
+        print(",".join(map(str, r)) if isinstance(r, list) else r)
     except (c.AxiomError, TypeError):
         print("ERR")
 "#;
@@ -270,11 +305,12 @@ fn python_matches_the_evaluator() {
     );
 }
 
-/// Per rule: its typed call, built from each input token `f[k]`.
+/// Per rule: its typed call, built from each input token `f[k]`, and
+/// whether it answers with a list.
 fn calls(
     convert: impl Fn(&str, bool, usize) -> String,
     name: impl Fn(&str) -> String,
-) -> Vec<(String, String)> {
+) -> Vec<(String, String, bool)> {
     let module = parse_module(&example()).unwrap();
     module
         .contracts
@@ -296,6 +332,7 @@ fn calls(
             (
                 r.name.clone(),
                 format!("{}({})", name(&r.name), args.join(", ")),
+                r.each,
             )
         })
         .collect()
@@ -316,7 +353,14 @@ fn rust_matches_the_evaluator() {
         |n| n.to_string(),
     )
     .into_iter()
-    .map(|(name, call)| format!("            \"{name}\" => show({call}),\n"))
+    .map(|(name, call, each)| {
+        let call = if each {
+            format!("{call}.map(|v| v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(\",\"))")
+        } else {
+            call
+        };
+        format!("            \"{name}\" => show({call}),\n")
+    })
     .collect();
     let main = format!(
         "mod contracts;\nuse contracts::*;\nuse std::io::BufRead;\nfn show<T: std::fmt::Display>(r: Result<T, AxiomError>) {{\n    match r {{ Ok(v) => println!(\"{{v}}\"), Err(_) => println!(\"ERR\") }}\n}}\nfn main() {{\n    for line in std::io::stdin().lock().lines() {{\n        let line = line.unwrap();\n        let f: Vec<&str> = line.split(' ').collect();\n        match f[0] {{\n{arms}            _ => unreachable!(),\n        }}\n    }}\n}}\n"
@@ -366,10 +410,13 @@ fn go_matches_the_evaluator() {
         },
     )
     .into_iter()
-    .map(|(name, call)| format!("\t\tcase \"{name}\":\n\t\t\tshow({call})\n"))
+    .map(|(name, call, each)| {
+        let show = if each { "showList" } else { "show" };
+        format!("\t\tcase \"{name}\":\n\t\t\t{show}({call})\n")
+    })
     .collect();
     let main = format!(
-        "package main\n\nimport (\n\t\"bufio\"\n\t\"fmt\"\n\t\"os\"\n\t\"strconv\"\n\t\"strings\"\n\t\"t/contracts\"\n)\n\nfunc num(s string) int64 {{\n\tif v, err := strconv.ParseInt(s, 10, 64); err == nil {{\n\t\treturn v\n\t}}\n\tv, _ := strconv.ParseUint(s, 10, 64)\n\treturn int64(v)\n}}\n\nfunc nums[T int32 | int64 | uint32 | uint64](s string) []T {{\n\tout := []T{{}}\n\tfor _, v := range strings.Split(strings.Trim(s, \"[]\"), \",\") {{\n\t\tif v != \"\" {{\n\t\t\tout = append(out, T(num(v)))\n\t\t}}\n\t}}\n\treturn out\n}}\n\nfunc show[T any](r T, err error) {{\n\tif err != nil {{\n\t\tfmt.Println(\"ERR\")\n\t}} else {{\n\t\tfmt.Println(r)\n\t}}\n}}\n\nfunc main() {{\n\tin := bufio.NewScanner(os.Stdin)\n\tin.Buffer(make([]byte, 1<<20), 1<<26)\n\tfor in.Scan() {{\n\t\tf := strings.Fields(in.Text())\n\t\tswitch f[0] {{\n{cases}\t\t}}\n\t}}\n}}\n"
+        "package main\n\nimport (\n\t\"bufio\"\n\t\"fmt\"\n\t\"os\"\n\t\"strconv\"\n\t\"strings\"\n\t\"t/contracts\"\n)\n\nfunc num(s string) int64 {{\n\tif v, err := strconv.ParseInt(s, 10, 64); err == nil {{\n\t\treturn v\n\t}}\n\tv, _ := strconv.ParseUint(s, 10, 64)\n\treturn int64(v)\n}}\n\nfunc nums[T int32 | int64 | uint32 | uint64](s string) []T {{\n\tout := []T{{}}\n\tfor _, v := range strings.Split(strings.Trim(s, \"[]\"), \",\") {{\n\t\tif v != \"\" {{\n\t\t\tout = append(out, T(num(v)))\n\t\t}}\n\t}}\n\treturn out\n}}\n\nfunc show[T any](r T, err error) {{\n\tif err != nil {{\n\t\tfmt.Println(\"ERR\")\n\t}} else {{\n\t\tfmt.Println(r)\n\t}}\n}}\n\nfunc showList[T any](r []T, err error) {{\n\tif err != nil {{\n\t\tfmt.Println(\"ERR\")\n\t}} else {{\n\t\tfmt.Println(strings.ReplaceAll(strings.Trim(fmt.Sprint(r), \"[]\"), \" \", \",\"))\n\t}}\n}}\n\nfunc main() {{\n\tin := bufio.NewScanner(os.Stdin)\n\tin.Buffer(make([]byte, 1<<20), 1<<26)\n\tfor in.Scan() {{\n\t\tf := strings.Fields(in.Text())\n\t\tswitch f[0] {{\n{cases}\t\t}}\n\t}}\n}}\n"
     );
     fs::create_dir_all(dir.join("app/contracts")).unwrap();
     fs::copy(
@@ -406,4 +453,23 @@ fn axiom_run_adds_up_a_list() {
     assert!(run("[100000,100000,100000]").contains("result: 200000"));
     assert!(run("[]").contains("result: 0"));
     assert!(run("[100001]").contains("input violates a requires clause"));
+}
+
+#[test]
+fn axiom_run_answers_with_a_list() {
+    let dir = std::env::temp_dir().join(format!("axiom-any-each-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let source = example();
+    let share = &source[source.find("share(").unwrap()..];
+    fs::write(dir.join("share.ax"), share).unwrap();
+    let run = |list: &str| {
+        let out = Command::new(env!("CARGO_BIN_EXE_axiom"))
+            .args(["run", "share.ax", "--", list, "1000"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr)
+    };
+    assert!(run("[1,2,1]").contains("result: [250,500,250]"));
+    assert!(run("[]").contains("input violates a requires clause"));
 }

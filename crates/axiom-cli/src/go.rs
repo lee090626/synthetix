@@ -391,24 +391,37 @@ fn any_length_wrapper(
             k + 1
         );
     }
-    let mut core_args: Vec<String> = rule
-        .params
-        .iter()
-        .zip(&names)
-        .filter(|((_, list), _)| !*list)
-        .map(|(_, name)| name.clone())
-        .collect();
+    let mut core_args: Vec<String> = if rule.each {
+        item_args.clone()
+    } else {
+        rule.params
+            .iter()
+            .zip(&names)
+            .filter(|((_, list), _)| !*list)
+            .map(|(_, name)| name.clone())
+            .collect()
+    };
     core_args.push(format!("{ty}(n)"));
     core_args.extend((1..=rule.items.len()).map(|k| format!("sum{k}")));
+    let call = format!("{}({})", exported(&core.name), core_args.join(", "));
+    let (ret, tail) = if rule.each {
+        (
+            format!("[]{ret}"),
+            format!(
+                "\tresult = make([]{ret}, n)\n\tfor i := 0; i < n; i++ {{\n\t\tif result[i], err = {call}; err != nil {{\n\t\t\treturn nil, err\n\t\t}}\n\t}}\n\treturn result, nil\n"
+            ),
+        )
+    } else {
+        (ret.to_string(), format!("\treturn {call}\n"))
+    };
     Ok(format!(
-        "// {go_name} is the proven rule `{}` over lists of any length.\nfunc {go_name}({}) (result {ret}, err error) {{\n{checks}\tn := len({})\n\tif n > {} {{\n\t\treturn result, &AxiomError{{\"{}: input violates a requires clause\"}}\n\t}}\n{sums}\tfor i := 0; i < n; i++ {{\n{body}\t}}\n\treturn {}({})\n}}\n",
+        "// {go_name} is the proven rule `{}` over lists of any length.\nfunc {go_name}({}) (result {ret}, err error) {{\n{checks}\tn := len({})\n\tif {}n > {} {{\n\t\treturn result, &AxiomError{{\"{}: input violates a requires clause\"}}\n\t}}\n{sums}\tfor i := 0; i < n; i++ {{\n{body}\t}}\n{tail}}}\n",
         rule.name,
         params.join(", "),
         names[first],
+        crate::rs::too_few(rule, "n", "||"),
         rule.max,
         rule.name,
-        exported(&core.name),
-        core_args.join(", ")
     ))
 }
 

@@ -386,29 +386,37 @@ fn any_length_wrapper(
         sums += &format!("  let sum{} = {zero};\n", k + 1);
         loop_body += &format!("    sum{} += {item}({});\n", k + 1, item_args.join(", "));
     }
-    let mut core_args: Vec<String> = rule
-        .params
-        .iter()
-        .enumerate()
-        .filter(|(_, (_, list))| !*list)
-        .map(|(i, _)| format!("p{i}"))
-        .collect();
+    let mut core_args: Vec<String> = if rule.each {
+        item_args.clone()
+    } else {
+        rule.params
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, list))| !*list)
+            .map(|(i, _)| format!("p{i}"))
+            .collect()
+    };
     core_args.push(if wide { "BigInt(n)".into() } else { "n".into() });
     core_args.extend((1..=rule.items.len()).map(|k| format!("sum{k}")));
+    let call = format!("{}({})", core.name, core_args.join(", "));
+    let ret = ts_type(&core.return_type, wide)?;
+    let (ret, tail) = if rule.each {
+        (
+            format!("{ret}[]"),
+            format!("Array.from({{ length: n }}, (_, i) => {call})"),
+        )
+    } else {
+        (ret.to_string(), call)
+    };
     let name = &rule.name;
     Ok((
         format!(
-            "export function {name}({}) {{\n{checks}  const n = p{first}.length;\n  if (n > {max}) throw new RangeError(\"{name}: input violates a requires clause\");\n{sums}  for (let i = 0; i < n; i++) {{\n{loop_body}  }}\n  return {}({});\n}}\n",
+            "export function {name}({}) {{\n{checks}  const n = p{first}.length;\n  if ({few}n > {max}) throw new RangeError(\"{name}: input violates a requires clause\");\n{sums}  for (let i = 0; i < n; i++) {{\n{loop_body}  }}\n  return {tail};\n}}\n",
             names.join(", "),
-            core.name,
-            core_args.join(", "),
             max = rule.max,
+            few = crate::rs::too_few(rule, "n", "||"),
         ),
-        format!(
-            "export function {name}({}): {};\n",
-            dts.join(", "),
-            ts_type(&core.return_type, wide)?
-        ),
+        format!("export function {name}({}): {ret};\n", dts.join(", ")),
     ))
 }
 

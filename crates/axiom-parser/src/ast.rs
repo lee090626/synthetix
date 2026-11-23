@@ -127,6 +127,11 @@ pub struct ListRule {
     pub items: Vec<String>,
     /// The `need n <= max` limit on the length.
     pub max: u64,
+    /// The `need n >= least` limit on the length (0 when there is none).
+    pub least: u64,
+    /// The answer is a list: the core takes every input (one item of each
+    /// list) before the length and sums, and runs once per item.
+    pub each: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

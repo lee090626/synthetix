@@ -217,6 +217,28 @@ fn split(
     let mut item_needs: Vec<String> = Vec::new();
     let mut core = vec![String::new(); block.len()];
     let mut limit: Option<(usize, u64)> = None;
+    // `need n >= k`: the sums' plain ranges start at k items, not 0.
+    let least = block
+        .iter()
+        .filter_map(|raw| {
+            let (name, k) = strip_comment(raw)
+                .trim()
+                .strip_prefix("need ")?
+                .split_once(">=")?;
+            (name.trim() == length).then(|| k.trim().parse::<u64>().ok())?
+        })
+        .max()
+        .unwrap_or(0);
+    // An answer line using a list item outside `sum`/`count` makes the answer
+    // a list: the core then runs once per item, with the items as inputs.
+    let each = block.iter().skip(1).any(|raw| {
+        let text = strip_comment(raw).trim();
+        let mut blank = |_: &str| Ok(String::new());
+        text.contains("->")
+            && replace_calls(text, "sum", &mut blank)
+                .and_then(|t| replace_calls(&t, "count", &mut blank))
+                .is_ok_and(|t| lists.iter().any(|l| mentions(&t, l)))
+    });
 
     for (offset, raw) in block.iter().enumerate().skip(1) {
         let line_no = first_line + offset;
@@ -275,12 +297,14 @@ fn split(
             }
             if has_list {
                 item_needs.push(trimmed.to_string());
-                continue;
+                if !each {
+                    continue;
+                }
             }
             if !core_like {
                 item_needs.push(trimmed.to_string());
             }
-        } else if has_list {
+        } else if has_list && !each {
             return Err(format!(
                 "line {line_no}: use a list of any length only inside `sum(...)` or `count(...)`"
             ));
@@ -293,7 +317,7 @@ fn split(
             lists[0]
         ));
     };
-    if sums.is_empty() && !block.iter().any(|l| l.contains("count(")) {
+    if !each && sums.is_empty() && !block.iter().any(|l| l.contains("count(")) {
         return Err(format!(
             "line {first_line}: use the lists with `sum(...)` or `count(...)`"
         ));
@@ -341,8 +365,8 @@ fn split(
         })?;
         for (k, (contract, inner)) in module.contracts.iter().zip(&sums).enumerate() {
             let (lo, hi) = check_ranges(contract, &[])?;
-            let (total_lo, total_hi) =
-                ((i128::from(max) * lo).min(0), (i128::from(max) * hi).max(0));
+            let (fewest, most) = (i128::from(least), i128::from(max));
+            let (total_lo, total_hi) = ((most * lo).min(fewest * lo), (most * hi).max(fewest * hi));
             if total_lo < low || total_hi > high {
                 let reach = if total_hi > high { total_hi } else { total_lo };
                 return Err(format!(
@@ -365,7 +389,10 @@ fn split(
         raw[..raw.len() - raw.trim_start().len()].to_string()
     };
     core[limit_offset] = format!("{indent}need {length} >= 0 and {length} <= {max}{bounds}");
-    let mut core_params: Vec<String> = scalars.iter().map(|s| s.to_string()).collect();
+    let mut core_params: Vec<String> = if each { &all } else { &scalars }
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     core_params.push(length.to_string());
     core_params.extend((1..=sums.len()).map(|k| format!("sum{k}")));
     core[0] = format!("{}__core({}){suffix}", head.name, core_params.join(", "));
@@ -377,6 +404,8 @@ fn split(
             params: head.params.clone(),
             items,
             max,
+            least,
+            each,
         },
     ))
 }
@@ -414,6 +443,22 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_using_items_is_a_list() {
+        let module = parse_module(
+            "cut(prices[n], rate)\n  need n <= 10\n  need prices <= 100\n  need rate <= 100\n  always -> prices * rate / 100 + sum(prices)\n",
+        )
+        .unwrap();
+        let core = module
+            .contracts
+            .iter()
+            .find(|c| c.name == "cut__core")
+            .unwrap();
+        let names: Vec<&str> = core.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["prices", "rate", "n", "sum1"]);
+        assert!(core.list.as_ref().unwrap().each);
+    }
+
+    #[test]
     fn explains_what_a_list_rule_needs() {
         assert!(
             error("cart(prices[n])\n  need prices <= 100\n  always -> sum(prices)\n")
@@ -424,7 +469,7 @@ mod tests {
                 .contains("can reach 10000000000 with 100000 items")
         );
         assert!(
-            error("cart(prices[n])\n  need n <= 10\n  always -> prices + 1\n")
+            error("cart(prices[n])\n  need n <= 10\n  always -> sum(prices)\n  promise answer <= prices\n")
                 .contains("only inside `sum(...)` or `count(...)`")
         );
         assert!(
