@@ -114,3 +114,30 @@ theorem min_le_max (x : Int) (xs : List Int) : xs.foldl min x ≤ xs.foldl max x
   have := min_le x xs x (by simp)
   have := max_ge x xs x (by simp)
   omega
+
+/-! Sums of `+ - *` over items (issue #192): `sum(paid - share)` is
+`sum(paid) - sum(share)`. Machine words keep `+ - *` modulo `m` (2^32 or
+2^64), so this holds for the numbers the code computes, overflow or not. -/
+
+theorem sum_add {α} (f g : α → Int) : ∀ xs : List α,
+    (xs.map fun x => f x + g x).sum = (xs.map f).sum + (xs.map g).sum
+  | [] => by simp
+  | x :: xs => by simp only [List.map_cons, List.sum_cons, sum_add f g xs]; omega
+
+theorem sum_mul {α} (c : Int) (f : α → Int) : ∀ xs : List α,
+    (xs.map fun x => c * f x).sum = c * (xs.map f).sum
+  | [] => by simp
+  | x :: xs => by simp only [List.map_cons, List.sum_cons, sum_mul c f xs, Int.mul_add]
+
+theorem sum_const {α} (d : Int) (xs : List α) : (xs.map fun _ => d).sum = xs.length * d := by
+  induction xs with
+  | nil => simp
+  | cons x xs ih => simp only [List.map_cons, List.sum_cons, ih, List.length_cons]; push_cast; rw [Int.add_mul, Int.one_mul]; omega
+
+/-- Items equal modulo `m` give sums equal modulo `m`. -/
+theorem sum_emod {α} (m : Int) (v w : α → Int) (h : ∀ x, v x % m = w x % m) :
+    ∀ xs : List α, (xs.map v).sum % m = (xs.map w).sum % m
+  | [] => by simp
+  | x :: xs => by
+    simp only [List.map_cons, List.sum_cons]
+    rw [Int.add_emod, h x, sum_emod m v w h xs, ← Int.add_emod]

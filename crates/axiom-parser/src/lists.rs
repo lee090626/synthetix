@@ -18,7 +18,7 @@
 //! `max_bounds`).
 //! Emitted code runs that loop, then calls the core.
 
-use crate::ast::{Fold, ListRule};
+use crate::ast::{BinaryOp, Fold, ListRule, SpecExpr};
 use crate::simple::{check_ranges, strip_comment};
 
 /// The rewritten source (same lines, item rules appended) and, for each
@@ -154,6 +154,49 @@ fn folds_a_list(inner: &str, lists: &[&str]) -> bool {
         c == ',' && depth == 0
     });
     !top_comma && lists.iter().any(|l| mentions(inner, l))
+}
+
+/// One term of [`linear_terms`]: list (or `None`), coefficient, subtracted.
+type Term = (Option<String>, String, bool);
+
+/// An item's answer as `+ - *` of list items, inputs and numbers, with at
+/// most one list item per product. Coefficients use only `*`, so they stay
+/// defined for unsigned numbers. `None` for a `/`, or two list items
+/// multiplied.
+fn linear_terms(e: &SpecExpr, lists: &[&str]) -> Option<Vec<Term>> {
+    Some(match e {
+        SpecExpr::Number(v) => vec![(None, v.to_string(), false)],
+        SpecExpr::Ident(x) if lists.contains(&x.as_str()) => {
+            vec![(Some(x.clone()), "1".into(), false)]
+        }
+        SpecExpr::Ident(x) => vec![(None, x.clone(), false)],
+        SpecExpr::Binary(BinaryOp::AddWrap, a, b) => {
+            [linear_terms(a, lists)?, linear_terms(b, lists)?].concat()
+        }
+        SpecExpr::Binary(BinaryOp::SubWrap | BinaryOp::SubChecked, a, b) => {
+            let mut terms = linear_terms(a, lists)?;
+            terms.extend(
+                linear_terms(b, lists)?
+                    .into_iter()
+                    .map(|(l, c, minus)| (l, c, !minus)),
+            );
+            terms
+        }
+        SpecExpr::Binary(BinaryOp::MulWrap, a, b) => {
+            let (a, b) = (linear_terms(a, lists)?, linear_terms(b, lists)?);
+            if a.iter().any(|t| t.0.is_some()) && b.iter().any(|t| t.0.is_some()) {
+                return None;
+            }
+            let mut terms = Vec::new();
+            for (la, ca, ma) in &a {
+                for (lb, cb, mb) in &b {
+                    terms.push((la.clone().or(lb.clone()), format!("{ca} * {cb}"), ma != mb));
+                }
+            }
+            terms
+        }
+        _ => return None,
+    })
 }
 
 /// `n * v` written so a negative `v` parses.
@@ -366,6 +409,71 @@ fn split(
             "line {first_line}: use the lists with `sum(...)`, `min(...)`, `max(...)` or `count(...)`"
         ));
     }
+    let suffix = if head.suffix.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", head.suffix)
+    };
+    let all: Vec<&str> = head.params.iter().map(|(p, _)| p.as_str()).collect();
+    let needs: String = item_needs.iter().map(|n| format!("  {n}\n")).collect();
+    let item_rule = |name: &str, inner: &str| {
+        format!(
+            "\n{name}({}){suffix}\n{needs}  always -> {inner}\n",
+            all.join(", ")
+        )
+    };
+    let signed = head.suffix.contains("can be negative");
+    let wide = head.suffix.contains("with big numbers");
+    let (low, high) = match (signed, wide) {
+        (true, false) => (i128::from(i32::MIN), i128::from(i32::MAX)),
+        (false, false) => (0, i128::from(u32::MAX)),
+        (true, true) => (i128::from(i64::MIN), i128::from(i64::MAX)),
+        (false, true) => (0, i128::from(u64::MAX)),
+    };
+    // The lowest and highest sum of `max` (or `least`) items in `lo..hi`.
+    let total = |lo: i128, hi: i128| {
+        let (fewest, most) = (i128::from(least), i128::from(max));
+        ((most * lo).min(fewest * lo), (most * hi).max(fewest * hi))
+    };
+
+    // `sum(paid - 2 * share)` is `sum(paid) - 2 * sum(share)` (`sum_add`,
+    // `sum_mul`, `sum_const`, kept modulo the word size by `sum_emod`): the
+    // core may assume it, with `sum(paid)` added as an input when missing
+    // and in range.
+    let mut linear: Vec<(usize, Vec<Term>)> = Vec::new();
+    for (k, (fold, inner)) in sums.iter().enumerate() {
+        if *fold != Fold::Sum || lists.contains(&inner.as_str()) {
+            continue;
+        }
+        let Ok(module) = crate::parse_module(&item_rule("probe", inner)) else {
+            continue;
+        };
+        if let Some(SpecExpr::Binary(BinaryOp::Eq, _, answer)) = module.contracts[0].ensures.first()
+            && let Some(terms) = linear_terms(answer, &lists)
+        {
+            linear.push((k, terms));
+        }
+    }
+    for list in &lists {
+        let used = linear
+            .iter()
+            .any(|(_, t)| t.iter().any(|(l, _, _)| l.as_deref() == Some(*list)));
+        let present = sums.iter().any(|(f, i)| *f == Fold::Sum && i == list);
+        if !used || present {
+            continue;
+        }
+        let fits = crate::parse_module(&item_rule("probe", list))
+            .ok()
+            .and_then(|m| check_ranges(&m.contracts[0], &[]).ok())
+            .is_some_and(|(lo, hi)| {
+                let (a, b) = total(lo, hi);
+                a >= low && b <= high
+            });
+        if fits {
+            sums.push((Fold::Sum, list.to_string()));
+        }
+    }
+
     let taken: Vec<String> = head.params.iter().map(|(p, _)| p.clone()).collect();
     let results: Vec<String> = sums
         .iter()
@@ -379,31 +487,13 @@ fn split(
     }
 
     // Item rules, then their answer ranges.
-    let suffix = if head.suffix.is_empty() {
-        String::new()
-    } else {
-        format!(" {}", head.suffix)
-    };
-    let all: Vec<&str> = head.params.iter().map(|(p, _)| p.as_str()).collect();
-    let needs: String = item_needs.iter().map(|n| format!("  {n}\n")).collect();
     let items: Vec<String> = (1..=sums.len())
         .map(|k| format!("{}__item{k}", head.name))
         .collect();
     let mut item_source = String::new();
     for (name, (_, inner)) in items.iter().zip(&sums) {
-        item_source += &format!(
-            "\n{name}({}){suffix}\n{needs}  always -> {inner}\n",
-            all.join(", ")
-        );
+        item_source += &item_rule(name, inner);
     }
-    let signed = head.suffix.contains("can be negative");
-    let wide = head.suffix.contains("with big numbers");
-    let (low, high) = match (signed, wide) {
-        (true, false) => (i128::from(i32::MIN), i128::from(i32::MAX)),
-        (false, false) => (0, i128::from(u32::MAX)),
-        (true, true) => (i128::from(i64::MIN), i128::from(i64::MAX)),
-        (false, true) => (0, i128::from(u64::MAX)),
-    };
     let mut bounds = String::new();
     if !sums.is_empty() {
         let module = crate::parse_module(&item_source).map_err(|error| {
@@ -433,8 +523,7 @@ fn split(
                 }
                 continue;
             }
-            let (fewest, most) = (i128::from(least), i128::from(max));
-            let (total_lo, total_hi) = ((most * lo).min(fewest * lo), (most * hi).max(fewest * hi));
+            let (total_lo, total_hi) = total(lo, hi);
             if total_lo < low || total_hi > high {
                 let reach = if total_hi > high { total_hi } else { total_lo };
                 return Err(format!(
@@ -450,6 +539,27 @@ fn split(
                 times(length, hi)
             );
         }
+    }
+    // Subtracted terms go to the left: `sum1 + sum3 is sum2`.
+    'facts: for (k, terms) in &linear {
+        let mut sides = [vec![results[*k].clone()], Vec::new()];
+        for (list, c, minus) in terms {
+            let term = match list {
+                None => format!("{length} * {c}"),
+                Some(list) => {
+                    let Some(at) = sums.iter().position(|(f, i)| *f == Fold::Sum && i == list)
+                    else {
+                        continue 'facts;
+                    };
+                    format!("{c} * {}", results[at])
+                }
+            };
+            sides[usize::from(!minus)].push(term);
+        }
+        if sides[1].is_empty() {
+            sides[1].push("0".into());
+        }
+        bounds += &format!(" and {} is {}", sides[0].join(" + "), sides[1].join(" + "));
     }
     let indent = {
         let raw = &block[limit_offset];
@@ -545,6 +655,39 @@ mod tests {
             error("f(a[n])\n  need n <= 10\n  always -> max(a)\n")
                 .contains("needs at least one item; add `need n >= 1`")
         );
+    }
+
+    #[test]
+    fn a_sum_of_plus_minus_times_relates_to_the_lists_sums() {
+        let module = parse_module(
+            "net(prices[n], off[n], fee)\n  need n <= 100\n  need prices <= 1000\n  need off <= prices\n  need fee <= 10\n  always -> sum(2 * prices - off + fee)\n",
+        )
+        .unwrap();
+        let core = module
+            .contracts
+            .iter()
+            .find(|c| c.name == "net__core")
+            .unwrap();
+        let names: Vec<&str> = core.params.iter().map(|p| p.name.as_str()).collect();
+        // `sum(prices)` and `sum(off)` are added for the relation.
+        assert_eq!(names, ["fee", "n", "sum1", "sum2", "sum3"]);
+        let parsed = parse_module(
+            "f(sum1, sum2, sum3, n, fee)\n  need sum1 + 1 * sum3 is 2 * 1 * sum2 + n * fee\n  always -> 0\n",
+        )
+        .unwrap();
+        let fact = &parsed.contracts[0].requires[0];
+        assert!(format!("{:?}", core.requires).contains(&format!("{fact:?}")));
+        // `/` is not `+ - *`: no relation, no added sums.
+        let module = parse_module(
+            "half(prices[n])\n  need n <= 10\n  need prices <= 100\n  always -> sum(prices / 2)\n",
+        )
+        .unwrap();
+        let core = module
+            .contracts
+            .iter()
+            .find(|c| c.name == "half__core")
+            .unwrap();
+        assert_eq!(core.params.len(), 2);
     }
 
     #[test]

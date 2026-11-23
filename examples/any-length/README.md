@@ -10,6 +10,7 @@ Rules over lists with any number of items, up to a limit set by `need n <= ...`.
 | `spread` | The most expensive price minus the cheapest is never above 100000 |
 | `worst` | The smallest paid-minus-share in the group is at most 1000000 |
 | `above` | Each price minus the cheapest is never above that price (a list answer) |
+| `net` | Prices minus discounts add up to the prices' sum minus the discounts' sum |
 
 ```bash
 axiom check                     # prove every rule
