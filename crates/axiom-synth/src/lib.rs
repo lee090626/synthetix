@@ -303,65 +303,62 @@ fn search_with_options(
         return Ok(sample_error_result(error, checked));
     }
     let mut first_verified = None;
+    // Cost of the proven written answer: only cheaper candidates are searched.
+    let mut written_cost = None;
+    let mut written_is_first = false;
     let generation_limit = options
         .max_candidates
         .min(options.max_memory_bytes / (std::mem::size_of::<Expr>().saturating_mul(32).max(1)));
 
-    if (contract.return_type == Type::Bool
-        || contract.ensures.iter().any(contains_conditional_construct))
-        && let Some(candidate) = candidate_from_contract(contract)?
-    {
+    if let Some(candidate) = candidate_from_contract(contract)? {
         if let Some(metrics) = metrics.as_deref_mut() {
             metrics.generated_candidate_count += 1;
         }
-        let sample_eval_started = metrics.as_ref().is_some().then(Instant::now);
-        let matches_samples = cegis.matches(contract, &candidate, reusable_offsets);
-        if let (Some(metrics), Some(started)) = (metrics.as_deref_mut(), sample_eval_started) {
-            metrics.sample_evaluation_time_ns += started.elapsed().as_nanos();
+        // No sample filter: samples outside `requires` (a zero divisor) would
+        // reject an answer the proof accepts.
+        if let Some(metrics) = metrics.as_deref_mut() {
+            metrics.synthesis_iterations += 1;
         }
-        if matches_samples {
-            if let Some(metrics) = metrics.as_deref_mut() {
-                metrics.synthesis_iterations += 1;
+        match verify_for_search(contract, &candidate, metrics)? {
+            ProofResult::Verified => {
+                written_cost = Some(axiom_wasm::instruction_cost(&candidate));
+                written_is_first = true;
+                first_verified = Some(candidate);
             }
-            match verify_for_search(contract, &candidate, metrics)? {
-                ProofResult::Verified => first_verified = Some(candidate),
-                ProofResult::Counterexample(values) => {
-                    if let Some(metrics) = metrics.as_deref_mut() {
-                        metrics.counterexample_count += 1;
-                        metrics.rejected_candidate_count += 1;
-                        metrics.peak_sample_count =
-                            metrics.peak_sample_count.max(cegis.samples.len() + 1);
-                    }
-                    let sample_eval_started = metrics.as_ref().is_some().then(Instant::now);
-                    let observe = cegis.observe(
-                        contract,
-                        values.iter().map(|value| *value as u32).collect(),
-                        reusable_offsets,
-                        started,
-                        options.timeout,
-                    );
-                    if let (Some(metrics), Some(started)) =
-                        (metrics.as_deref_mut(), sample_eval_started)
-                    {
-                        metrics.sample_evaluation_time_ns += started.elapsed().as_nanos();
-                    }
-                    match observe {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            return Ok(SynthesisResult::ResourceLimit {
-                                candidates_checked: checked,
-                                limit: sample_limit,
-                            });
-                        }
-                        Err(error) => return Ok(sample_error_result(error, checked)),
-                    }
+            ProofResult::Counterexample(values) => {
+                if let Some(metrics) = metrics.as_deref_mut() {
+                    metrics.counterexample_count += 1;
+                    metrics.rejected_candidate_count += 1;
+                    metrics.peak_sample_count =
+                        metrics.peak_sample_count.max(cegis.samples.len() + 1);
                 }
-                ProofResult::SolverUnknown => {
-                    return Err("SOLVER_UNKNOWN: SMT solver returned unknown".to_string());
+                let sample_eval_started = metrics.as_ref().is_some().then(Instant::now);
+                let observe = cegis.observe(
+                    contract,
+                    values.iter().map(|value| *value as u32).collect(),
+                    reusable_offsets,
+                    started,
+                    options.timeout,
+                );
+                if let (Some(metrics), Some(started)) =
+                    (metrics.as_deref_mut(), sample_eval_started)
+                {
+                    metrics.sample_evaluation_time_ns += started.elapsed().as_nanos();
+                }
+                match observe {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Ok(SynthesisResult::ResourceLimit {
+                            candidates_checked: checked,
+                            limit: sample_limit,
+                        });
+                    }
+                    Err(error) => return Ok(sample_error_result(error, checked)),
                 }
             }
-        } else if let Some(metrics) = metrics.as_deref_mut() {
-            metrics.rejected_candidate_count += 1;
+            ProofResult::SolverUnknown => {
+                return Err("SOLVER_UNKNOWN: SMT solver returned unknown".to_string());
+            }
         }
     }
 
@@ -462,7 +459,12 @@ fn search_with_options(
         if let (Some(metrics), Some(started)) = (metrics.as_deref_mut(), sort_started) {
             metrics.candidate_sort_time_ns += started.elapsed().as_nanos();
         }
+
         for candidate in candidates {
+            // Sorted by cost: nothing after this beats the written answer.
+            if written_cost.is_some_and(|cost| axiom_wasm::instruction_cost(&candidate) > cost) {
+                break;
+            }
             if timed_out(started, options.timeout) {
                 if let Some(candidate) = &first_verified {
                     return Ok(SynthesisResult::Found {
@@ -505,7 +507,11 @@ fn search_with_options(
             }
             match verify_for_search(contract, &candidate, metrics)? {
                 ProofResult::Verified => {
-                    if let Some(first) = &first_verified {
+                    if std::mem::take(&mut written_is_first) {
+                        // At most the written answer's cost and found first: it
+                        // replaces it, as the search alone would have picked it.
+                        first_verified = Some(candidate);
+                    } else if let Some(first) = &first_verified {
                         if first != &candidate {
                             return Ok(SynthesisResult::Found {
                                 candidate: first.clone(),
@@ -1914,30 +1920,6 @@ fn eval_spec(
     }
 }
 
-fn contains_conditional_construct(expr: &SpecExpr) -> bool {
-    match expr {
-        SpecExpr::Let(_, _, _) | SpecExpr::If(_, _, _) | SpecExpr::For { .. } => true,
-        SpecExpr::Binary(_, lhs, rhs) => {
-            contains_conditional_construct(lhs) || contains_conditional_construct(rhs)
-        }
-        SpecExpr::Ident(_) | SpecExpr::Number(_) | SpecExpr::Bool(_) | SpecExpr::Text(_) => false,
-        SpecExpr::List(values) => values.iter().any(contains_conditional_construct),
-        SpecExpr::Record { fields, .. } => fields
-            .iter()
-            .any(|(_, value)| contains_conditional_construct(value)),
-        SpecExpr::Field(value, _) => contains_conditional_construct(value),
-        SpecExpr::Index(array, index) => {
-            contains_conditional_construct(array) || contains_conditional_construct(index)
-        }
-        SpecExpr::ArrayUpdate(array, index, value) => {
-            contains_conditional_construct(array)
-                || contains_conditional_construct(index)
-                || contains_conditional_construct(value)
-        }
-        SpecExpr::Call(_, args) => args.iter().any(contains_conditional_construct),
-    }
-}
-
 fn candidate_from_contract(contract: &Contract) -> Result<Option<Expr>, String> {
     for ensure in &contract.ensures {
         let SpecExpr::Binary(BinaryOp::Eq, lhs, rhs) = ensure else {
@@ -2761,7 +2743,7 @@ mod tests {
     #[test]
     fn reports_ambiguity_without_changing_the_found_state() {
         let contract =
-            parse("contract identity(value: u32) -> u32 { ensures result == value; }").unwrap();
+            parse("contract at_most(value: u32) -> u32 { ensures result <= value; }").unwrap();
 
         let result =
             synthesize_result_with_options(&contract, SynthesisOptions::default()).unwrap();
