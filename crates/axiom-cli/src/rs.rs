@@ -268,14 +268,23 @@ fn any_length_wrapper(core: &Contract, rule: &axiom_parser::ListRule) -> Result<
         .collect();
     let mut sums = String::new();
     let mut body = String::new();
-    for (k, item) in rule.items.iter().enumerate() {
+    for (k, (item, fold)) in rule.items.iter().zip(&rule.folds).enumerate() {
         sums += &format!("    let mut sum{}: {ty} = 0;\n", k + 1);
-        body += &format!(
-            "        sum{0} = sum{0}.wrapping_add({1}({2})?);\n",
-            k + 1,
-            ident(item)?,
-            item_args.join(", ")
-        );
+        let call = format!("{}({})?", ident(item)?, item_args.join(", "));
+        body += &match fold {
+            axiom_parser::Fold::Sum => {
+                format!("        sum{0} = sum{0}.wrapping_add({call});\n", k + 1)
+            }
+            axiom_parser::Fold::Min | axiom_parser::Fold::Max => format!(
+                "        let v = {call};\n        if i == 0 || v {} sum{} {{\n            sum{1} = v;\n        }}\n",
+                if *fold == axiom_parser::Fold::Min {
+                    "<"
+                } else {
+                    ">"
+                },
+                k + 1
+            ),
+        };
     }
     let mut core_args: Vec<String> = if rule.each {
         item_args.clone()

@@ -613,7 +613,13 @@ fn run_any_length(
         .map(|(v, _)| v[0])
         .collect();
     core_args.push(n as u64);
-    for item in &rule.items {
+    // Signed items compare as signed numbers for `min`/`max`.
+    let shift = 64 - bits;
+    let key = |v: u64| match core.params[0].ty {
+        axiom_parser::Type::I32 => ((v << shift) as i64) >> shift,
+        _ => v as i64 ^ i64::MIN,
+    };
+    for (item, fold) in rule.items.iter().zip(&rule.folds) {
         let contract = all
             .iter()
             .find(|c| &c.name == item)
@@ -623,7 +629,13 @@ fn run_any_length(
         for i in 0..n {
             let args = item_args(i);
             check_requires(contract, &args)?;
-            total = total.wrapping_add(code.try_eval_bits(&args, bits)?) & mask;
+            let v = code.try_eval_bits(&args, bits)?;
+            total = match fold {
+                axiom_parser::Fold::Sum => total.wrapping_add(v) & mask,
+                axiom_parser::Fold::Min if i > 0 && key(total) <= key(v) => total,
+                axiom_parser::Fold::Max if i > 0 && key(total) >= key(v) => total,
+                _ => v,
+            };
         }
         core_args.push(total);
     }

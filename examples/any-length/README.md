@@ -7,6 +7,9 @@ Rules over lists with any number of items, up to a limit set by `need n <= ...`.
 | `cart` | The total of up to 1000 prices, capped at 200000, is never above the sum |
 | `balance` | What a group of up to 50 paid minus their shares stays within ±n × 1000000 |
 | `order` | Prices (big numbers) plus a fee per item is never below the prices' sum |
+| `spread` | The most expensive price minus the cheapest is never above 100000 |
+| `worst` | The smallest paid-minus-share in the group is at most 1000000 |
+| `above` | Each price minus the cheapest is never above that price (a list answer) |
 
 ```bash
 axiom check                     # prove every rule

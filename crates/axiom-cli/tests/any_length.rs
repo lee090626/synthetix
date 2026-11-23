@@ -11,7 +11,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use axiom_parser::{Contract, ListRule, Type, parse_module};
+use axiom_parser::{Contract, Fold, ListRule, Type, parse_module};
 
 fn example() -> String {
     fs::read_to_string(
@@ -127,8 +127,16 @@ fn expected(
     if (n as u64) < rule.least || n as u64 > rule.max {
         return "ERR".into();
     }
+    let signed = |v: u64| match core.return_type {
+        Type::I32 => i128::from(if bits == 32 {
+            v as u32 as i32 as i64
+        } else {
+            v as i64
+        }),
+        _ => i128::from(v),
+    };
     let mut sums = Vec::new();
-    for item in &rule.items {
+    for (item, fold) in rule.items.iter().zip(&rule.folds) {
         let contract = &compiled[item];
         let mut total = 0u64;
         for i in 0..n {
@@ -140,7 +148,12 @@ fn expected(
             let Some(value) = contract.eval(&args) else {
                 return "ERR".into();
             };
-            total = word(i128::from(total) + i128::from(value), bits);
+            total = match fold {
+                Fold::Sum => word(i128::from(total) + i128::from(value), bits),
+                Fold::Min if i > 0 && signed(total) <= signed(value) => total,
+                Fold::Max if i > 0 && signed(total) >= signed(value) => total,
+                _ => value,
+            };
         }
         sums.push(total);
     }
@@ -460,7 +473,10 @@ fn axiom_run_answers_with_a_list() {
     let dir = std::env::temp_dir().join(format!("axiom-any-each-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     let source = example();
-    let share = &source[source.find("share(").unwrap()..];
+    let share = source[source.find("share(").unwrap()..]
+        .split("\n\n")
+        .next()
+        .unwrap();
     fs::write(dir.join("share.ax"), share).unwrap();
     let run = |list: &str| {
         let out = Command::new(env!("CARGO_BIN_EXE_axiom"))

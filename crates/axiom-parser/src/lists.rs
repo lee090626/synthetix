@@ -2,19 +2,23 @@
 //!
 //! A rule over `prices[n]` is split before translation into ordinary rules:
 //!
-//! - one item rule `cart__item1(prices, ...)` per `sum(expr)`: `always -> expr`
-//!   on one item of each list, with the `need` lines about items;
+//! - one item rule `cart__item1(prices, ...)` per `sum(expr)`, `min(expr)` or
+//!   `max(expr)`: `always -> expr` on one item of each list, with the `need`
+//!   lines about items;
 //! - the core `cart__core(scalars.., n, sum1, ..)` in place of the rule, where
-//!   `sum(expr)` is the input `sum1` and `count(prices)` is `n`.
+//!   `sum(expr)` is the input `sum1` (`min2`, `max3` for `min`/`max`) and
+//!   `count(prices)` is `n`.
 //!
 //! Both are proven by Z3 like any rule. The core may assume of `sum1` only
 //! what `proofs/lean/Lists.lean` proves for every length: with every item in
 //! `lo..hi` (the item rule's answer range), `sum1` is between `n * lo` and
 //! `n * hi` (`sum_bounds`), and a loop adding the items gives exactly that sum
 //! when `max * lo` and `max * hi` fit the number range (`loop_sum_exact`).
+//! `min`/`max` of at least one item lie in `lo..hi` (`min_bounds`,
+//! `max_bounds`).
 //! Emitted code runs that loop, then calls the core.
 
-use crate::ast::ListRule;
+use crate::ast::{Fold, ListRule};
 use crate::simple::{check_ranges, strip_comment};
 
 /// The rewritten source (same lines, item rules appended) and, for each
@@ -137,6 +141,21 @@ fn head(line: &str, line_no: usize) -> Result<Option<Head>, String> {
     }))
 }
 
+/// Whether `f(inner)` combines a list (`min(prices)`), not two numbers
+/// (`min(a, b)`): it uses a list and has no comma outside parentheses.
+fn folds_a_list(inner: &str, lists: &[&str]) -> bool {
+    let mut depth = 0;
+    let top_comma = inner.chars().any(|c| {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+        c == ',' && depth == 0
+    });
+    !top_comma && lists.iter().any(|l| mentions(inner, l))
+}
+
 /// `n * v` written so a negative `v` parses.
 fn times(length: &str, v: i128) -> String {
     if v < 0 {
@@ -213,7 +232,7 @@ fn split(
         .map(|(p, _)| p.as_str())
         .collect();
     let length = head.length.as_str();
-    let mut sums: Vec<String> = Vec::new();
+    let mut sums: Vec<(Fold, String)> = Vec::new();
     let mut item_needs: Vec<String> = Vec::new();
     let mut core = vec![String::new(); block.len()];
     let mut limit: Option<(usize, u64)> = None;
@@ -233,11 +252,20 @@ fn split(
     // a list: the core then runs once per item, with the items as inputs.
     let each = block.iter().skip(1).any(|raw| {
         let text = strip_comment(raw).trim();
-        let mut blank = |_: &str| Ok(String::new());
-        text.contains("->")
-            && replace_calls(text, "sum", &mut blank)
-                .and_then(|t| replace_calls(&t, "count", &mut blank))
-                .is_ok_and(|t| lists.iter().any(|l| mentions(&t, l)))
+        let mut rest = Ok(text.to_string());
+        for f in ["min", "max", "sum", "count"] {
+            let mut blank = |inner: &str| {
+                Ok(
+                    if f == "sum" || f == "count" || folds_a_list(inner, &lists) {
+                        String::new()
+                    } else {
+                        format!("{f}({inner})")
+                    },
+                )
+            };
+            rest = rest.and_then(|t| replace_calls(&t, f, &mut blank));
+        }
+        text.contains("->") && rest.is_ok_and(|t| lists.iter().any(|l| mentions(&t, l)))
     });
 
     for (offset, raw) in block.iter().enumerate().skip(1) {
@@ -258,26 +286,42 @@ fn split(
                     ))
                 }
             })?;
-            replace_calls(&text, "sum", &mut |inner| {
-                if !lists.iter().any(|l| mentions(inner, l)) {
-                    return Err(format!(
-                        "line {line_no}: `sum(...)` must use one of the lists, like `sum(prices)`"
-                    ));
-                }
-                if mentions(inner, length) || inner.contains("sum(") || inner.contains("count(") {
-                    return Err(format!(
-                        "line {line_no}: inside `sum(...)` use list items and inputs, not `{length}` or another sum"
-                    ));
-                }
-                let k = match sums.iter().position(|s| s == inner) {
-                    Some(k) => k,
-                    None => {
-                        sums.push(inner.to_string());
-                        sums.len() - 1
+            let mut text = text;
+            for fold in [Fold::Min, Fold::Max, Fold::Sum] {
+                let f = fold.word();
+                text = replace_calls(&text, f, &mut |inner| {
+                    if fold != Fold::Sum && !folds_a_list(inner, &lists) {
+                        return Ok(format!("{f}({inner})"));
                     }
-                };
-                Ok(format!("sum{}", k + 1))
-            })
+                    if !lists.iter().any(|l| mentions(inner, l)) {
+                        return Err(format!(
+                            "line {line_no}: `sum(...)` must use one of the lists, like `sum(prices)`"
+                        ));
+                    }
+                    let nested = sums
+                        .iter()
+                        .enumerate()
+                        .any(|(k, (g, _))| mentions(inner, &format!("{}{}", g.word(), k + 1)));
+                    if nested
+                        || mentions(inner, length)
+                        || inner.contains("sum(")
+                        || inner.contains("count(")
+                    {
+                        return Err(format!(
+                            "line {line_no}: inside `{f}(...)` use list items and inputs, not `{length}` or another sum, min or max"
+                        ));
+                    }
+                    let k = match sums.iter().position(|(g, s)| *g == fold && s == inner) {
+                        Some(k) => k,
+                        None => {
+                            sums.push((fold, inner.to_string()));
+                            sums.len() - 1
+                        }
+                    };
+                    Ok(format!("{f}{}", k + 1))
+                })?;
+            }
+            Ok(text)
         };
         let rewritten = rewrite(trimmed)?;
         let has_list = lists.iter().any(|l| mentions(&rewritten, l));
@@ -306,7 +350,7 @@ fn split(
             }
         } else if has_list && !each {
             return Err(format!(
-                "line {line_no}: use a list of any length only inside `sum(...)` or `count(...)`"
+                "line {line_no}: use a list of any length only inside `sum(...)`, `min(...)`, `max(...)` or `count(...)`"
             ));
         }
         core[offset] = format!("{indent}{rewritten}");
@@ -319,16 +363,18 @@ fn split(
     };
     if !each && sums.is_empty() && !block.iter().any(|l| l.contains("count(")) {
         return Err(format!(
-            "line {first_line}: use the lists with `sum(...)` or `count(...)`"
+            "line {first_line}: use the lists with `sum(...)`, `min(...)`, `max(...)` or `count(...)`"
         ));
     }
     let taken: Vec<String> = head.params.iter().map(|(p, _)| p.clone()).collect();
-    if let Some(clash) = (1..=sums.len())
-        .map(|k| format!("sum{k}"))
-        .find(|s| taken.contains(s))
-    {
+    let results: Vec<String> = sums
+        .iter()
+        .enumerate()
+        .map(|(k, (fold, _))| format!("{}{}", fold.word(), k + 1))
+        .collect();
+    if let Some(clash) = results.iter().find(|s| taken.contains(s)) {
         return Err(format!(
-            "line {first_line}: `{clash}` is used for a sum; give the input another name"
+            "line {first_line}: `{clash}` is used for a list result; give the input another name"
         ));
     }
 
@@ -344,7 +390,7 @@ fn split(
         .map(|k| format!("{}__item{k}", head.name))
         .collect();
     let mut item_source = String::new();
-    for (name, inner) in items.iter().zip(&sums) {
+    for (name, (_, inner)) in items.iter().zip(&sums) {
         item_source += &format!(
             "\n{name}({}){suffix}\n{needs}  always -> {inner}\n",
             all.join(", ")
@@ -363,8 +409,30 @@ fn split(
         let module = crate::parse_module(&item_source).map_err(|error| {
             format!("line {first_line}: in an item of `{}`: {error}", head.name)
         })?;
-        for (k, (contract, inner)) in module.contracts.iter().zip(&sums).enumerate() {
+        for ((contract, (fold, inner)), s) in module.contracts.iter().zip(&sums).zip(&results) {
             let (lo, hi) = check_ranges(contract, &[])?;
+            if *fold != Fold::Sum {
+                // `min_bounds`/`max_bounds`: between the items' own range.
+                let f = fold.word();
+                if least == 0 {
+                    return Err(format!(
+                        "line {}: `{f}({inner})` needs at least one item; add `need {length} >= 1`",
+                        first_line + limit_offset
+                    ));
+                }
+                bounds += &format!(" and {s} >= {lo} and {s} <= {hi}");
+                // `min_le`, `max_ge`, `min_le_max`: min <= every item <= max.
+                let le = if *fold == Fold::Min { "<=" } else { ">=" };
+                if each {
+                    bounds += &format!(" and {s} {le} ({inner})");
+                }
+                for (other, (g, i)) in results.iter().zip(&sums) {
+                    if i == inner && *g != *fold && *g != Fold::Sum {
+                        bounds += &format!(" and {s} {le} {other}");
+                    }
+                }
+                continue;
+            }
             let (fewest, most) = (i128::from(least), i128::from(max));
             let (total_lo, total_hi) = ((most * lo).min(fewest * lo), (most * hi).max(fewest * hi));
             if total_lo < low || total_hi > high {
@@ -374,7 +442,6 @@ fn split(
                     first_line + limit_offset
                 ));
             }
-            let s = format!("sum{}", k + 1);
             bounds += &format!(
                 " and {s} >= {} and {s} <= {} and {s} >= {} and {s} <= {}",
                 total_lo,
@@ -394,7 +461,7 @@ fn split(
         .map(|s| s.to_string())
         .collect();
     core_params.push(length.to_string());
-    core_params.extend((1..=sums.len()).map(|k| format!("sum{k}")));
+    core_params.extend(results);
     core[0] = format!("{}__core({}){suffix}", head.name, core_params.join(", "));
     Ok((
         item_source,
@@ -403,6 +470,7 @@ fn split(
             name: head.name.clone(),
             params: head.params.clone(),
             items,
+            folds: sums.iter().map(|(fold, _)| *fold).collect(),
             max,
             least,
             each,
@@ -412,7 +480,7 @@ fn split(
 
 #[cfg(test)]
 mod tests {
-    use crate::parse_module;
+    use crate::{Fold, parse_module};
 
     fn error(source: &str) -> String {
         parse_module(source).unwrap_err()
@@ -459,6 +527,27 @@ mod tests {
     }
 
     #[test]
+    fn min_and_max_of_a_list_are_core_inputs() {
+        let module = parse_module(
+            "spread(prices[n], cap)\n  need n <= 10\n  need n >= 1\n  need prices <= 100\n  need cap <= 100\n  always -> max(prices) - min(prices) + min(cap, 5)\n",
+        )
+        .unwrap();
+        let core = module
+            .contracts
+            .iter()
+            .find(|c| c.name == "spread__core")
+            .unwrap();
+        let names: Vec<&str> = core.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["cap", "n", "min1", "max2"]);
+        let rule = core.list.as_ref().unwrap();
+        assert_eq!(rule.folds, [Fold::Min, Fold::Max]);
+        assert!(
+            error("f(a[n])\n  need n <= 10\n  always -> max(a)\n")
+                .contains("needs at least one item; add `need n >= 1`")
+        );
+    }
+
+    #[test]
     fn explains_what_a_list_rule_needs() {
         assert!(
             error("cart(prices[n])\n  need prices <= 100\n  always -> sum(prices)\n")
@@ -470,7 +559,7 @@ mod tests {
         );
         assert!(
             error("cart(prices[n])\n  need n <= 10\n  always -> sum(prices)\n  promise answer <= prices\n")
-                .contains("only inside `sum(...)` or `count(...)`")
+                .contains("only inside `sum(...)`, `min(...)`, `max(...)` or `count(...)`")
         );
         assert!(
             error("f(a[n], b[m])\n  need n <= 10\n  always -> sum(a)\n")
