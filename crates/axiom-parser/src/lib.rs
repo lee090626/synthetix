@@ -2,6 +2,7 @@
 
 pub mod ast;
 pub mod lexer;
+mod lists;
 pub mod parser;
 pub mod simple;
 
@@ -26,6 +27,17 @@ pub fn parse(input: &str) -> Result<Contract, String> {
 
 pub fn parse_module(input: &str) -> Result<Module, String> {
     if simple::is_simple(input) {
+        if let Some(expanded) =
+            lists::expand(input).map_err(|e| simple::show_source_line(e, input))?
+        {
+            let mut module = parse_module(&expanded.source)?;
+            for (core, rule) in expanded.rules {
+                if let Some(contract) = module.contracts.iter_mut().find(|c| c.name == core) {
+                    contract.list = Some(rule);
+                }
+            }
+            return Ok(module);
+        }
         let with_line = |error: String| simple::show_source_line(error, input);
         let (translated, decimals) = simple::translate_with_decimals(input).map_err(with_line)?;
         let parse_error = |error: String| with_line(simple::user_error(error));

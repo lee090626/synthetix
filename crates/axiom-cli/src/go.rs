@@ -249,6 +249,12 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
             out += &list_wrapper(&claim(base)?, &parts)?;
         }
     }
+    for contract in &contracts {
+        if let Some(rule) = &contract.list {
+            out += "\n";
+            out += &any_length_wrapper(&claim(&rule.name)?, contract, rule)?;
+        }
+    }
     let sizes = settle_sizes(&contracts);
     if !sizes.is_empty() {
         out += "\n";
@@ -334,6 +340,75 @@ fn list_wrapper(go_name: &str, parts: &[&Contract]) -> Result<String, String> {
     Ok(format!(
         "func {go_name}({}) (out [{n}]{ty}, err error) {{\n{body}\treturn out, nil\n}}\n",
         params.join(", ")
+    ))
+}
+
+/// `Cart(prices)` for a rule over lists of any length: checks the length,
+/// adds each item rule over the items in a loop, then calls the core. The
+/// sums cannot overflow below the length limit (`proofs/lean/Lists.lean`).
+fn any_length_wrapper(
+    go_name: &str,
+    core: &Contract,
+    rule: &axiom_parser::ListRule,
+) -> Result<String, String> {
+    let ty = go_type(&core.params[0].ty, core.wide)?;
+    let ret = go_type(&core.return_type, core.wide)?;
+    let names: Vec<String> = rule.params.iter().map(|(p, _)| local(p)).collect();
+    let first = rule.params.iter().position(|(_, list)| *list).unwrap_or(0);
+    let mut params = Vec::new();
+    let mut checks = String::new();
+    for (i, (_, list)) in rule.params.iter().enumerate() {
+        if *list {
+            params.push(format!("{} []{ty}", names[i]));
+            checks += &format!(
+                "\tif len({}) != len({}) {{\n\t\treturn result, &AxiomError{{\"{}: lists must have the same length\"}}\n\t}}\n",
+                names[i], names[first], rule.name
+            );
+        } else {
+            params.push(format!("{} {ty}", names[i]));
+        }
+    }
+    let item_args: Vec<String> = rule
+        .params
+        .iter()
+        .zip(&names)
+        .map(|((_, list), name)| {
+            if *list {
+                format!("{name}[i]")
+            } else {
+                name.clone()
+            }
+        })
+        .collect();
+    let mut sums = String::new();
+    let mut body = String::new();
+    for (k, item) in rule.items.iter().enumerate() {
+        sums += &format!("\tvar sum{} {ty}\n", k + 1);
+        body += &format!(
+            "\t\tif v, err := {}({}); err != nil {{\n\t\t\treturn result, err\n\t\t}} else {{\n\t\t\tsum{} += v\n\t\t}}\n",
+            exported(item),
+            item_args.join(", "),
+            k + 1
+        );
+    }
+    let mut core_args: Vec<String> = rule
+        .params
+        .iter()
+        .zip(&names)
+        .filter(|((_, list), _)| !*list)
+        .map(|(_, name)| name.clone())
+        .collect();
+    core_args.push(format!("{ty}(n)"));
+    core_args.extend((1..=rule.items.len()).map(|k| format!("sum{k}")));
+    Ok(format!(
+        "// {go_name} is the proven rule `{}` over lists of any length.\nfunc {go_name}({}) (result {ret}, err error) {{\n{checks}\tn := len({})\n\tif n > {} {{\n\t\treturn result, &AxiomError{{\"{}: input violates a requires clause\"}}\n\t}}\n{sums}\tfor i := 0; i < n; i++ {{\n{body}\t}}\n\treturn {}({})\n}}\n",
+        rule.name,
+        params.join(", "),
+        names[first],
+        rule.max,
+        rule.name,
+        exported(&core.name),
+        core_args.join(", ")
     ))
 }
 

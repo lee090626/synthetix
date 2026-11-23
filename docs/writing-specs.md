@@ -110,7 +110,7 @@ cart(prices[3])
   else -> sum(prices)
 ```
 
-A list has a fixed size from 1 to 16.
+A list has a fixed size from 1 to 16 (for any length, see below).
 
 Calculating with a whole list works item by item, and the answer is a list of
 the same size. Lists used together must have the same size:
@@ -124,6 +124,46 @@ to_pay(paid[3], share[3]) can be negative
 ```
 
 A page stores such an answer in a list: `owe = to_pay(paid, share)`.
+
+### Lists of any length
+
+Write the length as a name instead of a number: `prices[n]` takes any number
+of items. A `need n <= limit` line is required; Synthetix proves the rule for
+every length from 0 to the limit:
+
+```
+cart(prices[n])
+  need n <= 1000
+  need prices <= 100000
+  sum(prices) > 200000 -> 200000
+  else -> sum(prices)
+  promise answer <= sum(prices)
+```
+
+- Use the list only inside `sum(...)` and `count(...)`. `sum` may calculate
+  item by item: `sum(paid - share)`. `count(prices)` is `n`.
+- Lists in one rule share the length: `balance(paid[n], share[n])`. Other
+  inputs work as usual: `order(prices[n], fee)`.
+- A `need` line about a list holds for every item. Keep it apart from lines
+  about `n` or `sum(...)`.
+- The sum must stay in range for the longest list: with `need n <= 1000` and
+  `need prices <= 100000` it can reach 100000000. If it could go past the
+  number range, the error says so; lower the limit or add `with big numbers`.
+- `prices[1]`, `min(prices)`, `max(prices)`, decimals, list answers, pages,
+  and calling the rule from another rule do not work with these lists yet.
+
+How it is proven: each item is proven like a rule of its own, and the rest of
+the rule is proven for every sum that the items allow: between `n` times the
+smallest and `n` times the largest item. That every sum stays in that range,
+for any length, is proven once in Lean (`proofs/lean/Lists.lean`). A promise
+that needs more than that range, like `sum(paid - share) <= sum(paid)`, fails
+with an input whose sums no real list can give; write a promise that follows
+from the ranges, like `answer <= n * 1000000`.
+
+`axiom run cart.ax -- "[1,2,3]"` runs a file with one such rule. `--emit`
+gives a function taking arrays: `cart([1, 2, 3])` in JS and Python,
+`cart(&[1, 2, 3])` in Rust, `Cart([]uint32{1, 2, 3})` in Go. Example:
+`examples/any-length`.
 
 ### Decimals
 
