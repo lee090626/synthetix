@@ -64,3 +64,12 @@ above(prices[n])
   need prices <= 100000
   always -> prices - min(prices)
   promise answer <= prices
+
+# 할인 뒤 합계: 물건값 합에서 할인액 합을 뺀 것보다 크지 않음
+net(prices[n], off[n])
+  need n <= 1000
+  need prices <= 100000
+  need off <= prices
+  always -> sum(prices - off)
+  promise answer <= sum(prices)
+  promise answer + sum(off) is sum(prices)

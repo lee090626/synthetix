@@ -160,10 +160,13 @@ How it is proven: each item is proven like a rule of its own, and the rest of
 the rule is proven for every sum that the items allow: between `n` times the
 smallest and `n` times the largest item; `min` and `max` lie between the
 smallest and largest item, and `min <= every item <= max`. That every sum stays in that range,
-for any length, is proven once in Lean (`proofs/lean/Lists.lean`). A promise
-that needs more than that range, like `sum(paid - share) <= sum(paid)`, fails
-with an input whose sums no real list can give; write a promise that follows
-from the ranges, like `answer <= n * 1000000`.
+for any length, is proven once in Lean (`proofs/lean/Lists.lean`). A sum of
+`+`, `-` and `*` over items is also known in terms of each list's sum:
+`sum(paid - 2 * share + fee)` is `sum(paid) - 2 * sum(share) + n * fee`, so
+`promise answer <= sum(paid)` holds when every share is at least 0. A promise
+that needs more, like one about `sum(prices / 2)` or `sum(a * b)` of two
+lists, fails with an input whose sums no real list can give; write a promise
+that follows from the ranges, like `answer <= n * 1000000`.
 
 `axiom run cart.ax -- "[1,2,3]"` runs a file with one such rule. `--emit`
 gives a function taking arrays: `cart([1, 2, 3])` in JS and Python,
