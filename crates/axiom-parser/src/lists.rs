@@ -332,8 +332,10 @@ fn split(
         if let [line] = answers.as_slice()
             && each
             && let Some((_, e)) = line.split_once("->")
-            && let Some((top, sum)) = e.trim().split_once(" / sum(")
-            && let Some((total, list)) = top.split_once(" * ")
+            && let compact = e.split_whitespace().collect::<String>()
+            && let Some((top, sum)) = compact.split_once("/sum(")
+            && let Some((a, b)) = top.split_once('*')
+            && let (total, list) = if lists.contains(&a) { (b, a) } else { (a, b) }
             && sum.strip_suffix(')') == Some(list)
             && lists.contains(&list)
             && is_word_text(total)
@@ -341,7 +343,10 @@ fn split(
             && text.contains("(answer)")
         {
             let rest = text
-                .strip_prefix("promise sum(answer) ")
+                .strip_prefix("promise")
+                .map(str::trim_start)
+                .and_then(|r| r.strip_prefix("sum(answer)"))
+                .map(str::trim_start)
                 .unwrap_or_default();
             let bound = if mentions(rest, "answer") {
                 None
@@ -751,6 +756,12 @@ mod tests {
         let share = "share(weights[n], total)\n  need n <= 50\n  need n >= 1\n  need weights >= 1 and weights <= 1000\n  need total <= 1000000\n  always -> total * weights / sum(weights)\n";
         parse_module(&format!("{share}  promise sum(answer) <= total\n")).unwrap();
         parse_module(&format!("{share}  promise sum(answer) >= total - n + 1\n")).unwrap();
+        // Spacing and the order of `*` do not matter.
+        let tight = share.replace(
+            "total * weights / sum(weights)",
+            "weights*total/sum(weights)",
+        );
+        parse_module(&format!("{tight}  promise sum(answer)<=total\n")).unwrap();
         assert!(
             error(&format!("{share}  promise sum(answer) is total\n")).contains("at most `total`")
         );

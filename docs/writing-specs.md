@@ -140,44 +140,42 @@ cart(prices[n])
   promise answer <= sum(prices)
 ```
 
-- Use the list inside `sum(...)`, `min(...)`, `max(...)` and `count(...)`.
-  They may calculate item by item: `sum(paid - share)`, `min(paid - share)`.
-  `count(prices)` is `n`. `min` and `max` need `need n >= 1`; `min(a, b)` of
-  two numbers works as usual.
-- An answer line that uses an item outside those makes the answer a list, one
-  per item: `always -> prices - min(prices)`.
-- A promise about such an answer may use `sum(answer)`, `min(answer)` and
-  `max(answer)` when there is one `always -> ...` line: `sum(answer)` is that
-  line inside `sum(...)`, so `promise sum(answer) is sum(paid) - sum(share)`
-  holds for `always -> paid - share`. Shares by weight,
-  `always -> total * weights / sum(weights)`, round down, so they add up to at
-  most `total` and, with `need n >= 1`, at least `total - n + 1` (`share_le`,
-  `share_ge` in Lean): `promise sum(answer) <= total` and
-  `promise sum(answer) >= total - n + 1` hold when `total` and the weights are
-  at least 0 (in a rule without `can be negative`, `total - n` also needs
-  `need total >= 50` or similar). `is total` does not hold; it needs a rule for
-  what is left over.
-- Lists in one rule share the length: `balance(paid[n], share[n])`. Other
-  inputs work as usual: `order(prices[n], fee)`.
-- A `need` line about a list holds for every item. Keep it apart from lines
-  about `n` or `sum(...)`.
-- The sum must stay in range for the longest list: with `need n <= 1000` and
-  `need prices <= 100000` it can reach 100000000. If it could go past the
-  number range, the error says so; lower the limit or add `with big numbers`.
-- `prices[1]`, decimals, pages, and calling the rule from another rule do not
-  work with these lists yet.
+What you can write:
+
+| Write | Means | Needs |
+|---|---|---|
+| `sum(prices)`, `sum(paid - share)` | Add up every item (of an item-by-item calculation) | |
+| `min(prices)`, `max(prices)` | Smallest or largest item | `need n >= 1` |
+| `count(prices)` | `n` | |
+| `always -> prices - min(prices)` | An answer per item (a list answer) | |
+| `need prices <= 100000` | Holds for every item | Keep it apart from lines about `n` or `sum(...)` |
+| `balance(paid[n], share[n])`, `order(prices[n], fee)` | Lists share one length; other inputs work as usual | |
+
+What a `promise` can prove:
+
+| Promise | Holds when |
+|---|---|
+| `answer <= n * 1000000` | It follows from each item's range: a sum lies between `n` times the smallest and `n` times the largest item; `min` and `max` lie between those, and `min <= every item <= max` |
+| `answer <= sum(paid)` for `sum(paid - share)` | The sum uses only `+`, `-` and `*` of items: `sum(paid - 2 * share + fee)` is `sum(paid) - 2 * sum(share) + n * fee` |
+| `answer <= prices` for a list answer | It holds for every item |
+| `sum(answer) is sum(paid) - sum(share)` | The list answer is one `always -> ...` line; `sum(answer)` (also `min`, `max`) is that line inside `sum(...)` |
+| `sum(answer) <= total`, `sum(answer) >= total - n + 1` | The answer is `always -> total * weights / sum(weights)`, `total` and the weights are at least 0, and for `>=` `need n >= 1`. Shares round down, losing less than 1 each |
+
+What does not work yet, and what to do instead:
+
+| Not yet | Instead |
+|---|---|
+| A promise about `sum(prices / 2)` or `sum(a * b)` of two lists | A promise that follows from the ranges; the failing input may have sums no real list gives |
+| `sum(answer) is total` for shares | `<= total` and `>= total - n + 1`; an exact total needs a rule for what is left over |
+| `sum(answer)` with several answer lines | One `always -> ...` line |
+| `total - n + 1` in a rule without `can be negative` when `total` can be below `n` | `need total >= 50` (at least the limit), or `can be negative` |
+| A sum that can pass the number range (`need n <= 1000` and `need prices <= 100000` reach 100000000) | Lower the limit, limit the items with `need`, or add `with big numbers`; the error says when |
+| `prices[1]`, decimals, pages, calling the rule from another rule | |
 
 How it is proven: each item is proven like a rule of its own, and the rest of
-the rule is proven for every sum that the items allow: between `n` times the
-smallest and `n` times the largest item; `min` and `max` lie between the
-smallest and largest item, and `min <= every item <= max`. That every sum stays in that range,
-for any length, is proven once in Lean (`proofs/lean/Lists.lean`). A sum of
-`+`, `-` and `*` over items is also known in terms of each list's sum:
-`sum(paid - 2 * share + fee)` is `sum(paid) - 2 * sum(share) + n * fee`, so
-`promise answer <= sum(paid)` holds when every share is at least 0. A promise
-that needs more, like one about `sum(prices / 2)` or `sum(a * b)` of two
-lists, fails with an input whose sums no real list can give; write a promise
-that follows from the ranges, like `answer <= n * 1000000`.
+the rule is proven for every sum the items allow. The facts about sums, `min`,
+`max` and shares are proven once, for any length, in Lean
+(`proofs/lean/Lists.lean`).
 
 `axiom run cart.ax -- "[1,2,3]"` runs a file with one such rule. `--emit`
 gives a function taking arrays: `cart([1, 2, 3])` in JS and Python,
