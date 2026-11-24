@@ -246,10 +246,12 @@ fn any_length_wrapper(core: &Contract, rule: &axiom_parser::ListRule) -> Result<
     for (i, (_, list)) in rule.params.iter().enumerate() {
         if *list {
             params.push(format!("p{i}: &[{ty}]"));
-            checks += &format!(
-                "    if p{i}.len() != p{first}.len() {{\n        return Err(AxiomError(\"{}: lists must have the same length\"));\n    }}\n",
-                rule.name
-            );
+            if i != first {
+                checks += &format!(
+                    "    if p{i}.len() != p{first}.len() {{\n        return Err(AxiomError(\"{}: lists must have the same length\"));\n    }}\n",
+                    rule.name
+                );
+            }
         } else {
             params.push(format!("p{i}: {ty}"));
         }

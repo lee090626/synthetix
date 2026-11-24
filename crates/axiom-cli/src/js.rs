@@ -201,6 +201,12 @@ const RESERVED: &[&str] = &[
     "public",
     "arguments",
     "eval",
+    "Number",
+    "Math",
+    "BigInt",
+    "Array",
+    "TypeError",
+    "RangeError",
 ];
 
 fn check_for(name: &str, ty: &Type, var: &str, wide: bool) -> Result<String, String> {
@@ -286,7 +292,7 @@ pub(crate) fn settle_sizes(all: &[&Contract]) -> Vec<usize> {
     if all.iter().any(|c| c.name == "settle") {
         return Vec::new();
     }
-    (2..=16)
+    (2..=axiom_parser::simple::SETTLE_MAX)
         .filter(|n| all.iter().any(|c| c.name == format!("settle_{n}_1_1")))
         .collect()
 }
@@ -580,4 +586,28 @@ fn emit_function(
             dts_params.join(", ")
         ),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn settle_wrapper_takes_every_size_up_to_the_parser_limit() {
+        let module = axiom_parser::parse_module("use settle for 21\n").unwrap();
+        let all: Vec<&axiom_parser::Contract> = module.contracts.iter().collect();
+        assert_eq!(super::settle_sizes(&all), [21]);
+    }
+
+    #[test]
+    fn js_globals_the_emitted_code_uses_are_reserved() {
+        for name in [
+            "Number",
+            "Math",
+            "BigInt",
+            "Array",
+            "TypeError",
+            "RangeError",
+        ] {
+            assert!(super::RESERVED.contains(&name), "{name}");
+        }
+    }
 }

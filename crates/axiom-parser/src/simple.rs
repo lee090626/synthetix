@@ -1933,7 +1933,7 @@ const SETTLE_LIMIT: u32 = 100_000_000;
 
 /// Most people `settle` takes: sums of up to this many balances of
 /// SETTLE_LIMIT stay inside i32, as the Lean proof (infinite integers) assumes.
-const SETTLE_MAX: usize = 21;
+pub const SETTLE_MAX: usize = 21;
 
 /// Functions `settle_N_i_j`: how much person `i` sends person `j` so every
 /// balance (`o_k`, positive = still owes) reaches 0. People who owe pay in

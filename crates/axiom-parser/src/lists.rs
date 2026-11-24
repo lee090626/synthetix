@@ -48,8 +48,29 @@ fn mentions(text: &str, name: &str) -> bool {
     .any(|word| word == name)
 }
 
-/// Replaces every `f(inner)` call (not part of a longer name) with `with(inner)`.
+/// Replaces every `f(inner)` call (not part of a longer name, not in quotes)
+/// with `with(inner)`.
 fn replace_calls(
+    text: &str,
+    f: &str,
+    with: &mut dyn FnMut(&str) -> Result<String, String>,
+) -> Result<String, String> {
+    // Odd pieces of `split('"')` are quoted text and stay as written.
+    let mut out = String::new();
+    for (i, piece) in text.split('"').enumerate() {
+        if i > 0 {
+            out.push('"');
+        }
+        if i % 2 == 1 {
+            out += piece;
+        } else {
+            out += &replace_unquoted(piece, f, with)?;
+        }
+    }
+    Ok(out)
+}
+
+fn replace_unquoted(
     text: &str,
     f: &str,
     with: &mut dyn FnMut(&str) -> Result<String, String>,
@@ -351,14 +372,19 @@ fn split(
             let bound = if mentions(rest, "answer") {
                 None
             } else if let Some(y) = rest.strip_prefix("<=") {
-                Some(format!("{total} <={y}"))
+                Some(format!(" and {total} <={y}"))
             } else if let Some(y) = rest.strip_prefix(">=") {
-                (least >= 1).then(|| format!("({}) + {length} <= {total} + 1", y.trim()))
+                // Shares are never negative, so a bound of 0 or less always holds.
+                if y.trim().parse::<i128>().is_ok_and(|v| v <= 0) {
+                    Some(String::new())
+                } else {
+                    (least >= 1).then(|| format!(" and ({}) + {length} <= {total} + 1", y.trim()))
+                }
             } else {
                 None
             };
             return match bound {
-                Some(bound) => Ok(format!("promise {total} >= 0 and {list} >= 0 and {bound}")),
+                Some(bound) => Ok(format!("promise {total} >= 0 and {list} >= 0{bound}")),
                 None => Err(format!(
                     "line {line_no}: the shares of `{}` round down, so they add up to at most `{total}` and, with `need {length} >= 1`, at least `{total} - {length} + 1`; write `promise sum(answer) <= ...` or `promise sum(answer) >= ...`",
                     e.trim()
@@ -459,6 +485,12 @@ fn split(
         let rewritten = rewrite(trimmed)?;
         let has_list = lists.iter().any(|l| mentions(&rewritten, l));
         if let Some(condition) = trimmed.strip_prefix("need ") {
+            // `least` and the limit read one condition per line.
+            if condition.contains(" and ") && mentions(condition, length) {
+                return Err(format!(
+                    "line {line_no}: split this `need` line: put each condition on `{length}` on its own line"
+                ));
+            }
             if let Some((name, max)) = condition.split_once("<=")
                 && name.trim() == length
                 && let Ok(max) = max.trim().parse::<u64>()
@@ -692,6 +724,14 @@ mod tests {
     }
 
     #[test]
+    fn calls_inside_quoted_text_stay_as_written() {
+        let out = super::replace_calls("\"sum(prices) is big\" + sum(prices)", "sum", &mut |_| {
+            Ok("S".into())
+        });
+        assert_eq!(out.unwrap(), "\"sum(prices) is big\" + S");
+    }
+
+    #[test]
     fn a_second_length_limit_is_an_error() {
         parse_module(
             "cart(prices[n])\n  need n <= 3\n  need prices <= 100\n  always -> sum(prices)\n",
@@ -699,6 +739,23 @@ mod tests {
         .unwrap();
         let error = parse_module("cart(prices[n])\n  need n <= 3\n  need n <= 9\n  need prices <= 100\n  always -> sum(prices)\n").unwrap_err();
         assert!(error.contains("keep one"), "{error}");
+    }
+
+    #[test]
+    fn a_share_sum_at_least_zero_reports_the_division_not_the_rounding() {
+        // Without `need n >= 1` the division is the problem; "sum >= 0" is not.
+        assert!(
+            error("share(weights[n], total)\n  need n <= 50\n  need weights <= 1000\n  need total <= 1000000\n  always -> total * weights / sum(weights)\n  promise sum(answer) >= 0\n")
+                .contains("may divide by 0")
+        );
+    }
+
+    #[test]
+    fn two_conditions_on_one_length_line_must_be_split() {
+        assert!(
+            error("f(a[n])\n  need n >= 1 and n <= 5\n  always -> sum(a)\n")
+                .contains("on its own line")
+        );
     }
 
     #[test]

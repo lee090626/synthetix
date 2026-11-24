@@ -489,3 +489,89 @@ fn axiom_run_answers_with_a_list() {
     assert!(run("[1,2,1]").contains("result: [250,500,250]"));
     assert!(run("[]").contains("input violates a requires clause"));
 }
+
+fn project_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("axiom-any-{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn axiom(dir: &Path, args: &[&str]) -> (bool, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_axiom"))
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    (out.status.success(), text)
+}
+
+#[test]
+fn a_share_promise_of_at_least_zero_is_proven() {
+    let dir = project_dir("promise");
+    fs::write(
+        dir.join("synthetix.toml"),
+        "[project]\nentry = \"share.ax\"\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("share.ax"),
+        "share(weights[n], total)\n  need n <= 50\n  need n >= 1\n  need weights >= 1 and weights <= 1000\n  need total <= 1000000\n  always -> total * weights / sum(weights)\n  promise sum(answer) >= 0\n",
+    )
+    .unwrap();
+    let (ok, text) = axiom(&dir, &["build"]);
+    assert!(ok, "{text}");
+    assert!(text.contains("proof_result: VERIFIED"), "{text}");
+}
+
+#[test]
+fn a_list_rule_is_built_only_in_a_project() {
+    let dir = project_dir("single");
+    fs::write(dir.join("cart.ax"), cart_lines()).unwrap();
+    let (ok, text) = axiom(&dir, &["build", "cart.ax"]);
+    assert!(!ok);
+    assert!(text.contains("needs a project"), "{text}");
+}
+
+fn cart_lines() -> String {
+    example()
+        .lines()
+        .take(8)
+        .map(|l| format!("{l}\n"))
+        .collect()
+}
+
+#[test]
+fn axiom_run_rejects_an_empty_list_item() {
+    let dir = project_dir("empty-item");
+    fs::write(dir.join("cart.ax"), cart_lines()).unwrap();
+    let (ok, text) = axiom(&dir, &["run", "cart.ax", "--", "[10,,20]"]);
+    assert!(!ok);
+    assert!(text.contains("invalid u32 input ''"), "{text}");
+}
+
+#[test]
+fn axiom_run_rejects_report_and_output_for_a_list_rule() {
+    let dir = project_dir("run-flags");
+    fs::write(dir.join("cart.ax"), cart_lines()).unwrap();
+    let (ok, text) = axiom(
+        &dir,
+        &["run", "cart.ax", "--", "[10,20]", "--report", "r.json"],
+    );
+    assert!(!ok);
+    assert!(text.contains("drop --report and -o"), "{text}");
+}
+
+#[test]
+fn emitted_list_checks_compare_each_list_to_the_first_only() {
+    let rust = build("rust");
+    let text = fs::read_to_string(rust.join("dist/contracts.rs")).unwrap();
+    assert!(text.contains("p1.len() != p0.len()"));
+    assert!(!text.contains("p0.len() != p0.len()"));
+    let go = build("go");
+    let text = fs::read_to_string(go.join("dist/contracts.go")).unwrap();
+    assert!(text.contains("len(share) != len(paid)"));
+    assert!(!text.contains("len(paid) != len(paid)"));
+}

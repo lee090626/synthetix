@@ -1168,8 +1168,20 @@ fn state_type_name(ty: &Type) -> &'static str {
 fn source_label(root: &Path, source: &Path) -> String {
     let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let source = fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
-    let relative = source.strip_prefix(root).unwrap_or(&source);
-    relative.to_string_lossy().replace('\\', "/")
+    // Outside the root: `../lib/logic.ax`, never an absolute path.
+    let shared = root
+        .components()
+        .zip(source.components())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut parts = vec!["..".to_string(); root.components().count() - shared];
+    parts.extend(
+        source
+            .components()
+            .skip(shared)
+            .map(|c| c.as_os_str().to_string_lossy().into_owned()),
+    );
+    parts.join("/")
 }
 
 fn initial_json(ty: &axiom_parser::Type) -> &'static str {
@@ -1591,6 +1603,17 @@ mod tests {
 
     use axiom_parser::{Page, State, Type};
     use axiom_project::{LinkedContract, ProjectConfig};
+
+    #[test]
+    fn a_source_outside_the_root_is_labelled_from_the_root() {
+        assert_eq!(
+            source_label(
+                Path::new("/nonexistent/app"),
+                Path::new("/nonexistent/lib/logic.ax")
+            ),
+            "../lib/logic.ax"
+        );
+    }
 
     #[test]
     fn template_values_are_not_filled_again() {
