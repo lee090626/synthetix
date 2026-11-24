@@ -374,6 +374,11 @@ fn run_command(args: &[String]) -> Result<(), String> {
             .as_ref()
             .is_some_and(|r| r.items.len() + 1 == module.contracts.len())
     {
+        if options.report.is_some() || options.output.is_some() {
+            return Err(
+                "a list rule's run prints the result only: drop --report and -o".to_string(),
+            );
+        }
         return run_any_length(&module.contracts, core, &options.values);
     }
     let contract = read_contract(options.input)?;
@@ -444,8 +449,12 @@ fn run_command(args: &[String]) -> Result<(), String> {
                 return Err(error);
             }
         };
-    fs::write(&options.output, &module)
-        .map_err(|error| format!("cannot write {}: {error}", options.output.display()))?;
+    let output = options
+        .output
+        .clone()
+        .unwrap_or_else(|| default_output_path(options.input));
+    fs::write(&output, &module)
+        .map_err(|error| format!("cannot write {}: {error}", output.display()))?;
     let result = if contract.wide {
         axiom_wasm::run_wide(&module, &values)?
     } else {
@@ -458,7 +467,7 @@ fn run_command(args: &[String]) -> Result<(), String> {
             "run",
             &contract,
             &candidate,
-            &options.output,
+            &output,
             ReportDetails {
                 inputs: Some(&values),
                 result: Some(result),
@@ -502,7 +511,7 @@ fn run_command(args: &[String]) -> Result<(), String> {
         _ => shown(&contract, &contract.return_type, result),
     };
     println!("result: {answer}");
-    println!("wrote: {}", options.output.display());
+    println!("wrote: {}", output.display());
     if let Some(report) = options.report {
         println!("report: {}", report.display());
     }
@@ -564,11 +573,12 @@ fn run_any_length(
                 .strip_prefix('[')
                 .and_then(|v| v.strip_suffix(']'))
                 .ok_or_else(|| format!("{name}: write a list as [1,2,3]"))?;
-            inner
-                .split(',')
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-                .collect()
+            if inner.trim().is_empty() {
+                Vec::new()
+            } else {
+                // An empty item (`[1,,2]`) fails to parse as a number below.
+                inner.split(',').map(str::trim).collect()
+            }
         } else {
             vec![value.as_str()]
         };
@@ -796,7 +806,15 @@ fn read_contract(input: &str) -> Result<axiom_parser::Contract, String> {
         fs::read_to_string(input).map_err(|error| format!("cannot read {input}: {error}"))?;
     axiom_parser::simple::check_user_syntax(&source)
         .map_err(|error| format!("INVALID: {error}"))?;
-    axiom_parser::parse(&source).map_err(|error| format!("INVALID: {error}"))
+    axiom_parser::parse(&source).map_err(|error| {
+        if axiom_parser::parse_module(&source)
+            .is_ok_and(|module| module.contracts.iter().any(|c| c.list.is_some()))
+        {
+            "INVALID: a rule over lists of any length needs a project: put it in a folder with synthetix.toml and build it there".to_string()
+        } else {
+            format!("INVALID: {error}")
+        }
+    })
 }
 
 /// Warns about `->` lines that an earlier line always beats, and prints one
@@ -1253,7 +1271,7 @@ fn parse_build_args(args: &[String]) -> Result<BuildArgs<'_>, String> {
 struct RunArgs<'a> {
     input: &'a str,
     values: Vec<String>,
-    output: PathBuf,
+    output: Option<PathBuf>,
     report: Option<PathBuf>,
     timeout: Option<Duration>,
     max_candidates: usize,
@@ -1267,7 +1285,7 @@ fn parse_run_args(args: &[String]) -> Result<RunArgs<'_>, String> {
 
     let input = args[0].as_str();
     let mut values = Vec::new();
-    let mut output = default_output_path(input);
+    let mut output = None;
     let mut report = None;
     let mut timeout = None;
     let mut max_candidates = axiom_synth::SynthesisOptions::default().max_candidates;
@@ -1281,7 +1299,11 @@ fn parse_run_args(args: &[String]) -> Result<RunArgs<'_>, String> {
     while index < args.len() {
         match args[index].as_str() {
             "-o" | "--output" => {
-                output = PathBuf::from(required_value(args, &mut index, "output path")?);
+                output = Some(PathBuf::from(required_value(
+                    args,
+                    &mut index,
+                    "output path",
+                )?));
             }
             "--report" => {
                 report = Some(PathBuf::from(required_value(
@@ -1416,7 +1438,7 @@ mod tests {
 
         let parsed = parse_run_args(&args).unwrap();
         assert_eq!(parsed.values, vec!["5", "7"]);
-        assert_eq!(parsed.output, PathBuf::from("add.wasm"));
+        assert_eq!(parsed.output, Some(PathBuf::from("add.wasm")));
     }
 
     #[test]

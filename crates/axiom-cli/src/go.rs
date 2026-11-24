@@ -360,10 +360,12 @@ fn any_length_wrapper(
     for (i, (_, list)) in rule.params.iter().enumerate() {
         if *list {
             params.push(format!("{} []{ty}", names[i]));
-            checks += &format!(
-                "\tif len({}) != len({}) {{\n\t\treturn result, &AxiomError{{\"{}: lists must have the same length\"}}\n\t}}\n",
-                names[i], names[first], rule.name
-            );
+            if i != first {
+                checks += &format!(
+                    "\tif len({}) != len({}) {{\n\t\treturn result, &AxiomError{{\"{}: lists must have the same length\"}}\n\t}}\n",
+                    names[i], names[first], rule.name
+                );
+            }
         } else {
             params.push(format!("{} {ty}", names[i]));
         }

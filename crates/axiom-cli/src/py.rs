@@ -81,9 +81,12 @@ const KEYWORDS: &[&str] = &[
     "with", "yield",
 ];
 
-/// A Python name for a rule or input: keywords get a trailing `_`.
+/// Builtins the emitted Python calls; a rule or input with one of these names would shadow it.
+const BUILTINS: &[&str] = &["abs", "int", "isinstance", "len", "list", "range", "tuple"];
+
+/// A Python name for a rule or input: keywords and builtins get a trailing `_`.
 fn ident(name: &str) -> String {
-    if KEYWORDS.contains(&name) {
+    if KEYWORDS.contains(&name) || BUILTINS.contains(&name) {
         format!("{name}_")
     } else {
         name.to_string()
@@ -358,4 +361,13 @@ fn settle_wrapper(sizes: &[usize]) -> String {
         "def settle(owe):\n{cases}    raise TypeError(\"settle: owe must have {} items\")\n",
         list.join(" or ")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_builtin_the_emitted_code_calls_is_not_a_name() {
+        assert_eq!(super::ident("len"), "len_");
+        assert_eq!(super::ident("prices"), "prices");
+    }
 }
