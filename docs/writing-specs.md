@@ -151,8 +151,12 @@ cart(prices[n])
   line inside `sum(...)`, so `promise sum(answer) is sum(paid) - sum(share)`
   holds for `always -> paid - share`. Shares by weight,
   `always -> total * weights / sum(weights)`, round down, so they add up to at
-  most `total` (`share_le` in Lean): `promise sum(answer) <= total` holds;
-  `is total` does not, and needs a rule for what is left over.
+  most `total` and, with `need n >= 1`, at least `total - n + 1` (`share_le`,
+  `share_ge` in Lean): `promise sum(answer) <= total` and
+  `promise sum(answer) >= total - n + 1` hold when `total` and the weights are
+  at least 0 (in a rule without `can be negative`, `total - n` also needs
+  `need total >= 50` or similar). `is total` does not hold; it needs a rule for
+  what is left over.
 - Lists in one rule share the length: `balance(paid[n], share[n])`. Other
   inputs work as usual: `order(prices[n], fee)`.
 - A `need` line about a list holds for every item. Keep it apart from lines

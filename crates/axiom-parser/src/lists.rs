@@ -325,8 +325,10 @@ fn split(
         .collect();
     let signed = head.suffix.contains("can be negative");
     let whole = |text: &str, line_no: usize| -> Result<String, String> {
-        // `total * w / sum(w)`: the shares add up to at most `total`
-        // (`share_le`), so `sum(answer) <= y` follows from `total <= y`.
+        // `total * w / sum(w)`: each share rounds down and loses less than 1,
+        // so with `total` and every weight at least 0 the shares add up to at
+        // most `total` (`share_le`) and, with at least one item, more than
+        // `total - n` (`share_ge`). The core proves those conditions.
         if let [line] = answers.as_slice()
             && each
             && let Some((_, e)) = line.split_once("->")
@@ -336,22 +338,25 @@ fn split(
             && lists.contains(&list)
             && is_word_text(total)
             && !lists.contains(&total)
-            && mentions(text, "answer")
             && text.contains("(answer)")
         {
-            let bound = text
-                .strip_prefix("promise sum(answer) <=")
-                .filter(|y| !signed && !mentions(y, "answer"));
+            let rest = text
+                .strip_prefix("promise sum(answer) ")
+                .unwrap_or_default();
+            let bound = if mentions(rest, "answer") {
+                None
+            } else if let Some(y) = rest.strip_prefix("<=") {
+                Some(format!("{total} <={y}"))
+            } else if let Some(y) = rest.strip_prefix(">=") {
+                (least >= 1).then(|| format!("({}) + {length} <= {total} + 1", y.trim()))
+            } else {
+                None
+            };
             return match bound {
-                Some(y) => Ok(format!("promise {total} <={y}")),
+                Some(bound) => Ok(format!("promise {total} >= 0 and {list} >= 0 and {bound}")),
                 None => Err(format!(
-                    "line {line_no}: the shares of `{}` add up to at most `{total}`; write `promise sum(answer) <= ...`{}",
-                    e.trim(),
-                    if signed {
-                        " in a rule without `can be negative`"
-                    } else {
-                        ""
-                    }
+                    "line {line_no}: the shares of `{}` round down, so they add up to at most `{total}` and, with `need {length} >= 1`, at least `{total} - {length} + 1`; write `promise sum(answer) <= ...` or `promise sum(answer) >= ...`",
+                    e.trim()
                 )),
             };
         }
@@ -745,6 +750,7 @@ mod tests {
     fn shares_add_up_to_at_most_the_total() {
         let share = "share(weights[n], total)\n  need n <= 50\n  need n >= 1\n  need weights >= 1 and weights <= 1000\n  need total <= 1000000\n  always -> total * weights / sum(weights)\n";
         parse_module(&format!("{share}  promise sum(answer) <= total\n")).unwrap();
+        parse_module(&format!("{share}  promise sum(answer) >= total - n + 1\n")).unwrap();
         assert!(
             error(&format!("{share}  promise sum(answer) is total\n")).contains("at most `total`")
         );

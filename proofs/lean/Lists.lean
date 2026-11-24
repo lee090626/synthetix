@@ -164,3 +164,20 @@ theorem share_le (total : Nat) (ws : List Nat) (h : 0 < ws.sum) :
     (ws.map fun w => total * w / ws.sum).sum ≤ total := by
   have := sum_div_le total ws.sum ws
   rwa [Nat.mul_div_cancel _ h] at this
+
+/-- Each share loses less than 1, so n shares lose less than n. -/
+theorem sum_div_ge (c d : Nat) (hd : 0 < d) : ∀ ls : List Nat,
+    c * ls.sum + ls.length ≤ (ls.map fun l => c * l / d).sum * d + ls.length * d
+  | [] => by simp
+  | l :: ls => by
+    have h1 := Nat.lt_div_mul_add (a := c * l) hd
+    have ih := sum_div_ge c d hd ls
+    simp only [List.map_cons, List.sum_cons, List.length_cons, Nat.mul_add, Nat.add_mul, Nat.one_mul]
+    omega
+
+theorem share_ge (total : Nat) (ws : List Nat) (hn : 0 < ws.length) (h : 0 < ws.sum) :
+    total < (ws.map fun w => total * w / ws.sum).sum + ws.length := by
+  have := sum_div_ge total ws.sum h ws
+  have hlt : total * ws.sum < ((ws.map fun w => total * w / ws.sum).sum + ws.length) * ws.sum := by
+    rw [Nat.add_mul]; omega
+  exact Nat.lt_of_mul_lt_mul_right hlt
