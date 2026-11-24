@@ -83,3 +83,13 @@ gap(paid[n], share[n]) can be negative
   always -> paid - share
   promise sum(answer) is sum(paid) - sum(share)
   promise sum(answer) <= n * 1000000
+
+# 비율대로 나눈 몫: 버림이라 합은 총액 이하, 사람 수보다 적게만 모자람
+fair(weights[n], total) can be negative
+  need n <= 50
+  need n >= 1
+  need weights >= 1 and weights <= 1000
+  need total >= 0 and total <= 1000000
+  always -> total * weights / sum(weights)
+  promise sum(answer) <= total
+  promise sum(answer) >= total - n + 1

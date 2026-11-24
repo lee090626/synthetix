@@ -12,6 +12,7 @@ Rules over lists with any number of items, up to a limit set by `need n <= ...`.
 | `above` | Each price minus the cheapest is never above that price (a list answer) |
 | `net` | Prices minus discounts add up to the prices' sum minus the discounts' sum |
 | `share` | Shares of `total` by weight (a list answer) add up to at most `total` |
+| `fair` | The same shares add up to at most `total` and lose less than one per person |
 | `gap` | Each person's paid minus share (a list answer) adds up to the paid sum minus the share sum |
 
 ```bash
