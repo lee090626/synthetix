@@ -1641,6 +1641,12 @@ fn list_param(text: &str, line_no: usize) -> Result<Option<(&str, usize)>, Strin
 const MAX_LIST: usize = 16;
 
 fn check_name(name: &str, line_no: usize) -> Result<(), String> {
+    // Generated code uses `_` names for its own variables (e.g. `_a0`, `_n`).
+    if name.starts_with('_') {
+        return Err(format!(
+            "line {line_no}: `{name}` cannot start with `_`; choose another name"
+        ));
+    }
     match Lexer::new(name).next_token() {
         Ok(Token::Ident(ident)) if ident == name => Ok(()),
         Ok(Token::Ident(_)) | Err(_) => {
@@ -1937,9 +1943,12 @@ const SETTLE_MAX: usize = 21;
 /// there are at most N - 1 transfers.
 fn settle_rules(size: usize) -> String {
     let params: Vec<String> = (1..=size).map(|k| format!("o_{k}: i32")).collect();
-    let needs: Vec<String> = (1..=size)
+    let mut needs: Vec<String> = (1..=size)
         .map(|k| format!("requires o_{k} >= (0 -% {SETTLE_LIMIT}) && o_{k} <= {SETTLE_LIMIT};"))
         .collect();
+    // Balances must cancel, or no transfers bring every balance to 0.
+    let sum: Vec<String> = (1..=size).map(|k| format!("o_{k}")).collect();
+    needs.push(format!("requires ({}) == 0;", sum.join(" +% ")));
     let min = |a: &str, b: &str| format!("(if {a} <= {b} {{ {a} }} else {{ {b} }})");
     let max = |a: &str, b: &str| format!("(if {a} >= {b} {{ {a} }} else {{ {b} }})");
     let total = |upto: usize, owes: bool| -> String {
@@ -1973,8 +1982,8 @@ fn settle_rules(size: usize) -> String {
                 Some(before) => format!("{covered} -% {before}"),
             };
             let amount = format!("(if ({overlap}) > 0 {{ {overlap} }} else {{ 0 }})");
-            // Not proven by Z3: proofs/lean/Settle.lean proves this formula
-            // (`t` there) brings every balance to 0 for any group size.
+            // Z3 checks only ranges here; proofs/lean/Settle.lean proves this
+            // formula (`t` there) brings every balance to 0, given the sum check.
             out.push_str(&format!(
                 // The grammar needs one `ensures`; this one costs Z3 nothing.
                 " export fn settle_{size}_{from}_{to}({}) -> i32 {{ {} return {}; ensures result == result; }}",
@@ -2532,6 +2541,18 @@ mod tests {
                 .unwrap();
         assert_eq!(decimals.wide, ["f"]);
         assert!(translate("f(a) with big numbers with 2 decimals\n  always -> a\n").is_err());
+    }
+
+    #[test]
+    fn settle_checks_that_balances_sum_to_zero() {
+        let out = translate("use settle for 2\n").unwrap();
+        assert!(out.contains("requires (o_1 +% o_2) == 0;"), "{out}");
+    }
+
+    #[test]
+    fn names_cannot_start_with_an_underscore() {
+        let error = translate("f(_a0)\n  need _a0 <= 10\n  always -> _a0 * 2\n").unwrap_err();
+        assert!(error.contains("cannot start with `_`"), "{error}");
     }
 
     #[test]

@@ -101,7 +101,8 @@ fn emit_module(functions: &[(&str, &Expr, u32)], wide: bool) -> Result<Vec<u8>, 
     push_uleb(functions.len() as u64, &mut exports);
     for (index, (name, _, _)) in functions.iter().enumerate() {
         push_name(name, &mut exports);
-        exports.extend([0, index as u8]);
+        exports.push(0);
+        push_uleb(index as u64, &mut exports);
     }
     push_section(7, &exports, &mut module);
 
@@ -263,7 +264,8 @@ impl Encoder {
                 if u32::from(*index) >= self.param_count {
                     return Err(format!("expression references missing argument {index}"));
                 }
-                output.extend([0x20, *index]); // local.get
+                output.push(0x20); // local.get
+                push_uleb(u64::from(*index), output);
             }
             Expr::Const(value) => self.constant(*value, output),
             Expr::Add(l, r) => self.binary(l, r, 0x6a, 0x7c, output)?,
@@ -387,6 +389,20 @@ fn push_sleb(mut value: i64, output: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_and_function_indices_above_127_are_leb128() {
+        let module = emit(&Expr::Arg(128), 129).unwrap();
+        assert!(module.windows(3).any(|window| window == [0x20, 0x80, 0x01]));
+
+        let body = Expr::Const(0);
+        let names: Vec<String> = (0..129).map(|i| format!("f{i}")).collect();
+        let functions: Vec<(&str, &Expr, u32)> =
+            names.iter().map(|name| (name.as_str(), &body, 0)).collect();
+        let module = emit_functions(&functions).unwrap();
+        let export: Vec<u8> = [b"f128".as_slice(), &[0, 0x80, 0x01]].concat();
+        assert!(module.windows(export.len()).any(|window| window == export));
+    }
 
     #[test]
     fn emits_mul8_wasm_module() {
