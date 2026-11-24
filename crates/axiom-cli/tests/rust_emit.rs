@@ -71,7 +71,7 @@ fn rust_module_matches_the_evaluator() {
         "[1, 1, 2, 0] Ok([2500, 2500, 5000, 0]) Err(AxiomError(\"share_1: input violates a requires clause\"))".to_string(),
     ];
     for _ in 0..300 {
-        let owe: Vec<i32> = (0..4)
+        let mut owe: Vec<i32> = (0..3)
             .map(|_| {
                 seed = seed
                     .wrapping_mul(6364136223846793005)
@@ -79,6 +79,8 @@ fn rust_module_matches_the_evaluator() {
                 ((seed >> 33) % 2_000_001) as i32 - 1_000_000
             })
             .collect();
+        // `settle` needs balances that add up to 0.
+        owe.push(-owe.iter().sum::<i32>());
         let args: Vec<u32> = owe.iter().map(|v| *v as u32).collect();
         let sends: Vec<String> = (1..=4)
             .flat_map(|i| (1..=4).map(move |j| (i, j)))
