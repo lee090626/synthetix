@@ -1,9 +1,10 @@
 /-
 `settle` brings every balance to 0.
 
-The Rust side (`settle_rules` in crates/axiom-parser/src/simple.rs) proves each
-transfer with Z3 for a fixed group size. This file proves, for any number of
-people, that the transfers it computes cancel every balance exactly.
+The Rust side (`settle_rules` in crates/axiom-parser/src/simple.rs) has Z3 check
+each transfer's range and overflow for a fixed group size, and requires the
+balances to sum to 0 (the `o.sum = 0` below). This file proves, for any number
+of people, that the transfers it computes cancel every balance exactly.
 
 Person i (0-based) owes `pos o[i]` or is owed `neg o[i]`. Debtors are laid out
 on a line in list order (D k = what the first k people owe), creditors likewise

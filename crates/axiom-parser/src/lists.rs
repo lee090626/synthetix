@@ -463,6 +463,12 @@ fn split(
                 && name.trim() == length
                 && let Ok(max) = max.trim().parse::<u64>()
             {
+                if let Some((first, _)) = limit {
+                    return Err(format!(
+                        "line {line_no}: `need {length} <= ...` already sets the limit on line {}; keep one",
+                        first_line + first
+                    ));
+                }
                 limit = Some((offset, max));
                 continue;
             }
@@ -683,6 +689,16 @@ mod tests {
 
     fn error(source: &str) -> String {
         parse_module(source).unwrap_err()
+    }
+
+    #[test]
+    fn a_second_length_limit_is_an_error() {
+        parse_module(
+            "cart(prices[n])\n  need n <= 3\n  need prices <= 100\n  always -> sum(prices)\n",
+        )
+        .unwrap();
+        let error = parse_module("cart(prices[n])\n  need n <= 3\n  need n <= 9\n  need prices <= 100\n  always -> sum(prices)\n").unwrap_err();
+        assert!(error.contains("keep one"), "{error}");
     }
 
     #[test]

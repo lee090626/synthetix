@@ -112,9 +112,11 @@ for line in sys.stdin:
         "share_1: input violates a requires clause".to_string(),
     ];
     for _ in 0..300 {
-        let owe: Vec<i32> = (0..4)
+        let mut owe: Vec<i32> = (0..3)
             .map(|_| (next(&mut seed) % 2_000_001) as i32 - 1_000_000)
             .collect();
+        // `settle` needs balances that add up to 0.
+        owe.push(-owe.iter().sum::<i32>());
         let args: Vec<u64> = owe.iter().map(|v| u64::from(*v as u32)).collect();
         let sends: Vec<String> = (1..=4)
             .flat_map(|i| (1..=4).map(move |j| (i, j)))

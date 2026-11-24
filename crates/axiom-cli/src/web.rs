@@ -767,11 +767,33 @@ fn page_javascript(project: &Project, dev_runtime: bool) -> String {
     if dev_runtime {
         script.push_str(include_str!("dev-reload.js"));
     }
-    script = script
-        .replace("__PAGE_JSON__", &page)
-        .replace("__CONTRACTS__", &contracts)
-        .replace("__EXTERNS__", &externs);
+    script = fill_template(
+        &script,
+        &[
+            ("__PAGE_JSON__", page.as_str()),
+            ("__CONTRACTS__", contracts.as_str()),
+            ("__EXTERNS__", externs.as_str()),
+        ],
+    );
     script
+}
+
+/// Replaces each token in one pass, so text inserted for one token is never
+/// searched for the others.
+fn fill_template(template: &str, values: &[(&str, &str)]) -> String {
+    let mut out = String::new();
+    let mut rest = template;
+    while let Some((at, token, value)) = values
+        .iter()
+        .filter_map(|(token, value)| rest.find(token).map(|at| (at, *token, *value)))
+        .min_by_key(|(at, _, _)| *at)
+    {
+        out.push_str(&rest[..at]);
+        out.push_str(value);
+        rest = &rest[at + token.len()..];
+    }
+    out.push_str(rest);
+    out
 }
 
 fn page_json(linked: &LinkedPage, root: &Path, storage_schema_version: u32) -> String {
@@ -1404,6 +1426,8 @@ setInterval(async () => {
 "#;
 
 fn handle_request(mut stream: TcpStream, output_dir: &Path, state: &Arc<Mutex<DevState>>) {
+    // Without a timeout, one idle connection would block every later request.
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
     let mut request = [0_u8; 8192];
     let Ok(size) = stream.read(&mut request) else {
         return;
@@ -1564,8 +1588,37 @@ button:hover { background: #1d4ed8; }
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use axiom_parser::{Page, State, Type};
     use axiom_project::{LinkedContract, ProjectConfig};
+
+    #[test]
+    fn template_values_are_not_filled_again() {
+        assert_eq!(
+            fill_template("a __X__ b __Y__", &[("__X__", "__Y__"), ("__Y__", "z")]),
+            "a __Y__ b z"
+        );
+    }
+
+    #[test]
+    fn idle_connection_does_not_block_the_dev_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let _idle = TcpStream::connect(address).unwrap();
+        let (done, served) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let state = Arc::new(Mutex::new(DevState {
+                version: 1,
+                error: None,
+            }));
+            handle_request(stream, Path::new("."), &state);
+            done.send(()).unwrap();
+        });
+        served
+            .recv_timeout(Duration::from_secs(10))
+            .expect("an idle connection blocked the dev server");
+    }
 
     fn temp_dir(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(

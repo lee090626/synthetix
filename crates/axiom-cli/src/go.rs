@@ -374,7 +374,7 @@ fn any_length_wrapper(
         .zip(&names)
         .map(|((_, list), name)| {
             if *list {
-                format!("{name}[i]")
+                format!("{name}[_i]")
             } else {
                 name.clone()
             }
@@ -387,7 +387,7 @@ fn any_length_wrapper(
         let step = match fold {
             axiom_parser::Fold::Sum => format!("sum{} += v", k + 1),
             axiom_parser::Fold::Min | axiom_parser::Fold::Max => format!(
-                "if i == 0 || v {} sum{1} {{\n\t\t\t\tsum{1} = v\n\t\t\t}}",
+                "if _i == 0 || v {} sum{1} {{\n\t\t\t\tsum{1} = v\n\t\t\t}}",
                 if *fold == axiom_parser::Fold::Min {
                     "<"
                 } else {
@@ -419,14 +419,14 @@ fn any_length_wrapper(
         (
             format!("[]{ret}"),
             format!(
-                "\tresult = make([]{ret}, n)\n\tfor i := 0; i < n; i++ {{\n\t\tif result[i], err = {call}; err != nil {{\n\t\t\treturn nil, err\n\t\t}}\n\t}}\n\treturn result, nil\n"
+                "\tresult = make([]{ret}, n)\n\tfor _i := 0; _i < n; _i++ {{\n\t\tif result[_i], err = {call}; err != nil {{\n\t\t\treturn nil, err\n\t\t}}\n\t}}\n\treturn result, nil\n"
             ),
         )
     } else {
         (ret.to_string(), format!("\treturn {call}\n"))
     };
     Ok(format!(
-        "// {go_name} is the proven rule `{}` over lists of any length.\nfunc {go_name}({}) (result {ret}, err error) {{\n{checks}\tn := len({})\n\tif {}n > {} {{\n\t\treturn result, &AxiomError{{\"{}: input violates a requires clause\"}}\n\t}}\n{sums}\tfor i := 0; i < n; i++ {{\n{body}\t}}\n{tail}}}\n",
+        "// {go_name} is the proven rule `{}` over lists of any length.\nfunc {go_name}({}) (result {ret}, err error) {{\n{checks}\tn := len({})\n\tif {}n > {} {{\n\t\treturn result, &AxiomError{{\"{}: input violates a requires clause\"}}\n\t}}\n{sums}\tfor _i := 0; _i < n; _i++ {{\n{body}\t}}\n{tail}}}\n",
         rule.name,
         params.join(", "),
         names[first],

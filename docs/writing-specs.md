@@ -293,7 +293,7 @@ People who owe pay in list order to people who are owed, in list order.
 `settle` is built in and proven once, in Lean, for any number of people:
 [proofs/lean/Settle.lean](../proofs/lean/Settle.lean) shows that when the
 balances add up to 0, what each person sends is what they owe and what each
-receives is what they are owed, so every balance ends at exactly 0. It is not
+receives is what they are owed, so every balance ends at exactly 0; a call whose balances do not add up to 0 is refused. It is not
 proven again on each build. Tests check the generated code against this on
 random balances, and that there are at most n - 1 transfers. Up to 21 people,
 each balance within ±100,000,000. It does not promise the fewest

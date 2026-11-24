@@ -1232,6 +1232,13 @@ fn parse_build_args(args: &[String]) -> Result<BuildArgs<'_>, String> {
         index += 1;
     }
 
+    if output == Path::new(input) || output.extension().is_some_and(|ext| ext == "ax") {
+        return Err(format!(
+            "output {} would replace a source file; choose another output path",
+            output.display()
+        ));
+    }
+
     Ok(BuildArgs {
         input,
         output,
@@ -1355,6 +1362,20 @@ fn default_output_path(input: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_output_is_never_a_source_file() {
+        let rejected = |rest: &[&str]| {
+            let args: Vec<String> = std::iter::once("r.ax")
+                .chain(rest.iter().copied())
+                .map(String::from)
+                .collect();
+            parse_build_args(&args).is_err()
+        };
+        assert!(rejected(&["-o", "r.ax"]));
+        assert!(rejected(&["-o", "other.ax"]));
+        assert!(!rejected(&["-o", "r.wasm"]));
+    }
 
     #[test]
     fn check_report_fields() {
