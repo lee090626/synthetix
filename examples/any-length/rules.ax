@@ -73,3 +73,12 @@ net(prices[n], off[n])
   always -> sum(prices - off)
   promise answer <= sum(prices)
   promise answer + sum(off) is sum(prices)
+
+# 사람마다 낼 돈: 답이 목록, 그 합은 낸 돈 합 - 몫 합
+gap(paid[n], share[n]) can be negative
+  need n <= 50
+  need paid >= 0 and paid <= 1000000
+  need share >= 0 and share <= 1000000
+  always -> paid - share
+  promise sum(answer) is sum(paid) - sum(share)
+  promise sum(answer) <= n * 1000000

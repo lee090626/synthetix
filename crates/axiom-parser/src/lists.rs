@@ -311,10 +311,55 @@ fn split(
         text.contains("->") && rest.is_ok_and(|t| lists.iter().any(|l| mentions(&t, l)))
     });
 
+    // `sum(answer)` in a promise of a list answer is `sum(E)` of its one
+    // `always -> E` line.
+    let answers: Vec<&str> = block
+        .iter()
+        .skip(1)
+        .map(|raw| strip_comment(raw).trim())
+        .filter(|t| t.contains("->"))
+        .collect();
+    let whole = |text: &str, line_no: usize| -> Result<String, String> {
+        let mut text = text.to_string();
+        for f in ["sum", "min", "max"] {
+            text = replace_calls(&text, f, &mut |inner| {
+                if inner != "answer" {
+                    return Ok(format!("{f}({inner})"));
+                }
+                match answers.as_slice() {
+                    [line] if each && line.starts_with("always") => {
+                        let (_, e) = line.split_once("->").unwrap_or_default();
+                        Ok(format!("{f}({})", e.trim()))
+                    }
+                    _ if !each => Err(format!(
+                        "line {line_no}: `{f}(answer)` needs an answer that is a list"
+                    )),
+                    _ => Err(format!(
+                        "line {line_no}: `{f}(answer)` needs one `always -> ...` line"
+                    )),
+                }
+            })?;
+        }
+        Ok(text)
+    };
+
     for (offset, raw) in block.iter().enumerate().skip(1) {
         let line_no = first_line + offset;
         let text = strip_comment(raw);
-        let trimmed = text.trim();
+        let whole_text;
+        let trimmed = if text.trim().starts_with("promise ") && mentions(text, "answer") {
+            // A promise only about sums must still name the answer to parse;
+            // `answer is answer and` keeps its meaning.
+            let read = whole(text.trim(), line_no)?;
+            whole_text = if read == text.trim() {
+                read
+            } else {
+                read.replacen("promise ", "promise answer is answer and (", 1) + ")"
+            };
+            whole_text.as_str()
+        } else {
+            text.trim()
+        };
         if trimmed.is_empty() {
             continue;
         }
@@ -634,6 +679,32 @@ mod tests {
         let names: Vec<&str> = core.params.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["prices", "rate", "n", "sum1"]);
         assert!(core.list.as_ref().unwrap().each);
+    }
+
+    #[test]
+    fn sum_of_a_list_answer_is_the_sum_of_its_line() {
+        let module = parse_module(
+            "gap(paid[n], share[n]) can be negative\n  need n <= 10\n  need paid >= 0 and paid <= 100\n  need share >= 0 and share <= 100\n  always -> paid - share\n  promise sum(answer) is sum(paid) - sum(share)\n",
+        )
+        .unwrap();
+        let rule = module
+            .contracts
+            .iter()
+            .find(|c| c.name == "gap__core")
+            .unwrap()
+            .list
+            .clone()
+            .unwrap();
+        assert!(rule.each);
+        assert_eq!(rule.folds.len(), 3);
+        assert!(
+            error("cart(prices[n])\n  need n <= 10\n  prices > 5 -> 1\n  else -> 0\n  promise sum(answer) <= n\n")
+                .contains("one `always")
+        );
+        assert!(
+            error("cart(prices[n])\n  need n <= 10\n  always -> sum(prices)\n  promise sum(answer) <= 5\n")
+                .contains("answer that is a list")
+        );
     }
 
     #[test]
