@@ -1,7 +1,11 @@
 //! Differential check of `axiom build --emit js` against an independent Rust oracle.
 //! Requires `node`; the test is skipped (loudly) when it is unavailable.
 
-use std::{fs, path::PathBuf, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 const MAX: u64 = 1_000_000;
 
@@ -15,7 +19,7 @@ fn node_available() -> bool {
     Command::new("node").arg("--version").output().is_ok()
 }
 
-fn emit(name: &str, dir: &PathBuf) -> PathBuf {
+fn emit(name: &str, dir: &Path) -> PathBuf {
     let wasm = dir.join(format!("{name}.wasm"));
     let out = Command::new(env!("CARGO_BIN_EXE_axiom"))
         .args([
@@ -38,7 +42,7 @@ fn emit(name: &str, dir: &PathBuf) -> PathBuf {
 }
 
 /// Runs `fn(args)` for every row in node; each result is a number or "ERR:<name>".
-fn run_node(js: &PathBuf, name: &str, rows: &[Vec<u64>]) -> Vec<String> {
+fn run_node(js: &Path, name: &str, rows: &[Vec<u64>]) -> Vec<String> {
     let script = format!(
         "import('{}').then(m=>{{const rows={};for(const r of rows){{try{{console.log(String(m.{name}(...r)))}}catch(e){{console.log('ERR:'+e.constructor.name)}}}}}})",
         js.display(),
