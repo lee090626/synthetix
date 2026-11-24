@@ -11,6 +11,7 @@ Rules over lists with any number of items, up to a limit set by `need n <= ...`.
 | `worst` | The smallest paid-minus-share in the group is at most 1000000 |
 | `above` | Each price minus the cheapest is never above that price (a list answer) |
 | `net` | Prices minus discounts add up to the prices' sum minus the discounts' sum |
+| `share` | Shares of `total` by weight (a list answer) add up to at most `total` |
 | `gap` | Each person's paid minus share (a list answer) adds up to the paid sum minus the share sum |
 
 ```bash

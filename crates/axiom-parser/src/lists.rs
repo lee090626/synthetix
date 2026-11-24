@@ -32,6 +32,10 @@ fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
+fn is_word_text(text: &str) -> bool {
+    !text.is_empty() && text.chars().all(is_word)
+}
+
 /// Whether `name` appears as a whole word outside quotes.
 fn mentions(text: &str, name: &str) -> bool {
     let mut in_quotes = false;
@@ -319,7 +323,38 @@ fn split(
         .map(|raw| strip_comment(raw).trim())
         .filter(|t| t.contains("->"))
         .collect();
+    let signed = head.suffix.contains("can be negative");
     let whole = |text: &str, line_no: usize| -> Result<String, String> {
+        // `total * w / sum(w)`: the shares add up to at most `total`
+        // (`share_le`), so `sum(answer) <= y` follows from `total <= y`.
+        if let [line] = answers.as_slice()
+            && each
+            && let Some((_, e)) = line.split_once("->")
+            && let Some((top, sum)) = e.trim().split_once(" / sum(")
+            && let Some((total, list)) = top.split_once(" * ")
+            && sum.strip_suffix(')') == Some(list)
+            && lists.contains(&list)
+            && is_word_text(total)
+            && !lists.contains(&total)
+            && mentions(text, "answer")
+            && text.contains("(answer)")
+        {
+            let bound = text
+                .strip_prefix("promise sum(answer) <=")
+                .filter(|y| !signed && !mentions(y, "answer"));
+            return match bound {
+                Some(y) => Ok(format!("promise {total} <={y}")),
+                None => Err(format!(
+                    "line {line_no}: the shares of `{}` add up to at most `{total}`; write `promise sum(answer) <= ...`{}",
+                    e.trim(),
+                    if signed {
+                        " in a rule without `can be negative`"
+                    } else {
+                        ""
+                    }
+                )),
+            };
+        }
         let mut text = text.to_string();
         for f in ["sum", "min", "max"] {
             text = replace_calls(&text, f, &mut |inner| {
@@ -467,7 +502,6 @@ fn split(
             all.join(", ")
         )
     };
-    let signed = head.suffix.contains("can be negative");
     let wide = head.suffix.contains("with big numbers");
     let (low, high) = match (signed, wide) {
         (true, false) => (i128::from(i32::MIN), i128::from(i32::MAX)),
@@ -704,6 +738,15 @@ mod tests {
         assert!(
             error("cart(prices[n])\n  need n <= 10\n  always -> sum(prices)\n  promise sum(answer) <= 5\n")
                 .contains("answer that is a list")
+        );
+    }
+
+    #[test]
+    fn shares_add_up_to_at_most_the_total() {
+        let share = "share(weights[n], total)\n  need n <= 50\n  need n >= 1\n  need weights >= 1 and weights <= 1000\n  need total <= 1000000\n  always -> total * weights / sum(weights)\n";
+        parse_module(&format!("{share}  promise sum(answer) <= total\n")).unwrap();
+        assert!(
+            error(&format!("{share}  promise sum(answer) is total\n")).contains("at most `total`")
         );
     }
 

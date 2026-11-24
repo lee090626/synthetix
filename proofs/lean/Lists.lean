@@ -141,3 +141,26 @@ theorem sum_emod {α} (m : Int) (v w : α → Int) (h : ∀ x, v x % m = w x % m
   | x :: xs => by
     simp only [List.map_cons, List.sum_cons]
     rw [Int.add_emod, h x, sum_emod m v w h xs, ← Int.add_emod]
+
+
+/-! Shares (`total * w / sum(w)`): each share rounds down, so the shares add
+up to at most `total`. Unsigned numbers only; the core proves no product
+leaves the number range, so these are the numbers the code computes. -/
+
+theorem div_add_div_le (a b d : Nat) : a / d + b / d ≤ (a + b) / d := by
+  rcases Nat.eq_zero_or_pos d with rfl | hd
+  · simp
+  · rw [Nat.le_div_iff_mul_le hd, Nat.add_mul]
+    exact Nat.add_le_add (Nat.div_mul_le_self a d) (Nat.div_mul_le_self b d)
+
+theorem sum_div_le (c d : Nat) : ∀ ls : List Nat,
+    (ls.map fun l => c * l / d).sum ≤ c * ls.sum / d
+  | [] => by simp
+  | l :: ls => by
+    simp only [List.map_cons, List.sum_cons, Nat.mul_add]
+    exact Nat.le_trans (Nat.add_le_add_left (sum_div_le c d ls) _) (div_add_div_le _ _ d)
+
+theorem share_le (total : Nat) (ws : List Nat) (h : 0 < ws.sum) :
+    (ws.map fun w => total * w / ws.sum).sum ≤ total := by
+  have := sum_div_le total ws.sum ws
+  rwa [Nat.mul_div_cancel _ h] at this
