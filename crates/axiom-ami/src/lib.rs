@@ -2,6 +2,7 @@
 //!
 //! Minimal expression tree targeting modulo 2^32 bit-vector semantics, or
 //! 2^64 for contracts with `wide` (64-bit) words.
+use std::borrow::Cow;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Expr {
@@ -69,15 +70,26 @@ impl Expr {
     }
 
     /// 32-bit evaluation; see [`Expr::try_eval_bits`].
-    pub fn try_eval(&self, args: &[u32]) -> Result<u32, String> {
-        let args: Vec<u64> = args.iter().map(|arg| u64::from(*arg)).collect();
-        self.try_eval_bits(&args, 32).map(|value| value as u32)
+    /// Allocates nothing unless it fails on a missing argument or array
+    /// index: the synthesis search runs it for every candidate and sample.
+    pub fn try_eval(&self, args: &[u32]) -> Result<u32, Cow<'static, str>> {
+        self.eval_in(&|idx| args.get(idx).map(|arg| u64::from(*arg)), 32)
+            .map(|value| value as u32)
     }
 
     /// Evaluates with `bits`-wide words (32 or 64, `Contract::wide`): every
     /// result wraps modulo 2^bits, and signed operations read words as
     /// two's complement of that width.
     pub fn try_eval_bits(&self, args: &[u64], bits: u32) -> Result<u64, String> {
+        self.eval_in(&|idx| args.get(idx).copied(), bits)
+            .map_err(Cow::into_owned)
+    }
+
+    fn eval_in(
+        &self,
+        arg: &dyn Fn(usize) -> Option<u64>,
+        bits: u32,
+    ) -> Result<u64, Cow<'static, str>> {
         let mask = if bits == 64 {
             u64::MAX
         } else {
@@ -87,9 +99,10 @@ impl Expr {
             let shift = 64 - bits;
             ((value << shift) as i64) >> shift
         };
-        let eval = |expr: &Expr| expr.try_eval_bits(args, bits);
-        let pair =
-            |lhs: &Expr, rhs: &Expr| -> Result<(u64, u64), String> { Ok((eval(lhs)?, eval(rhs)?)) };
+        let eval = |expr: &Expr| expr.eval_in(arg, bits);
+        let pair = |lhs: &Expr, rhs: &Expr| -> Result<(u64, u64), Cow<'static, str>> {
+            Ok((eval(lhs)?, eval(rhs)?))
+        };
         let flag = |value: bool| u64::from(value);
         let signed_op = |lhs: &Expr, rhs: &Expr, op: fn(i64, i64) -> Option<i64>| {
             let (l, r) = pair(lhs, rhs)?;
@@ -97,17 +110,16 @@ impl Expr {
             // i32::MIN / -1 (or i64::MIN / -1) does not fit and traps in WebAssembly.
             let min = signed(1u64 << (bits - 1));
             if r == 0 || (l == min && r == -1) {
-                return Err("division by zero or overflow".to_string());
+                return Err("division by zero or overflow".into());
             }
             op(l, r)
                 .map(|value| value as u64 & mask)
-                .ok_or_else(|| "division by zero or overflow".to_string())
+                .ok_or(Cow::Borrowed("division by zero or overflow"))
         };
         let value = match self {
-            Expr::Arg(idx) => args
-                .get(*idx as usize)
-                .copied()
-                .ok_or_else(|| format!("missing argument {idx}"))?,
+            Expr::Arg(idx) => {
+                arg(*idx as usize).ok_or_else(|| format!("missing argument {idx}"))?
+            }
             Expr::Const(val) => *val,
             Expr::Add(lhs, rhs) => {
                 let (l, r) = pair(lhs, rhs)?;
@@ -123,13 +135,11 @@ impl Expr {
             }
             Expr::Div(lhs, rhs) => {
                 let (l, r) = pair(lhs, rhs)?;
-                l.checked_div(r)
-                    .ok_or_else(|| "division by zero".to_string())?
+                l.checked_div(r).ok_or(Cow::Borrowed("division by zero"))?
             }
             Expr::Rem(lhs, rhs) => {
                 let (l, r) = pair(lhs, rhs)?;
-                l.checked_rem(r)
-                    .ok_or_else(|| "division by zero".to_string())?
+                l.checked_rem(r).ok_or(Cow::Borrowed("division by zero"))?
             }
             Expr::SDiv(lhs, rhs) => signed_op(lhs, rhs, i64::checked_div)?,
             Expr::SRem(lhs, rhs) => signed_op(lhs, rhs, i64::checked_rem)?,
@@ -177,12 +187,14 @@ impl Expr {
                 let element = usize::try_from(index)
                     .ok()
                     .and_then(|index| elements.get(index))
-                    .ok_or_else(|| format!("fixed array index {index} is out of bounds"))?;
+                    .ok_or_else(|| {
+                        Cow::Owned(format!("fixed array index {index} is out of bounds"))
+                    })?;
                 eval(element)?
             }
             Expr::Guard { condition, value } => {
                 if eval(condition)? == 0 {
-                    return Err("verified runtime guard failed".to_string());
+                    return Err("verified runtime guard failed".into());
                 }
                 eval(value)?
             }

@@ -114,7 +114,7 @@ fn check_contracts<'a>(
             timeout: Some(Duration::from_secs(120)),
             ..SynthesisOptions::default()
         };
-        let (_, wasm, _, _) = synthesize_wasm_with_metrics(&contract, options)
+        let (_, wasm, _, _) = synthesize_wasm_with_metrics(contract, options)
             .unwrap_or_else(|error| panic!("{path} {}: {error}", contract.name));
         let mut accepted = 0;
         let mut tries = 0;

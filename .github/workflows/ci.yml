@@ -49,8 +49,9 @@ jobs:
         run: |
           curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
-      - name: Check settle proof
+      - name: Check Lean proofs
         working-directory: proofs/lean
         run: |
           lean Settle.lean
-          ! grep -n "sorry" Settle.lean
+          lean Lists.lean
+          ! grep -n "sorry" *.lean

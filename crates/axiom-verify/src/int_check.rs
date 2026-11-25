@@ -111,8 +111,8 @@ impl Lowering {
                     Some(var) => var.clone(),
                     None => {
                         let var = Int::new_const(format!("int!{name}"));
-                        self.ranges.push(var.ge(&Int::from_u64(0)));
-                        self.ranges.push(var.lt(&pow2(width)));
+                        self.ranges.push(var.ge(Int::from_u64(0)));
+                        self.ranges.push(var.lt(pow2(width)));
                         self.vars.insert(name, var.clone());
                         var
                     }
@@ -129,11 +129,11 @@ impl Lowering {
                     return Some(Lowered::Int(Int::sub(&args)));
                 }
                 DeclKind::Budiv | DeclKind::BudivI if args.len() == 2 => {
-                    self.exact.push(args[1].gt(&Int::from_u64(0)));
+                    self.exact.push(args[1].gt(Int::from_u64(0)));
                     return Some(Lowered::Int(args[0].div(&args[1])));
                 }
                 DeclKind::Burem | DeclKind::BuremI if args.len() == 2 => {
-                    self.exact.push(args[1].gt(&Int::from_u64(0)));
+                    self.exact.push(args[1].gt(Int::from_u64(0)));
                     return Some(Lowered::Int(args[0].modulo(&args[1])));
                 }
                 DeclKind::Ite => {
@@ -255,10 +255,10 @@ mod tests {
             .bvudiv(&hundred)
             .bvmul(&hundred);
         let solver = Solver::new();
-        solver.assert(&t.bvule(&BV::from_u64(10_000_000, 32)));
-        solver.assert(&p.bvuge(&one));
-        solver.assert(&p.bvule(&BV::from_u64(50, 32)));
-        solver.assert(&rounded.bvmul(&p).bvult(&t));
+        solver.assert(t.bvule(BV::from_u64(10_000_000, 32)));
+        solver.assert(p.bvuge(&one));
+        solver.assert(p.bvule(BV::from_u64(50, 32)));
+        solver.assert(rounded.bvmul(&p).bvult(&t));
         assert!(proves_unsat(&solver));
     }
 
@@ -267,19 +267,19 @@ mod tests {
         // x * 2 < x holds only when the product wraps; integers alone would call it impossible.
         let x = bv("x");
         let solver = Solver::new();
-        solver.assert(&x.bvmul(&BV::from_u64(2, 32)).bvult(&x));
+        solver.assert(x.bvmul(BV::from_u64(2, 32)).bvult(&x));
         assert!(!proves_unsat(&solver));
         assert_eq!(solver.check(), SatResult::Sat);
 
         // 0 - 1 wraps to the largest value.
         let solver = Solver::new();
-        solver.assert(&x.bvsub(&BV::from_u64(1, 32)).bvugt(&x));
+        solver.assert(x.bvsub(BV::from_u64(1, 32)).bvugt(&x));
         assert!(!proves_unsat(&solver));
 
         // Division by 0 is all ones for bit-vectors.
         let y = bv("y");
         let solver = Solver::new();
-        solver.assert(&x.bvudiv(&y).bvugt(&x));
+        solver.assert(x.bvudiv(&y).bvugt(&x));
         assert!(!proves_unsat(&solver));
     }
 
@@ -287,8 +287,8 @@ mod tests {
     fn skips_operations_it_cannot_map() {
         let x = bv("x");
         let solver = Solver::new();
-        solver.assert(&x.bvslt(&BV::from_u64(0, 32)));
-        solver.assert(&x.bvsgt(&BV::from_u64(0, 32)));
+        solver.assert(x.bvslt(BV::from_u64(0, 32)));
+        solver.assert(x.bvsgt(BV::from_u64(0, 32)));
         assert!(!proves_unsat(&solver));
     }
 }

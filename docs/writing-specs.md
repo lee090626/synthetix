@@ -110,7 +110,7 @@ cart(prices[3])
   else -> sum(prices)
 ```
 
-A list has a fixed size from 1 to 16.
+A list has a fixed size from 1 to 16 (for any length, see below).
 
 Calculating with a whole list works item by item, and the answer is a list of
 the same size. Lists used together must have the same size:
@@ -124,6 +124,63 @@ to_pay(paid[3], share[3]) can be negative
 ```
 
 A page stores such an answer in a list: `owe = to_pay(paid, share)`.
+
+### Lists of any length
+
+Write the length as a name instead of a number: `prices[n]` takes any number
+of items. A `need n <= limit` line is required; Synthetix proves the rule for
+every length from 0 to the limit:
+
+```
+cart(prices[n])
+  need n <= 1000
+  need prices <= 100000
+  sum(prices) > 200000 -> 200000
+  else -> sum(prices)
+  promise answer <= sum(prices)
+```
+
+What you can write:
+
+| Write | Means | Needs |
+|---|---|---|
+| `sum(prices)`, `sum(paid - share)` | Add up every item (of an item-by-item calculation) | |
+| `min(prices)`, `max(prices)` | Smallest or largest item | `need n >= 1` |
+| `count(prices)` | `n` | |
+| `always -> prices - min(prices)` | An answer per item (a list answer) | |
+| `need prices <= 100000` | Holds for every item | Keep it apart from lines about `n` or `sum(...)` |
+| `balance(paid[n], share[n])`, `order(prices[n], fee)` | Lists share one length; other inputs work as usual | |
+
+What a `promise` can prove:
+
+| Promise | Holds when |
+|---|---|
+| `answer <= n * 1000000` | It follows from each item's range: a sum lies between `n` times the smallest and `n` times the largest item; `min` and `max` lie between those, and `min <= every item <= max` |
+| `answer <= sum(paid)` for `sum(paid - share)` | The sum uses only `+`, `-` and `*` of items: `sum(paid - 2 * share + fee)` is `sum(paid) - 2 * sum(share) + n * fee` |
+| `answer <= prices` for a list answer | It holds for every item |
+| `sum(answer) is sum(paid) - sum(share)` | The list answer is one `always -> ...` line; `sum(answer)` (also `min`, `max`) is that line inside `sum(...)` |
+| `sum(answer) <= total`, `sum(answer) >= total - n + 1` | The answer is `always -> total * weights / sum(weights)`, `total` and the weights are at least 0, and for `>=` `need n >= 1`. Shares round down, losing less than 1 each |
+
+What does not work yet, and what to do instead:
+
+| Not yet | Instead |
+|---|---|
+| A promise about `sum(prices / 2)` or `sum(a * b)` of two lists | A promise that follows from the ranges; the failing input may have sums no real list gives |
+| `sum(answer) is total` for shares | `<= total` and `>= total - n + 1`; an exact total needs a rule for what is left over |
+| `sum(answer)` with several answer lines | One `always -> ...` line |
+| `total - n + 1` in a rule without `can be negative` when `total` can be below `n` | `need total >= 50` (at least the limit), or `can be negative` |
+| A sum that can pass the number range (`need n <= 1000` and `need prices <= 100000` reach 100000000) | Lower the limit, limit the items with `need`, or add `with big numbers`; the error says when |
+| `prices[1]`, decimals, pages, calling the rule from another rule | |
+
+How it is proven: each item is proven like a rule of its own, and the rest of
+the rule is proven for every sum the items allow. The facts about sums, `min`,
+`max` and shares are proven once, for any length, in Lean
+(`proofs/lean/Lists.lean`).
+
+`axiom run cart.ax -- "[1,2,3]"` runs a file with one such rule. `--emit`
+gives a function taking arrays: `cart([1, 2, 3])` in JS and Python,
+`cart(&[1, 2, 3])` in Rust, `Cart([]uint32{1, 2, 3})` in Go. Example:
+`examples/any-length`.
 
 ### Decimals
 
@@ -236,7 +293,7 @@ People who owe pay in list order to people who are owed, in list order.
 `settle` is built in and proven once, in Lean, for any number of people:
 [proofs/lean/Settle.lean](../proofs/lean/Settle.lean) shows that when the
 balances add up to 0, what each person sends is what they owe and what each
-receives is what they are owed, so every balance ends at exactly 0. It is not
+receives is what they are owed, so every balance ends at exactly 0; a call whose balances do not add up to 0 is refused. It is not
 proven again on each build. Tests check the generated code against this on
 random balances, and that there are at most n - 1 transfers. Up to 21 people,
 each balance within ±100,000,000. It does not promise the fewest

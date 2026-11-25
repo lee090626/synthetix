@@ -126,15 +126,6 @@ pub struct VerificationMetrics {
     pub solver_time_ns: u128,
 }
 
-impl VerificationMetrics {
-    pub fn merge(&mut self, other: Self) {
-        self.precondition_check_invocations += other.precondition_check_invocations;
-        self.precondition_translation_time_ns += other.precondition_translation_time_ns;
-        self.solver_invocations += other.solver_invocations;
-        self.solver_time_ns += other.solver_time_ns;
-    }
-}
-
 fn solver_check(solver: &Solver, metrics: &mut Option<&mut VerificationMetrics>) -> SatResult {
     let check = || {
         if int_check::proves_unsat(solver) {
@@ -1677,7 +1668,7 @@ fn expr_to_bv(expr: &Expr, args: &[BV]) -> Result<BV, String> {
             .get(*index as usize)
             .cloned()
             .ok_or_else(|| format!("candidate references missing argument {}", index)),
-        Expr::Const(value) => Ok(BV::from_u64(*value as u64, bits())),
+        Expr::Const(value) => Ok(BV::from_u64(*value, bits())),
         Expr::Add(lhs, rhs) => Ok(&expr_to_bv(lhs, args)? + &expr_to_bv(rhs, args)?),
         Expr::Sub(lhs, rhs) => Ok(&expr_to_bv(lhs, args)? - &expr_to_bv(rhs, args)?),
         Expr::Mul(lhs, rhs) => Ok(&expr_to_bv(lhs, args)? * &expr_to_bv(rhs, args)?),
@@ -2396,6 +2387,7 @@ mod tests {
             decimals: 0,
             labels: Vec::new(),
             wide: false,
+            list: None,
         };
         assert!(matches!(
             check_contract(&invalid).unwrap(),

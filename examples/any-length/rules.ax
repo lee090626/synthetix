@@ -1,0 +1,95 @@
+# 장바구니 합계: 물건이 몇 개든, 20만 원을 넘으면 20만 원
+cart(prices[n])
+  need n <= 1000
+  need prices <= 100000
+  sum(prices) > 200000 -> 200000
+  else -> sum(prices)
+  promise answer <= sum(prices)
+  promise answer <= 200000
+
+# 모임 전체로 본 차액: 낸 돈 - 몫, 사람이 몇 명이든
+balance(paid[n], share[n]) can be negative
+  need n <= 50
+  need paid >= 0 and paid <= 1000000
+  need share >= 0 and share <= 1000000
+  always -> sum(paid - share)
+  promise answer <= n * 1000000
+  promise answer >= 0 - n * 1000000
+
+# 주문 금액: 물건값 합계 + 물건마다 붙는 배송비
+order(prices[n], fee) with big numbers
+  need n <= 10000
+  need prices <= 1000000000000
+  need fee <= 100000
+  always -> sum(prices) + count(prices) * fee
+  promise answer >= sum(prices)
+
+# 물건마다 할인한 값: 답이 목록 (물건 수만큼)
+discount(prices[n], rate)
+  need n <= 1000
+  need prices <= 100000
+  need rate <= 100
+  always -> prices - prices * rate / 100
+  promise answer <= prices
+
+# 비율대로 나눈 몫: 항목 하나와 목록 전체 합을 섞어 씀
+share(weights[n], total)
+  need n <= 50
+  need n >= 1
+  need weights >= 1 and weights <= 1000
+  need total <= 1000000
+  always -> total * weights / sum(weights)
+  promise sum(answer) <= total
+
+# 가장 비싼 물건과 가장 싼 물건의 값 차이
+spread(prices[n])
+  need n <= 1000
+  need n >= 1
+  need prices <= 100000
+  always -> max(prices) - min(prices)
+  promise answer <= 100000
+
+# 가장 손해 본 사람의 차액 (낸 돈 - 몫이 가장 작은 값)
+worst(paid[n], share[n]) can be negative
+  need n <= 50
+  need n >= 1
+  need paid >= 0 and paid <= 1000000
+  need share >= 0 and share <= 1000000
+  always -> min(paid - share)
+  promise answer <= 1000000
+
+# 물건마다 가장 싼 물건보다 얼마나 비싼지: 답이 목록
+above(prices[n])
+  need n <= 1000
+  need n >= 1
+  need prices <= 100000
+  always -> prices - min(prices)
+  promise answer <= prices
+
+# 할인 뒤 합계: 물건값 합에서 할인액 합을 뺀 것보다 크지 않음
+net(prices[n], off[n])
+  need n <= 1000
+  need prices <= 100000
+  need off <= prices
+  always -> sum(prices - off)
+  promise answer <= sum(prices)
+  promise answer + sum(off) is sum(prices)
+
+# 사람마다 낼 돈: 답이 목록, 그 합은 낸 돈 합 - 몫 합
+gap(paid[n], share[n]) can be negative
+  need n <= 50
+  need paid >= 0 and paid <= 1000000
+  need share >= 0 and share <= 1000000
+  always -> paid - share
+  promise sum(answer) is sum(paid) - sum(share)
+  promise sum(answer) <= n * 1000000
+
+# 비율대로 나눈 몫: 버림이라 합은 총액 이하, 사람 수보다 적게만 모자람
+fair(weights[n], total) can be negative
+  need n <= 50
+  need n >= 1
+  need weights >= 1 and weights <= 1000
+  need total >= 0 and total <= 1000000
+  always -> total * weights / sum(weights)
+  promise sum(answer) <= total
+  promise sum(answer) >= total - n + 1

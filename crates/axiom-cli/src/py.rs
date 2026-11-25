@@ -81,9 +81,12 @@ const KEYWORDS: &[&str] = &[
     "with", "yield",
 ];
 
-/// A Python name for a rule or input: keywords get a trailing `_`.
+/// Builtins the emitted Python calls; a rule or input with one of these names would shadow it.
+const BUILTINS: &[&str] = &["abs", "int", "isinstance", "len", "list", "range", "tuple"];
+
+/// A Python name for a rule or input: keywords and builtins get a trailing `_`.
 fn ident(name: &str) -> String {
-    if KEYWORDS.contains(&name) {
+    if KEYWORDS.contains(&name) || BUILTINS.contains(&name) {
         format!("{name}_")
     } else {
         name.to_string()
@@ -161,6 +164,12 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
         if let Some((base, parts)) = list_parts(contract, &contracts) {
             out += "\n\n";
             out += &list_wrapper(base, &parts);
+        }
+    }
+    for contract in &contracts {
+        if let Some(rule) = &contract.list {
+            out += "\n\n";
+            out += &any_length_wrapper(contract, rule);
         }
     }
     let sizes = settle_sizes(&contracts);
@@ -258,6 +267,82 @@ fn list_wrapper(base: &str, parts: &[&Contract]) -> String {
     )
 }
 
+/// `cart(prices)` for a rule over lists of any length: checks the length,
+/// adds each item rule over the items in a loop, then calls the core.
+fn any_length_wrapper(core: &Contract, rule: &axiom_parser::ListRule) -> String {
+    let names: Vec<String> = rule.params.iter().map(|(p, _)| ident(p)).collect();
+    let first = rule.params.iter().position(|(_, list)| *list).unwrap_or(0);
+    let mut checks = String::new();
+    for (i, (_, list)) in rule.params.iter().enumerate() {
+        if *list {
+            checks += &format!(
+                "    if not isinstance({0}, (list, tuple)) or len({0}) != len({1}):\n        raise TypeError(\"{2}: {0} must be a list as long as the other lists\")\n",
+                names[i], names[first], rule.name
+            );
+        }
+    }
+    let item_args: Vec<String> = rule
+        .params
+        .iter()
+        .zip(&names)
+        .map(|((_, list), name)| {
+            if *list {
+                format!("{name}[_i]")
+            } else {
+                name.clone()
+            }
+        })
+        .collect();
+    let mut sums = String::new();
+    let mut body = String::new();
+    for (k, (item, fold)) in rule.items.iter().zip(&rule.folds).enumerate() {
+        sums += &format!("    sum{} = 0\n", k + 1);
+        let call = format!("{}({})", ident(item), item_args.join(", "));
+        body += &match fold {
+            axiom_parser::Fold::Sum => format!("        sum{} += {call}\n", k + 1),
+            axiom_parser::Fold::Min | axiom_parser::Fold::Max => format!(
+                "        _v = {call}\n        if _i == 0 or _v {} sum{1}:\n            sum{1} = _v\n",
+                if *fold == axiom_parser::Fold::Min {
+                    "<"
+                } else {
+                    ">"
+                },
+                k + 1
+            ),
+        };
+    }
+    let mut core_args: Vec<String> = if rule.each {
+        item_args.clone()
+    } else {
+        rule.params
+            .iter()
+            .zip(&names)
+            .filter(|((_, list), _)| !*list)
+            .map(|(_, name)| name.clone())
+            .collect()
+    };
+    core_args.push("_n".into());
+    core_args.extend((1..=rule.items.len()).map(|k| format!("sum{k}")));
+    if !body.is_empty() {
+        body = format!("    for _i in range(_n):\n{body}");
+    }
+    let call = format!("{}({})", ident(&core.name), core_args.join(", "));
+    let tail = if rule.each {
+        format!("[{call} for _i in range(_n)]")
+    } else {
+        call
+    };
+    format!(
+        "def {}({}):\n{checks}    _n = len({})\n    if {}_n > {}:\n        _fail(\"{}: input violates a requires clause\")\n{sums}{body}    return {tail}\n",
+        ident(&rule.name),
+        names.join(", "),
+        names[first],
+        crate::rs::too_few(rule, "_n", "or"),
+        rule.max,
+        rule.name,
+    )
+}
+
 /// `settle(owe)`: N from the list length, N * N transfers, item (i-1)*N+j
 /// from person i to person j.
 fn settle_wrapper(sizes: &[usize]) -> String {
@@ -276,4 +361,13 @@ fn settle_wrapper(sizes: &[usize]) -> String {
         "def settle(owe):\n{cases}    raise TypeError(\"settle: owe must have {} items\")\n",
         list.join(" or ")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_builtin_the_emitted_code_calls_is_not_a_name() {
+        assert_eq!(super::ident("len"), "len_");
+        assert_eq!(super::ident("prices"), "prices");
+    }
 }

@@ -246,16 +246,8 @@ fn analyze_command(args: &[String]) -> Result<(), String> {
 fn build_command(args: &[String]) -> Result<(), String> {
     if args.is_empty() || args[0].starts_with("--") {
         let emit = match args {
-            [] => web::Emit::None,
-            [flag, target] if flag == "--emit" && target == "js" => web::Emit::Js,
-            [flag, target] if flag == "--emit" && target == "rust" => web::Emit::Rust,
-            [flag, target] if flag == "--emit" && target == "python" => web::Emit::Python,
-            [flag, target] if flag == "--emit" && target == "go" => web::Emit::Go,
-            [flag, target] if flag == "--emit" => {
-                return Err(format!(
-                    "unknown emit target: {target} (supported: js, rust, python, go)"
-                ));
-            }
+            [] => None,
+            [flag, target] if flag == "--emit" => Some(web::emit_named(target)?),
             _ => return Err(format!("unknown project build option: {}", args.join(" "))),
         };
         let config =
@@ -374,6 +366,21 @@ fn dev_command(args: &[String]) -> Result<(), String> {
 
 fn run_command(args: &[String]) -> Result<(), String> {
     let options = parse_run_args(args)?;
+    if let Ok(source) = fs::read_to_string(options.input)
+        && let Ok(module) = axiom_parser::parse_module(&source)
+        && let Some(core) = module.contracts.iter().find(|c| c.list.is_some())
+        && core
+            .list
+            .as_ref()
+            .is_some_and(|r| r.items.len() + 1 == module.contracts.len())
+    {
+        if options.report.is_some() || options.output.is_some() {
+            return Err(
+                "a list rule's run prints the result only: drop --report and -o".to_string(),
+            );
+        }
+        return run_any_length(&module.contracts, core, &options.values);
+    }
     let contract = read_contract(options.input)?;
     if contract.params.len() != options.values.len() {
         return Err(format!(
@@ -442,8 +449,12 @@ fn run_command(args: &[String]) -> Result<(), String> {
                 return Err(error);
             }
         };
-    fs::write(&options.output, &module)
-        .map_err(|error| format!("cannot write {}: {error}", options.output.display()))?;
+    let output = options
+        .output
+        .clone()
+        .unwrap_or_else(|| default_output_path(options.input));
+    fs::write(&output, &module)
+        .map_err(|error| format!("cannot write {}: {error}", output.display()))?;
     let result = if contract.wide {
         axiom_wasm::run_wide(&module, &values)?
     } else {
@@ -456,7 +467,7 @@ fn run_command(args: &[String]) -> Result<(), String> {
             "run",
             &contract,
             &candidate,
-            &options.output,
+            &output,
             ReportDetails {
                 inputs: Some(&values),
                 result: Some(result),
@@ -500,7 +511,7 @@ fn run_command(args: &[String]) -> Result<(), String> {
         _ => shown(&contract, &contract.return_type, result),
     };
     println!("result: {answer}");
-    println!("wrote: {}", options.output.display());
+    println!("wrote: {}", output.display());
     if let Some(report) = options.report {
         println!("report: {}", report.display());
     }
@@ -536,6 +547,130 @@ fn application_run_command(args: &[String]) -> Result<(), String> {
 }
 
 /// `need` lines for one input. Wide rules check the lowered `need` at 64 bits.
+/// `axiom run` on a rule over lists of any length (lists written `[1,2,3]`):
+/// the same steps as emitted code, on the proven candidates of each item
+/// rule and the core.
+fn run_any_length(
+    all: &[axiom_parser::Contract],
+    core: &axiom_parser::Contract,
+    values: &[String],
+) -> Result<(), String> {
+    let rule = core.list.as_ref().expect("core of a list rule");
+    if values.len() != rule.params.len() {
+        return Err(format!(
+            "{} expects {} inputs, got {}",
+            rule.name,
+            rule.params.len(),
+            values.len()
+        ));
+    }
+    let ty = &core.params[0].ty;
+    let bits = if core.wide { 64 } else { 32 };
+    let mut inputs = Vec::new();
+    for (value, (name, list)) in values.iter().zip(&rule.params) {
+        let items: Vec<&str> = if *list {
+            let inner = value
+                .strip_prefix('[')
+                .and_then(|v| v.strip_suffix(']'))
+                .ok_or_else(|| format!("{name}: write a list as [1,2,3]"))?;
+            if inner.trim().is_empty() {
+                Vec::new()
+            } else {
+                // An empty item (`[1,,2]`) fails to parse as a number below.
+                inner.split(',').map(str::trim).collect()
+            }
+        } else {
+            vec![value.as_str()]
+        };
+        inputs.push(
+            items
+                .iter()
+                .map(|v| parse_input_value(v, ty, core.wide))
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+    }
+    let mut lengths = inputs
+        .iter()
+        .zip(&rule.params)
+        .filter(|(_, (_, list))| *list)
+        .map(|(v, _)| v.len());
+    let n = lengths.next().unwrap_or(0);
+    if lengths.any(|len| len != n) {
+        return Err(format!("{}: lists must have the same length", rule.name));
+    }
+    if (n as u64) < rule.least || n as u64 > rule.max {
+        return Err("input violates a requires clause".to_string());
+    }
+    let proven = |contract: &axiom_parser::Contract| {
+        axiom_synth::synthesize_with_options(contract, axiom_synth::SynthesisOptions::default())
+    };
+    let mask = if core.wide {
+        u64::MAX
+    } else {
+        u64::from(u32::MAX)
+    };
+    let item_args = |i: usize| -> Vec<u64> {
+        inputs
+            .iter()
+            .zip(&rule.params)
+            .map(|(v, (_, list))| if *list { v[i] } else { v[0] })
+            .collect()
+    };
+    let mut core_args: Vec<u64> = inputs
+        .iter()
+        .zip(&rule.params)
+        .filter(|(_, (_, list))| !*list)
+        .map(|(v, _)| v[0])
+        .collect();
+    core_args.push(n as u64);
+    // Signed items compare as signed numbers for `min`/`max`.
+    let shift = 64 - bits;
+    let key = |v: u64| match core.params[0].ty {
+        axiom_parser::Type::I32 => ((v << shift) as i64) >> shift,
+        _ => v as i64 ^ i64::MIN,
+    };
+    for (item, fold) in rule.items.iter().zip(&rule.folds) {
+        let contract = all
+            .iter()
+            .find(|c| &c.name == item)
+            .ok_or_else(|| format!("missing item rule {item}"))?;
+        let code = proven(contract)?;
+        let mut total = 0u64;
+        for i in 0..n {
+            let args = item_args(i);
+            check_requires(contract, &args)?;
+            let v = code.try_eval_bits(&args, bits)?;
+            total = match fold {
+                axiom_parser::Fold::Sum => total.wrapping_add(v) & mask,
+                axiom_parser::Fold::Min if i > 0 && key(total) <= key(v) => total,
+                axiom_parser::Fold::Max if i > 0 && key(total) >= key(v) => total,
+                _ => v,
+            };
+        }
+        core_args.push(total);
+    }
+    let code = proven(core)?;
+    let answer = |args: &[u64]| -> Result<String, String> {
+        check_requires(core, args)?;
+        let result = code.try_eval_bits(args, bits)?;
+        Ok(display_result(&core.return_type, result, core.wide))
+    };
+    let result = if rule.each {
+        let totals = core_args.split_off(core_args.len() - rule.items.len());
+        let answers = (0..n)
+            .map(|i| answer(&[item_args(i), vec![n as u64], totals.clone()].concat()))
+            .collect::<Result<Vec<_>, _>>()?;
+        format!("[{}]", answers.join(","))
+    } else {
+        answer(&core_args)?
+    };
+    println!("contract: {}", rule.name);
+    println!("proof_result: VERIFIED");
+    println!("verified: true");
+    println!("result: {result}");
+    Ok(())
+}
+
 fn check_requires(contract: &axiom_parser::Contract, values: &[u64]) -> Result<(), String> {
     if !contract.wide {
         let narrow: Vec<u32> = values.iter().map(|value| *value as u32).collect();
@@ -671,7 +806,15 @@ fn read_contract(input: &str) -> Result<axiom_parser::Contract, String> {
         fs::read_to_string(input).map_err(|error| format!("cannot read {input}: {error}"))?;
     axiom_parser::simple::check_user_syntax(&source)
         .map_err(|error| format!("INVALID: {error}"))?;
-    axiom_parser::parse(&source).map_err(|error| format!("INVALID: {error}"))
+    axiom_parser::parse(&source).map_err(|error| {
+        if axiom_parser::parse_module(&source)
+            .is_ok_and(|module| module.contracts.iter().any(|c| c.list.is_some()))
+        {
+            "INVALID: a rule over lists of any length needs a project: put it in a folder with synthetix.toml and build it there".to_string()
+        } else {
+            format!("INVALID: {error}")
+        }
+    })
 }
 
 /// Warns about `->` lines that an earlier line always beats, and prints one
@@ -1107,6 +1250,13 @@ fn parse_build_args(args: &[String]) -> Result<BuildArgs<'_>, String> {
         index += 1;
     }
 
+    if output == Path::new(input) || output.extension().is_some_and(|ext| ext == "ax") {
+        return Err(format!(
+            "output {} would replace a source file; choose another output path",
+            output.display()
+        ));
+    }
+
     Ok(BuildArgs {
         input,
         output,
@@ -1121,7 +1271,7 @@ fn parse_build_args(args: &[String]) -> Result<BuildArgs<'_>, String> {
 struct RunArgs<'a> {
     input: &'a str,
     values: Vec<String>,
-    output: PathBuf,
+    output: Option<PathBuf>,
     report: Option<PathBuf>,
     timeout: Option<Duration>,
     max_candidates: usize,
@@ -1135,7 +1285,7 @@ fn parse_run_args(args: &[String]) -> Result<RunArgs<'_>, String> {
 
     let input = args[0].as_str();
     let mut values = Vec::new();
-    let mut output = default_output_path(input);
+    let mut output = None;
     let mut report = None;
     let mut timeout = None;
     let mut max_candidates = axiom_synth::SynthesisOptions::default().max_candidates;
@@ -1149,7 +1299,11 @@ fn parse_run_args(args: &[String]) -> Result<RunArgs<'_>, String> {
     while index < args.len() {
         match args[index].as_str() {
             "-o" | "--output" => {
-                output = PathBuf::from(required_value(args, &mut index, "output path")?);
+                output = Some(PathBuf::from(required_value(
+                    args,
+                    &mut index,
+                    "output path",
+                )?));
             }
             "--report" => {
                 report = Some(PathBuf::from(required_value(
@@ -1232,6 +1386,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn build_output_is_never_a_source_file() {
+        let rejected = |rest: &[&str]| {
+            let args: Vec<String> = std::iter::once("r.ax")
+                .chain(rest.iter().copied())
+                .map(String::from)
+                .collect();
+            parse_build_args(&args).is_err()
+        };
+        assert!(rejected(&["-o", "r.ax"]));
+        assert!(rejected(&["-o", "other.ax"]));
+        assert!(!rejected(&["-o", "r.wasm"]));
+    }
+
+    #[test]
     fn check_report_fields() {
         assert_eq!(check_report(&Ok(())), serde_json::json!({ "ok": true }));
         let report = check_report(&Err(
@@ -1270,7 +1438,7 @@ mod tests {
 
         let parsed = parse_run_args(&args).unwrap();
         assert_eq!(parsed.values, vec!["5", "7"]);
-        assert_eq!(parsed.output, PathBuf::from("add.wasm"));
+        assert_eq!(parsed.output, Some(PathBuf::from("add.wasm")));
     }
 
     #[test]

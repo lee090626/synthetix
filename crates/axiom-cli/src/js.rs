@@ -201,6 +201,12 @@ const RESERVED: &[&str] = &[
     "public",
     "arguments",
     "eval",
+    "Number",
+    "Math",
+    "BigInt",
+    "Array",
+    "TypeError",
+    "RangeError",
 ];
 
 fn check_for(name: &str, ty: &Type, var: &str, wide: bool) -> Result<String, String> {
@@ -265,6 +271,14 @@ pub fn emit_modules(
             dts += &declaration;
         }
     }
+    for contract in &contracts {
+        if let Some(rule) = &contract.list {
+            let (function, declaration) = any_length_wrapper(contract, rule)?;
+            js += "\n";
+            js += &function;
+            dts += &declaration;
+        }
+    }
     if let Some((function, declaration)) = settle_wrapper(&contracts) {
         js += "\n";
         js += &function;
@@ -278,7 +292,7 @@ pub(crate) fn settle_sizes(all: &[&Contract]) -> Vec<usize> {
     if all.iter().any(|c| c.name == "settle") {
         return Vec::new();
     }
-    (2..=16)
+    (2..=axiom_parser::simple::SETTLE_MAX)
         .filter(|n| all.iter().any(|c| c.name == format!("settle_{n}_1_1")))
         .collect()
 }
@@ -327,6 +341,100 @@ fn settle_wrapper(all: &[&Contract]) -> Option<(String, String)> {
             list.join(" or ")
         ),
         "export function settle(owe: number[]): number[];\n".to_string(),
+    ))
+}
+
+/// `cart(prices)` for a rule over lists of any length: checks the length,
+/// adds each item rule over the items in a loop, then calls the core. The
+/// sums cannot overflow below the length limit (`proofs/lean/Lists.lean`).
+fn any_length_wrapper(
+    core: &Contract,
+    rule: &axiom_parser::ListRule,
+) -> Result<(String, String), String> {
+    let wide = core.wide;
+    let item_ty = ts_type(&core.params[0].ty, wide)?;
+    let names: Vec<String> = (0..rule.params.len()).map(|i| format!("p{i}")).collect();
+    let first = rule.params.iter().position(|(_, list)| *list).unwrap_or(0);
+    let mut checks = String::new();
+    let mut dts = Vec::new();
+    for (i, (name, list)) in rule.params.iter().enumerate() {
+        let doc = if RESERVED.contains(&name.as_str()) {
+            names[i].clone()
+        } else {
+            name.clone()
+        };
+        if *list {
+            checks += &format!(
+                "  if (!Array.isArray(p{i}) || p{i}.length !== p{first}.length) throw new TypeError(\"{}: {doc} must be an array as long as the other lists\");\n",
+                rule.name
+            );
+            dts.push(format!("{doc}: {item_ty}[]"));
+        } else {
+            dts.push(format!("{doc}: {item_ty}"));
+        }
+    }
+    let zero = if wide { "0n" } else { "0" };
+    let item_args: Vec<String> = rule
+        .params
+        .iter()
+        .enumerate()
+        .map(|(i, (_, list))| {
+            if *list {
+                format!("p{i}[i]")
+            } else {
+                format!("p{i}")
+            }
+        })
+        .collect();
+    let mut loop_body = String::new();
+    let mut sums = String::new();
+    for (k, (item, fold)) in rule.items.iter().zip(&rule.folds).enumerate() {
+        sums += &format!("  let sum{} = {zero};\n", k + 1);
+        let call = format!("{item}({})", item_args.join(", "));
+        loop_body += &match fold {
+            axiom_parser::Fold::Sum => format!("    sum{} += {call};\n", k + 1),
+            axiom_parser::Fold::Min | axiom_parser::Fold::Max => format!(
+                "    {{ const v = {call}; if (i === 0 || v {} sum{1}) sum{1} = v; }}\n",
+                if *fold == axiom_parser::Fold::Min {
+                    "<"
+                } else {
+                    ">"
+                },
+                k + 1
+            ),
+        };
+    }
+    let mut core_args: Vec<String> = if rule.each {
+        item_args.clone()
+    } else {
+        rule.params
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, list))| !*list)
+            .map(|(i, _)| format!("p{i}"))
+            .collect()
+    };
+    core_args.push(if wide { "BigInt(n)".into() } else { "n".into() });
+    core_args.extend((1..=rule.items.len()).map(|k| format!("sum{k}")));
+    let call = format!("{}({})", core.name, core_args.join(", "));
+    let ret = ts_type(&core.return_type, wide)?;
+    let (ret, tail) = if rule.each {
+        (
+            format!("{ret}[]"),
+            format!("Array.from({{ length: n }}, (_, i) => {call})"),
+        )
+    } else {
+        (ret.to_string(), call)
+    };
+    let name = &rule.name;
+    Ok((
+        format!(
+            "export function {name}({}) {{\n{checks}  const n = p{first}.length;\n  if ({few}n > {max}) throw new RangeError(\"{name}: input violates a requires clause\");\n{sums}  for (let i = 0; i < n; i++) {{\n{loop_body}  }}\n  return {tail};\n}}\n",
+            names.join(", "),
+            max = rule.max,
+            few = crate::rs::too_few(rule, "n", "||"),
+        ),
+        format!("export function {name}({}): {ret};\n", dts.join(", ")),
     ))
 }
 
@@ -478,4 +586,28 @@ fn emit_function(
             dts_params.join(", ")
         ),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn settle_wrapper_takes_every_size_up_to_the_parser_limit() {
+        let module = axiom_parser::parse_module("use settle for 21\n").unwrap();
+        let all: Vec<&axiom_parser::Contract> = module.contracts.iter().collect();
+        assert_eq!(super::settle_sizes(&all), [21]);
+    }
+
+    #[test]
+    fn js_globals_the_emitted_code_uses_are_reserved() {
+        for name in [
+            "Number",
+            "Math",
+            "BigInt",
+            "Array",
+            "TypeError",
+            "RangeError",
+        ] {
+            assert!(super::RESERVED.contains(&name), "{name}");
+        }
+    }
 }

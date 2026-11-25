@@ -109,6 +109,52 @@ pub struct Contract {
     /// 64-bit words (`with big numbers`): `u32`/`i32` values, literals and
     /// arithmetic are 64 bits wide in this contract.
     pub wide: bool,
+    /// Set on the core of a rule over lists of any length (`prices[n]`).
+    pub list: Option<ListRule>,
+}
+
+/// A rule over lists of any length (`cart(prices[n])`, issue #182), split
+/// into one item rule per `sum(...)`, `min(...)` or `max(...)` and a core
+/// rule. Item rules take every input, with one item of each list; the core
+/// takes the inputs that are not lists, then the length, then each result, in
+/// `items` order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListRule {
+    /// The rule name the user wrote.
+    pub name: String,
+    /// The inputs in order; `true` marks a list.
+    pub params: Vec<(String, bool)>,
+    /// Item rules, one per `sum(...)`, `min(...)` or `max(...)`.
+    pub items: Vec<String>,
+    /// How each item rule's answers are combined, in `items` order.
+    pub folds: Vec<Fold>,
+    /// The `need n <= max` limit on the length.
+    pub max: u64,
+    /// The `need n >= least` limit on the length (0 when there is none).
+    pub least: u64,
+    /// The answer is a list: the core takes every input (one item of each
+    /// list) before the length and sums, and runs once per item.
+    pub each: bool,
+}
+
+/// How a list rule combines one item rule's answers over the items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fold {
+    Sum,
+    /// Needs at least one item (`need n >= 1`).
+    Min,
+    Max,
+}
+
+impl Fold {
+    /// The word the user writes, also the core's input name before its number.
+    pub fn word(self) -> &'static str {
+        match self {
+            Fold::Sum => "sum",
+            Fold::Min => "min",
+            Fold::Max => "max",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
