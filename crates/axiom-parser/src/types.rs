@@ -168,6 +168,13 @@ pub(crate) fn expand(source: &str) -> Result<Option<Expanded>, String> {
             end += 1;
         }
         let head = text.trim();
+        if head.starts_with(FROM_MARK) {
+            for line in &mut lines[index..end] {
+                line.clear();
+            }
+            index = end;
+            continue;
+        }
         let is_rule = is_top(&text)
             && !head.starts_with("page ")
             && !head.starts_with("from ")
@@ -201,6 +208,144 @@ pub(crate) fn expand(source: &str) -> Result<Option<Expanded>, String> {
         choices,
         answers,
     }))
+}
+
+/// Marks the name line of a rule another file declares (`from rules:
+/// total`), added by [`with_imported_types`] so calls to it are checked.
+const FROM_MARK: &str = "__from ";
+
+/// Adds to `source` the types its `from file: ...` lines name, and the
+/// name lines of the rules they name. `read` gives a file's source from the
+/// path written after `from`. The added lines go after the last line, so
+/// line numbers stay the user's. Types a named rule takes come too.
+pub fn with_imported_types(
+    source: &str,
+    read: &dyn Fn(&str) -> Result<String, String>,
+) -> Result<String, String> {
+    imported(source, read, 0)
+}
+
+fn imported(
+    source: &str,
+    read: &dyn Fn(&str) -> Result<String, String>,
+    depth: usize,
+) -> Result<String, String> {
+    if depth > 16 {
+        return Err("`from` lines import each other in a circle".to_string());
+    }
+    let mut lines: Vec<String> = source.lines().map(String::from).collect();
+    let mut added: Vec<String> = Vec::new();
+    let mut added_types: Vec<String> = Vec::new();
+    for line in &mut lines {
+        let text = strip_comment(line).to_string();
+        let Some(rest) = text.strip_prefix("from ") else {
+            continue;
+        };
+        let Some((file, names)) = rest.split_once(':') else {
+            continue;
+        };
+        let other = imported(&read(file.trim())?, read, depth + 1)?;
+        let mut other_lines: Vec<String> = other.lines().map(String::from).collect();
+        // Each `type` block of the other file, as written, with the types it names.
+        let mut blocks: Vec<(String, String, Vec<String>)> = Vec::new();
+        let mut at = 0;
+        while at < other_lines.len() {
+            let head = strip_comment(&other_lines[at]).to_string();
+            let mut end = at + 1;
+            while end < other_lines.len() && !is_top(strip_comment(&other_lines[end])) {
+                end += 1;
+            }
+            if let Some(decl) = head.strip_prefix("type ") {
+                let name = decl
+                    .split('=')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                let uses = other_lines[at + 1..end]
+                    .iter()
+                    .filter_map(|l| Some(strip_comment(l).split_once(':')?.1.trim().to_string()))
+                    .collect();
+                blocks.push((name, other_lines[at..end].join("\n"), uses));
+            }
+            at = end;
+        }
+        if blocks.is_empty() {
+            continue;
+        }
+        let types = read_types(&mut other_lines)?;
+        let signatures = signatures(&other_lines, &types)?;
+        let mut need: Vec<String> = Vec::new();
+        let mut rules = Vec::new();
+        for name in names.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+            if blocks.iter().any(|(n, _, _)| n == name) {
+                need.push(name.to_string());
+                continue;
+            }
+            rules.push(name.to_string());
+            if let Some((_, params, answer, _)) = signatures.iter().find(|(n, _, _, _)| n == name) {
+                need.extend(params.iter().flatten().cloned());
+                need.extend(answer.iter().cloned());
+            }
+        }
+        // The types the named ones hold, too.
+        let mut k = 0;
+        while k < need.len() {
+            if let Some((_, _, uses)) = blocks.iter().find(|(n, _, _)| *n == need[k]) {
+                for used in uses {
+                    if !need.contains(used) {
+                        need.push(used.clone());
+                    }
+                }
+            }
+            k += 1;
+        }
+        for (name, block, _) in &blocks {
+            if need.contains(name) && !added_types.contains(name) {
+                added_types.push(name.clone());
+                added.push(block.clone());
+            }
+        }
+        for rule in &rules {
+            let Some((_, params, answer, places)) =
+                signatures.iter().find(|(n, _, _, _)| n == rule)
+            else {
+                continue;
+            };
+            if params.iter().all(Option::is_none) && answer.is_none() {
+                continue;
+            }
+            let params: Vec<String> = params
+                .iter()
+                .enumerate()
+                .map(|(k, t)| match t {
+                    Some(t) => format!("v{k}: {t}"),
+                    None => format!("v{k}"),
+                })
+                .collect();
+            let decimals = if *places > 0 {
+                format!(" with {places} decimals")
+            } else {
+                String::new()
+            };
+            let mut sig = format!("{FROM_MARK}{rule}({}){decimals}", params.join(", "));
+            if let Some(Def::Choice(values)) = answer.as_deref().and_then(|a| types.get(a)) {
+                sig += &format!("\n  -> {}", values[0]);
+            }
+            added.push(sig);
+        }
+        let file = file.trim();
+        let rules = rules.join(", ");
+        *line = if rules.is_empty() {
+            String::new()
+        } else {
+            format!("from {file}: {rules}")
+        };
+    }
+    if added.is_empty() {
+        return Ok(source.to_string());
+    }
+    Ok(format!("{}\n\n{}\n", lines.join("\n"), added.join("\n\n")))
 }
 
 fn rule_name(head: &str) -> String {
@@ -456,6 +601,7 @@ fn signatures(lines: &[String], types: &Types) -> Result<Vec<Signature>, String>
         {
             continue;
         }
+        let head = head.strip_prefix(FROM_MARK).unwrap_or(head);
         let Some((name, rest)) = head.split_once('(') else {
             continue;
         };
@@ -1177,6 +1323,38 @@ mod tests {
         assert_eq!(names, ["orders__price", "orders__quantity", "orders__size"]);
         let e = err(&format!("{TYPES}f(sizes[3]: Size)\n  always -> 1\n"));
         assert!(e.contains("needs a length name"), "{e}");
+    }
+
+    #[test]
+    fn types_come_from_other_files() {
+        let shop = format!(
+            "{TYPES}fee(order: Order)\n  need order.price <= 100\n  always -> order.price\n\nsize_of(w)\n  w < 5 -> small\n  else -> large\n"
+        );
+        let read = |file: &str| {
+            assert_eq!(file, "shop");
+            Ok(shop.clone())
+        };
+        let main = "from shop: Order, fee, size_of\n\nf(o: Order)\n  need o.price <= 100\n  always -> fee(o)\n";
+        let module = crate::parse_module_with(main, &read).unwrap();
+        let f = module.contracts.iter().find(|c| c.name == "f").unwrap();
+        let names: Vec<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["o__price", "o__quantity", "o__size"]);
+        assert_eq!(
+            module.imports[0].names.len(),
+            2,
+            "types are not imported as rules"
+        );
+        // `Size` comes with `Order`, which holds it.
+        assert_eq!(f.choices[0].1.name, "Size");
+        let e = crate::parse_module_with(
+            "from shop: Order, fee, size_of\n\ng(w)\n  always -> fee(size_of(w))\n",
+            &read,
+        )
+        .unwrap_err();
+        assert!(
+            e.contains("takes a `Order` as input 1, got a `Size`"),
+            "{e}"
+        );
     }
 
     #[test]

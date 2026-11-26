@@ -27,6 +27,18 @@ pub fn parse(input: &str) -> Result<Contract, String> {
     Ok(contract)
 }
 
+/// [`parse_module`] for a file whose `from` lines may name types: `read`
+/// gives the source of the file written after `from`.
+pub fn parse_module_with(
+    input: &str,
+    read: &dyn Fn(&str) -> Result<String, String>,
+) -> Result<Module, String> {
+    if !simple::is_simple(input) {
+        return parse_module(input);
+    }
+    parse_module(&types::with_imported_types(input, read)?)
+}
+
 pub fn parse_module(input: &str) -> Result<Module, String> {
     if simple::is_simple(input) {
         if let Some(expanded) =

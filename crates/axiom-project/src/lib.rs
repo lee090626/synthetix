@@ -467,7 +467,7 @@ fn visit_module(
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     axiom_parser::simple::check_user_syntax(&source)
         .map_err(|error| format!("{}: {error}", path.display()))?;
-    let module = axiom_parser::parse_module(&source)
+    let module = axiom_parser::parse_module_with(&source, &|file| read_from(&path, file))
         .map_err(|error| format!("{}: {error}", path.display()))?;
     let source_contents = Arc::<[u8]>::from(source.as_bytes());
     let imports = module.imports.clone();
@@ -522,7 +522,7 @@ fn visit_module_retained(
         stats.modules_parsed += 1;
         axiom_parser::simple::check_user_syntax(&source)
             .map_err(|error| format!("{}: {error}", path.display()))?;
-        let module = axiom_parser::parse_module(&source)
+        let module = axiom_parser::parse_module_with(&source, &|file| read_from(&path, file))
             .map_err(|error| format!("{}: {error}", path.display()))?;
         (module, Arc::<[u8]>::from(source_bytes))
     };
@@ -637,6 +637,18 @@ fn resolve_import(source: &Path, import: &Import) -> Result<PathBuf, String> {
         ));
     }
     canonical(&path)
+}
+
+/// The source of `file`, written after `from` in the file at `source`.
+fn read_from(source: &Path, file: &str) -> Result<String, String> {
+    let mut path = source
+        .parent()
+        .ok_or_else(|| format!("cannot determine parent of {}", source.display()))?
+        .join(file);
+    if path.extension().is_none() {
+        path.set_extension("ax");
+    }
+    fs::read_to_string(&path).map_err(|error| format!("cannot read {}: {error}", path.display()))
 }
 
 fn import_candidate_path(source: &Path, import: &Import) -> Result<PathBuf, String> {
