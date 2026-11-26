@@ -43,3 +43,31 @@ fn fit_price_lean_theorem_matches_the_checked_copy() {
 fn web_counter_lean_theorem_matches_the_checked_copy() {
     check("examples/web-counter/logic.ax", "web_counter");
 }
+
+#[test]
+fn project_build_writes_one_lean_theorem_per_rule() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/web-counter");
+    let dir = std::env::temp_dir().join(format!("axiom-lean-project-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in ["synthetix.toml", "main.ax", "logic.ax"] {
+        std::fs::copy(root.join(name), dir.join(name)).unwrap();
+    }
+    let out = Command::new(env!("CARGO_BIN_EXE_axiom"))
+        .args(["build", "--lean"])
+        .current_dir(&dir)
+        .env("PATH", "")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("lean: increment SKIPPED (lean not found)"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("lean_result: 0 proved, 0 not covered, 0 unproven, 0 failed"));
+    assert!(dir.join("dist/lean/increment.lean").exists());
+}

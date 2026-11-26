@@ -22,6 +22,7 @@ type SynthesisOutput = (
 
 mod go;
 mod js;
+mod lean;
 mod py;
 mod rs;
 mod web;
@@ -33,8 +34,8 @@ usage:
   axiom check <contract.ax>
   axiom analyze <contract.ax> [--timeout-ms N] [--report report.json]
   axiom check [--report check.json]
-  axiom build <contract.ax> [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N] [--max-memory-bytes N] [--emit js]
-  axiom build [--emit js|rust]
+  axiom build <contract.ax> [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N] [--max-memory-bytes N] [--emit js] [--lean]
+  axiom build [--emit js|rust|python|go] [--lean]
   axiom run <contract.ax> [--] [<value>...] [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N] [--max-memory-bytes N]
   axiom app-run <contract.ax> [--] [<application-value>...]
   axiom <contract.ax> [-o output.wasm]
@@ -245,17 +246,25 @@ fn analyze_command(args: &[String]) -> Result<(), String> {
 
 fn build_command(args: &[String]) -> Result<(), String> {
     if args.is_empty() || args[0].starts_with("--") {
-        let emit = match args {
-            [] => None,
-            [flag, target] if flag == "--emit" => Some(web::emit_named(target)?),
-            _ => return Err(format!("unknown project build option: {}", args.join(" "))),
-        };
+        let mut emit = None;
+        let mut lean = false;
+        let mut rest = args.iter();
+        while let Some(flag) = rest.next() {
+            match (flag.as_str(), rest.clone().next()) {
+                ("--emit", Some(target)) if emit.is_none() => {
+                    emit = Some(web::emit_named(target)?);
+                    rest.next();
+                }
+                ("--lean", _) if !lean => lean = true,
+                _ => return Err(format!("unknown project build option: {}", args.join(" "))),
+            }
+        }
         let config =
             axiom_project::find_config(env::current_dir().map_err(|error| error.to_string())?)?;
         let root = config
             .parent()
             .ok_or_else(|| "cannot determine project root".to_string())?;
-        return web::build_with_options(&config, &root.join("dist"), emit).map(|_| ());
+        return web::build_with_options(&config, &root.join("dist"), emit, lean).map(|_| ());
     }
     let options = parse_build_args(args)?;
     let (contract, candidate, module, diagnostic, candidates_checked) = match synthesize(
@@ -1205,37 +1214,21 @@ struct BuildArgs<'a> {
     lean: bool,
 }
 
-/// `axiom build --lean`: writes the rule's Lean theorem next to the output and
-/// checks it with `lean` when it is installed (issue #211).
+/// `axiom build FILE --lean`: writes the rule's Lean theorem next to the
+/// output and checks it with `lean` when it is installed (issue #211).
 fn prove_with_lean(
     contract: &axiom_parser::Contract,
     candidate: &axiom_ami::Expr,
     output: &Path,
 ) -> Result<(), String> {
-    use axiom_verify::lean::{LeanExport, export};
-    let source = match export(contract, candidate) {
-        LeanExport::Source(source) => source,
-        LeanExport::NotCovered(reason) => {
-            println!("lean_result: NOT_COVERED ({reason})");
-            return Ok(());
-        }
-    };
     let path = output.with_extension("lean");
-    fs::write(&path, source)
-        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
-    println!("wrote: {}", path.display());
-    match std::process::Command::new("lean").arg(&path).output() {
-        Err(_) => println!("lean_result: SKIPPED (lean not found)"),
-        Ok(run) if run.status.success() => println!("lean_result: PROVED"),
-        Ok(run) => {
-            println!("lean_result: FAILED");
-            return Err(format!(
-                "Lean did not accept {}:\n{}{}",
-                path.display(),
-                String::from_utf8_lossy(&run.stdout),
-                String::from_utf8_lossy(&run.stderr)
-            ));
-        }
+    let outcome = lean::prove(contract, candidate, &path)?;
+    if !matches!(outcome, lean::Outcome::NotCovered(_)) {
+        println!("wrote: {}", path.display());
+    }
+    println!("lean_result: {}", outcome.line());
+    if let lean::Outcome::Failed(output) = outcome {
+        return Err(format!("Lean did not accept {}:\n{output}", path.display()));
     }
     Ok(())
 }
