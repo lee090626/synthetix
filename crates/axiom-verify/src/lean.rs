@@ -52,6 +52,28 @@ pub fn export(contract: &Contract, candidate: &Expr) -> LeanExport {
     }
 }
 
+/// Lemmas a `hint` line may name (issue #215): each is proven here, by Lean,
+/// in every file that uses it, and states its fact as a `Bool` that holds for
+/// every input so `bv_decide` can use it. `(name, arguments, Lean source)`.
+pub const LEMMAS: &[(&str, usize, &str)] = &[(
+    "mul_div_le",
+    3,
+    "/-- `x * y / z <= x` when `y <= z` and `x * y` does not wrap. -/
+theorem mul_div_le {w : Nat} (x y z : BitVec w) :
+    (!(BitVec.ule y z) || x.umulOverflow y || BitVec.ule ((x * y).udiv z) x) = true := by
+  rcases Nat.eq_zero_or_pos z.toNat with hz | hz
+  · have : z = 0#w := by apply BitVec.eq_of_toNat_eq; simp [hz]
+    subst this; simp [BitVec.ule]
+  · by_cases hyz : BitVec.ule y z <;> by_cases ho : x.umulOverflow y <;> simp [hyz, ho]
+    simp only [BitVec.ule, decide_eq_true_eq] at hyz ⊢
+    simp only [BitVec.umulOverflow, decide_eq_true_eq, Nat.not_le] at ho
+    rw [BitVec.toNat_udiv, BitVec.toNat_mul, Nat.mod_eq_of_lt ho]
+    apply Nat.div_le_of_le_mul
+    rw [Nat.mul_comm z.toNat]
+    exact Nat.mul_le_mul_left _ hyz
+",
+)];
+
 /// The most cases [`export_split`] proves one by one.
 pub const MAX_SPLIT_CASES: u64 = 64;
 
@@ -131,9 +153,6 @@ fn build(
     candidate: &Expr,
     split: Option<(&str, u64, u64)>,
 ) -> Result<String, String> {
-    if contract.list.is_some() {
-        return Err("rules over lists".to_string());
-    }
     if contract.ensures.is_empty() {
         return Err("a rule without promises".to_string());
     }
@@ -207,9 +226,36 @@ fn build(
         ident(&contract.name),
         all(&requires_defined),
     );
+    // `hint` lines: each lemma's fact, then its division as a fresh word, so
+    // `bv_decide` reasons from the fact instead of the division's circuit.
+    let mut lemmas = String::new();
+    let mut steps = String::new();
+    for (k, hint) in contract.hints.iter().enumerate() {
+        let Some((name, arity, text)) = LEMMAS.iter().find(|(name, ..)| *name == hint.lemma) else {
+            return Err(format!("hint `{}`: no such lemma", hint.lemma));
+        };
+        if hint.args.len() != *arity {
+            return Err(format!("hint `{name}` takes {arity} values"));
+        }
+        let args = hint
+            .args
+            .iter()
+            .map(|arg| ctx.value(arg, &empty).map(|term| term.text))
+            .collect::<Result<Vec<_>, _>>()?;
+        if !lemmas.contains(text) {
+            lemmas += text;
+            lemmas += "\n";
+        }
+        let _ = writeln!(steps, "  have h{k} := {name} {}", args.join(" "));
+        let _ = writeln!(
+            steps,
+            "  generalize BitVec.udiv ({} * {}) {} = q{k} at *",
+            args[0], args[1], args[2]
+        );
+    }
     let hypothesis = format!("({inputs} && {need})");
     let proof = match split {
-        None => "  bv_decide".to_string(),
+        None => format!("{steps}  bv_decide"),
         Some((name, low, high)) => {
             // Either the `need` lines fail, or the input is one of its values.
             let cases = (low..=high)
@@ -217,11 +263,12 @@ fn build(
                 .collect::<Vec<_>>();
             let names = vec!["h"; cases.len() + 1].join(" | ");
             format!(
-                "  rcases (show {} ∨ {hypothesis} = false by bv_decide) with {names}\n  all_goals first | (subst h; bv_decide) | simp [h]",
+                "{steps}  rcases (show {} ∨ {hypothesis} = false by bv_decide) with {names}\n  all_goals first | (subst h; bv_decide) | simp [h]",
                 cases.join(" ∨ ")
             )
         }
     };
+    out += &lemmas;
     let _ = writeln!(
         out,
         "/-- When the `need` lines hold, the answer is defined and keeps every promise. -/\ntheorem {}_proved{binders} :\n    (!{hypothesis} || {goal}) = true := by\n{proof}",
@@ -651,6 +698,29 @@ mod tests {
         )
         .unwrap();
         assert!(export_split(&wide, &Expr::Arg(0)).is_none());
+    }
+
+    #[test]
+    fn a_hint_states_its_lemma_and_replaces_the_division() {
+        let lean = source(
+            "f(x, y, z)\n  need x <= 1000\n  need y <= z\n  need z >= 1 and z <= 1000\n  always -> x * y / z\n  promise answer <= x\n  hint mul_div_le(x, y, z)\n",
+            Expr::Div(
+                Box::new(Expr::Mul(Box::new(Expr::Arg(0)), Box::new(Expr::Arg(1)))),
+                Box::new(Expr::Arg(2)),
+            ),
+        );
+        assert!(lean.contains("theorem mul_div_le"), "{lean}");
+        assert!(lean.contains("have h0 := mul_div_le x_x x_y x_z"), "{lean}");
+        assert!(
+            lean.contains("generalize BitVec.udiv (x_x * x_y) x_z = q0 at *"),
+            "{lean}"
+        );
+
+        let unknown = parse("f(x)\n  always -> x\n  hint nope(x)\n").unwrap();
+        assert_eq!(
+            export(&unknown, &Expr::Arg(0)),
+            LeanExport::NotCovered("hint `nope`: no such lemma".to_string())
+        );
     }
 
     #[test]

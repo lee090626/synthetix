@@ -62,3 +62,4 @@ fee_first(a, b, rate) with big numbers
   need rate <= 1000
   always -> fee(a + b, rate) * a / (a + b)
   promise answer <= fee(a + b, rate)
+  hint mul_div_le(fee(a + b, rate), a, a + b)

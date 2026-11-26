@@ -93,3 +93,13 @@ fair(weights[n], total) can be negative
   always -> total * weights / sum(weights)
   promise sum(answer) <= total
   promise sum(answer) >= total - n + 1
+
+# 비율대로 나누고 남는 돈은 앞사람부터 1원씩: 합이 총액과 정확히 같음
+split(weights[n], total)
+  need n <= 50
+  need n >= 1
+  need weights >= 1 and weights <= 1000
+  need total <= 1000000
+  position <= total - sum(total * weights / sum(weights)) -> total * weights / sum(weights) + 1
+  else -> total * weights / sum(weights)
+  promise sum(answer) is total

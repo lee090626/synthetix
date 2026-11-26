@@ -294,11 +294,19 @@ fn any_length_wrapper(core: &Contract, rule: &axiom_parser::ListRule) -> String 
         })
         .collect();
     let mut sums = String::new();
-    let mut body = String::new();
+    let (mut body, mut second_loop) = (String::new(), String::new());
     for (k, (item, fold)) in rule.items.iter().zip(&rule.folds).enumerate() {
         sums += &format!("    sum{} = 0\n", k + 1);
-        let call = format!("{}({})", ident(item), item_args.join(", "));
-        body += &match fold {
+        // An item taking list totals (`sum(w / sum(w))`) runs in a second loop.
+        let mut args = item_args.clone();
+        args.extend(rule.uses[k].iter().map(|j| format!("sum{}", j + 1)));
+        let call = format!("{}({})", ident(item), args.join(", "));
+        let target = if rule.uses[k].is_empty() {
+            &mut body
+        } else {
+            &mut second_loop
+        };
+        *target += &match fold {
             axiom_parser::Fold::Sum => format!("        sum{} += {call}\n", k + 1),
             axiom_parser::Fold::Min | axiom_parser::Fold::Max => format!(
                 "        _v = {call}\n        if _i == 0 or _v {} sum{1}:\n            sum{1} = _v\n",
@@ -322,9 +330,15 @@ fn any_length_wrapper(core: &Contract, rule: &axiom_parser::ListRule) -> String 
             .collect()
     };
     core_args.push("_n".into());
+    if rule.position {
+        core_args.push("_i + 1".into());
+    }
     core_args.extend((1..=rule.items.len()).map(|k| format!("sum{k}")));
     if !body.is_empty() {
         body = format!("    for _i in range(_n):\n{body}");
+    }
+    if !second_loop.is_empty() {
+        body += &format!("    for _i in range(_n):\n{second_loop}");
     }
     let call = format!("{}({})", ident(&core.name), core_args.join(", "));
     let tail = if rule.each {
