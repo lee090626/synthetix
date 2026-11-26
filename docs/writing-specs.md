@@ -210,6 +210,35 @@ number of steps (`loop_inv` in `proofs/lean/Repeat.lean`). The promises are
 also what keeps the step's numbers in range, so bound `value` from above.
 `repeat` does not work with lists yet.
 
+### A rule that calls itself
+
+A rule may call itself with one less. The first `->` line answers for 0;
+the other lines may call the rule with the same inputs and `n - 1` for `n`:
+
+```
+triangle(n)
+  need n <= 1000
+  n is 0 -> 0
+  else -> n + triangle(n - 1)
+  promise answer * 2 is n * (n + 1)
+  promise answer <= 1000000
+```
+
+A `need n <= limit` line and at least one `promise` are required. Each
+promise must hold for 0, and for `n` whenever it holds for the call's answer
+(for `n - 1`); Synthetix proves those two, and then it holds for every `n`
+(`rec_inv` in `proofs/lean/Repeat.lean`). As with `repeat`, the promises keep
+the numbers in range, so bound the answer from above. A failing input names
+`n__prev` (that is `n - 1`) and `value` (the call's answer). Example:
+`examples/recursion`.
+
+| Not yet | Instead |
+|---|---|
+| Calls with other inputs changed, or `n - 2` | Keep the other inputs; one less each call |
+| A `need` about `n` other than `n <= limit` (`need n >= 3`) | A condition line (`n < 3 -> ...`) |
+| Named values, lists, decimals, `can be negative`, a record answer | `->` lines on numbers |
+| Calling the rule from another rule, or from a page | `--emit` or `axiom run` |
+
 ### Decimals
 
 Add `with 2 decimals` (1 to 6 places) to the name line. Every value in the rule,

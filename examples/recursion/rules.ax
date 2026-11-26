@@ -1,0 +1,17 @@
+# 1부터 n까지의 합: 몇이든 n * (n + 1) / 2
+triangle(n)
+  need n <= 1000
+  n is 0 -> 0
+  else -> n + triangle(n - 1)
+  promise answer * 2 is n * (n + 1)
+  promise answer <= 1000000
+
+# 계단 요금: 한 층에 fee, 10층 위로는 절반. 몇 층이든 n * fee 이하
+stairs(fee, n)
+  need n <= 100
+  need fee <= 10000
+  n is 0 -> 0
+  n > 10 -> fee / 2 + stairs(fee, n - 1)
+  else -> fee + stairs(fee, n - 1)
+  promise answer <= n * fee
+  promise answer <= 1000000

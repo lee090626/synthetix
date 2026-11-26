@@ -4,6 +4,7 @@ pub mod ast;
 pub mod lexer;
 mod lists;
 pub mod parser;
+mod recursion;
 mod repeat;
 pub mod simple;
 mod types;

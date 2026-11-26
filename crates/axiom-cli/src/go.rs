@@ -299,9 +299,13 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
             }
             let ret = go_type(&contract.return_type, contract.wide)?;
             let count_ty = go_type(&inputs[rule.count].ty, contract.wide)?;
+            let mut step_args = names.clone();
+            if rule.counted {
+                step_args[rule.count] = "stepPlace".to_string();
+            }
             // The start, then the step `count` times (`proofs/lean/Repeat.lean`).
             out += &format!(
-                "\n// {go_name} is the proven rule `{}`: the start, then the step {} times.\nfunc {go_name}({}) (result {ret}, err error) {{\n\tif result, err = {}({}); err != nil {{\n\t\treturn result, err\n\t}}\n\tfor i := {count_ty}(0); i < {}; i++ {{\n\t\tif result, err = {}({}, result); err != nil {{\n\t\t\treturn result, err\n\t\t}}\n\t}}\n\treturn result, nil\n}}\n",
+                "\n// {go_name} is the proven rule `{}`: the start, then the step {} times.\nfunc {go_name}({}) (result {ret}, err error) {{\n\tif result, err = {}({}); err != nil {{\n\t\treturn result, err\n\t}}\n\tfor stepPlace := {count_ty}(0); stepPlace < {}; stepPlace++ {{\n\t\tif result, err = {}({}, result); err != nil {{\n\t\t\treturn result, err\n\t\t}}\n\t}}\n\treturn result, nil\n}}\n",
                 rule.name,
                 names[rule.count],
                 params.join(", "),
@@ -309,7 +313,7 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
                 names.join(", "),
                 names[rule.count],
                 exported(&contract.name),
-                names.join(", "),
+                step_args.join(", "),
             );
         }
     }
