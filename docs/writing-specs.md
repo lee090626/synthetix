@@ -333,7 +333,7 @@ More types:
 | A promise naming two fields of a record answer (`answer.tax <= answer.goods`) | A promise on each field |
 | A record answer whose field is a record | Answer the inner record from its own rule |
 | Lists of a fixed size holding a type (`sizes[3]: Size`) | A list of any length (`sizes[n]`) |
-| `sum(lines.price * lines.quantity)`: two fields of one item multiplied | A promise that follows from the ranges, or separate rules |
+| A promise about `sum(lines.price * lines.qty)` (as for two lists, above) | A promise that follows from the ranges |
 | Types on pages | A rule that takes numbers |
 
 ### Numbers must stay in range
