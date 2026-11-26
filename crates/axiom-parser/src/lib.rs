@@ -33,6 +33,11 @@ pub fn parse_module(input: &str) -> Result<Module, String> {
             types::expand(input).map_err(|e| simple::show_source_line(e, input))?
         {
             let mut module = parse_module(&expanded.source)?;
+            for (rule, choice) in expanded.answers {
+                for contract in module.contracts.iter_mut().filter(|c| c.name == rule) {
+                    contract.answer_choice = Some(choice.clone());
+                }
+            }
             for (rule, input, choice) in expanded.choices {
                 for contract in module.contracts.iter_mut() {
                     // `rule`, or a rule made from it: `rule__step`, `rule_2`.

@@ -535,7 +535,8 @@ fn run_command(args: &[String]) -> Result<(), String> {
     }
     let answer = match contract.labels.get(result as usize) {
         Some(label) if !contract.labels.is_empty() => format!("{label:?}"),
-        _ => shown(&contract, &contract.return_type, result),
+        _ => choice_name(&contract, result)
+            .unwrap_or_else(|| shown(&contract, &contract.return_type, result)),
     };
     println!("result: {answer}");
     println!("wrote: {}", output.display());
@@ -578,6 +579,12 @@ fn application_run_command(args: &[String]) -> Result<(), String> {
 /// the same steps as emitted code, on the proven candidates of each item
 /// rule and the core.
 /// `axiom run` on a `repeat` rule (issue #214): the start, then the step.
+/// The value name of a choice answer (`large` for 2).
+fn choice_name(contract: &axiom_parser::Contract, answer: u64) -> Option<String> {
+    let choice = contract.answer_choice.as_ref()?;
+    choice.values.get(usize::try_from(answer).ok()?).cloned()
+}
+
 /// A choice value typed by name (`large`) as its place (`2`, issue #226).
 fn choice_value(
     contract: &axiom_parser::Contract,
@@ -937,7 +944,8 @@ pub(crate) fn print_unreachable_rules(contract: &axiom_parser::Contract) {
             .collect();
         let answer = match contract.labels.get(answer as usize) {
             Some(label) => format!("{label:?}"),
-            None => shown(contract, &contract.return_type, u64::from(answer)),
+            None => choice_name(contract, u64::from(answer))
+                .unwrap_or_else(|| shown(contract, &contract.return_type, u64::from(answer))),
         };
         println!(
             "example: {}({}) = {answer}   (`->` line {rule})",

@@ -119,6 +119,9 @@ pub struct Contract {
     /// Inputs that hold a choice (`size: Size`, issue #226): the input's
     /// name and its type. The value is the choice's place, from 0.
     pub choices: Vec<(String, ChoiceType)>,
+    /// Set when every answer is a value of one choice (`-> large`): the
+    /// answer is that value's place, from 0.
+    pub answer_choice: Option<ChoiceType>,
 }
 
 /// `type Size = small | medium | large` (issue #226).

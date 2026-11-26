@@ -330,12 +330,19 @@ type ChoiceUses<'a> = (
 pub(crate) fn choice_types<'a>(contracts: &[&'a Contract]) -> Result<Vec<ChoiceUses<'a>>, String> {
     let mut out: Vec<ChoiceUses> = Vec::new();
     for contract in contracts {
-        for (input, choice) in &contract.choices {
+        let answer = contract
+            .answer_choice
+            .iter()
+            .map(|c| (c, contract.return_type.clone()));
+        let inputs = contract.choices.iter().map(|(input, choice)| {
             let ty = contract
                 .params
                 .iter()
                 .find(|p| &p.name == input)
                 .map_or(axiom_parser::Type::U32, |p| p.ty.clone());
+            (choice, ty)
+        });
+        for (choice, ty) in inputs.chain(answer) {
             match out.iter_mut().find(|(c, _)| c.name == choice.name) {
                 Some((known, _)) if known.values != choice.values => {
                     return Err(format!(

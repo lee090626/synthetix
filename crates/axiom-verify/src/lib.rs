@@ -2392,6 +2392,7 @@ mod tests {
             hints: Vec::new(),
             repeat: None,
             choices: Vec::new(),
+            answer_choice: None,
         };
         assert!(matches!(
             check_contract(&invalid).unwrap(),
