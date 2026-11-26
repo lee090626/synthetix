@@ -194,6 +194,16 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
         out += "\n\n";
         out += &settle_wrapper(&sizes);
     }
+    for (choice, _) in crate::js::choice_types(&contracts)? {
+        out += &format!(
+            "\n\nclass {}:\n    \"\"\"Values of `type {}`: each is its place, from 0.\"\"\"\n",
+            ident(&choice.name),
+            choice.name
+        );
+        for (at, value) in choice.values.iter().enumerate() {
+            out += &format!("    {} = {at}\n", ident(value));
+        }
+    }
     Ok(out)
 }
 

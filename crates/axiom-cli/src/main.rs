@@ -418,7 +418,10 @@ fn run_command(args: &[String]) -> Result<(), String> {
         .iter()
         .zip(&contract.params)
         .map(|(value, param)| {
-            let value = unscale(value, contract.decimals)?;
+            let value = unscale(
+                &choice_value(&contract, &param.name, value)?,
+                contract.decimals,
+            )?;
             parse_input_value(&value, &param.ty, contract.wide)
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -575,6 +578,26 @@ fn application_run_command(args: &[String]) -> Result<(), String> {
 /// the same steps as emitted code, on the proven candidates of each item
 /// rule and the core.
 /// `axiom run` on a `repeat` rule (issue #214): the start, then the step.
+/// A choice value typed by name (`large`) as its place (`2`, issue #226).
+fn choice_value(
+    contract: &axiom_parser::Contract,
+    input: &str,
+    token: &str,
+) -> Result<String, String> {
+    let Some((_, choice)) = contract.choices.iter().find(|(name, _)| name == input) else {
+        return Ok(token.to_string());
+    };
+    match choice.values.iter().position(|v| v == token) {
+        Some(at) => Ok(at.to_string()),
+        None if token.parse::<u64>().is_ok() => Ok(token.to_string()),
+        None => Err(format!(
+            "`{token}` is not a value of `{}` ({}) for input {input}",
+            choice.name,
+            choice.values.join(", ")
+        )),
+    }
+}
+
 fn run_repeat(
     all: &[axiom_parser::Contract],
     step: &axiom_parser::Contract,
@@ -597,7 +620,7 @@ fn run_repeat(
     let inputs = values
         .iter()
         .zip(&start.params)
-        .map(|(v, p)| parse_input_value(v, &p.ty, step.wide))
+        .map(|(v, p)| parse_input_value(&choice_value(start, &p.name, v)?, &p.ty, step.wide))
         .collect::<Result<Vec<_>, _>>()?;
     let proven = |contract: &axiom_parser::Contract| {
         axiom_synth::synthesize_with_options(contract, axiom_synth::SynthesisOptions::default())
@@ -655,7 +678,7 @@ fn run_any_length(
         inputs.push(
             items
                 .iter()
-                .map(|v| parse_input_value(v, ty, core.wide))
+                .map(|v| parse_input_value(&choice_value(core, name, v)?, ty, core.wide))
                 .collect::<Result<Vec<_>, _>>()?,
         );
     }

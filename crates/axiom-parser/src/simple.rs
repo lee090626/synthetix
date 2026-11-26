@@ -29,7 +29,10 @@ pub fn is_simple(source: &str) -> bool {
     if line.contains('{') || line.ends_with(';') {
         return false;
     }
-    if line.starts_with("from ") || line.starts_with("page ") || line.starts_with("use settle for ")
+    if line.starts_with("from ")
+        || line.starts_with("page ")
+        || line.starts_with("use settle for ")
+        || line.starts_with("type ")
     {
         return true;
     }
@@ -1529,6 +1532,18 @@ struct Header {
 /// Parses `name(a, b)`, `name(prices[3])`, `name(a, b) can be negative`, and
 /// `name(a, b) with 2 decimals`, and `name(a, b) with big numbers`.
 fn header(line: &str, line_no: usize) -> Result<Header, String> {
+    // Hidden `need`s for choice inputs (`crate::types`).
+    let (line, needs) = match line.split_once(crate::types::NEED_MARK) {
+        Some((line, needs)) => (
+            line.trim_end(),
+            needs.split(crate::types::NEED_MARK).collect(),
+        ),
+        None => (line, Vec::new()),
+    };
+    let needs: String = needs
+        .iter()
+        .map(|n| format!(" requires {};", n.trim()))
+        .collect();
     let (line, decimals) = strip_decimals(line, line_no)?;
     let (line, wide) = match line.strip_suffix("with big numbers") {
         Some(rest) => (rest.trim_end(), true),
@@ -1571,7 +1586,10 @@ fn header(line: &str, line_no: usize) -> Result<Header, String> {
     }
     Ok(Header {
         rule: name.to_string(),
-        text: format!("export contract {name}({}) -> {ty} {{", typed.join(", ")),
+        text: format!(
+            "export contract {name}({}) -> {ty} {{{needs}",
+            typed.join(", ")
+        ),
         signed,
         wide,
         decimals,
@@ -1647,7 +1665,7 @@ fn list_param(text: &str, line_no: usize) -> Result<Option<(&str, usize)>, Strin
 /// The largest list size; each item becomes one input.
 const MAX_LIST: usize = 16;
 
-fn check_name(name: &str, line_no: usize) -> Result<(), String> {
+pub(crate) fn check_name(name: &str, line_no: usize) -> Result<(), String> {
     // Generated code uses `_` names for its own variables (e.g. `_a0`, `_n`).
     if name.starts_with('_') {
         return Err(format!(

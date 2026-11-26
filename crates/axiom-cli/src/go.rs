@@ -283,6 +283,17 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
         out += "\n";
         out += &settle_wrapper(&claim("settle")?, &sizes);
     }
+    for (choice, _) in crate::js::choice_types(&contracts)? {
+        // Untyped constants fit every number type a rule takes.
+        out += &format!(
+            "\n// Values of `type {}`: each is its place, from 0.\nconst (\n",
+            choice.name
+        );
+        for (at, value) in choice.values.iter().enumerate() {
+            out += &format!("\t{} = {at}\n", claim(&format!("{}_{value}", choice.name))?);
+        }
+        out += ")\n";
+    }
     Ok(out)
 }
 

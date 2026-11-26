@@ -6,6 +6,7 @@ mod lists;
 pub mod parser;
 mod repeat;
 pub mod simple;
+mod types;
 
 pub use ast::*;
 pub use lexer::Lexer;
@@ -28,6 +29,28 @@ pub fn parse(input: &str) -> Result<Contract, String> {
 
 pub fn parse_module(input: &str) -> Result<Module, String> {
     if simple::is_simple(input) {
+        if let Some(expanded) =
+            types::expand(input).map_err(|e| simple::show_source_line(e, input))?
+        {
+            let mut module = parse_module(&expanded.source)?;
+            for (rule, input, choice) in expanded.choices {
+                for contract in module.contracts.iter_mut() {
+                    // `rule`, or a rule made from it: `rule__step`, `rule_2`.
+                    let made_from = contract.name == rule
+                        || contract.name.starts_with(&format!("{rule}__"))
+                        || contract
+                            .name
+                            .strip_prefix(&format!("{rule}_"))
+                            .is_some_and(|n| {
+                                !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())
+                            });
+                    if made_from && contract.params.iter().any(|p| p.name == input) {
+                        contract.choices.push((input.clone(), choice.clone()));
+                    }
+                }
+            }
+            return Ok(module);
+        }
         if let Some(expanded) =
             repeat::expand(input).map_err(|e| simple::show_source_line(e, input))?
         {

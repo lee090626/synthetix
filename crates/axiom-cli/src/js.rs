@@ -290,7 +290,65 @@ pub fn emit_modules(
         js += &function;
         dts += &declaration;
     }
+    for (choice, uses) in choice_types(&contracts)? {
+        // Rules with big numbers take `bigint`; the values match when only they use it.
+        let big = if uses.iter().all(|(_, wide)| *wide) {
+            "n"
+        } else {
+            ""
+        };
+        let values: Vec<String> = choice
+            .values
+            .iter()
+            .enumerate()
+            .map(|(at, value)| format!("{value}: {at}{big}"))
+            .collect();
+        js += &format!(
+            "\n/** Values of `type {}`: each is its place, from 0. */\nexport const {} = Object.freeze({{ {} }});\n",
+            choice.name,
+            choice.name,
+            values.join(", ")
+        );
+        let types: Vec<String> = values.iter().map(|v| format!("readonly {v}")).collect();
+        dts += &format!(
+            "export declare const {}: {{ {} }};\n",
+            choice.name,
+            types.join("; ")
+        );
+    }
     Ok((js, dts))
+}
+
+/// A choice type and the number type and width of each input that holds it.
+type ChoiceUses<'a> = (
+    &'a axiom_parser::ChoiceType,
+    Vec<(axiom_parser::Type, bool)>,
+);
+
+/// Every choice type the rules take (`type Size = small | large`, issue
+/// #226), once, with the number type and width of each input that holds it.
+pub(crate) fn choice_types<'a>(contracts: &[&'a Contract]) -> Result<Vec<ChoiceUses<'a>>, String> {
+    let mut out: Vec<ChoiceUses> = Vec::new();
+    for contract in contracts {
+        for (input, choice) in &contract.choices {
+            let ty = contract
+                .params
+                .iter()
+                .find(|p| &p.name == input)
+                .map_or(axiom_parser::Type::U32, |p| p.ty.clone());
+            match out.iter_mut().find(|(c, _)| c.name == choice.name) {
+                Some((known, _)) if known.values != choice.values => {
+                    return Err(format!(
+                        "two files declare `type {}` with different values",
+                        choice.name
+                    ));
+                }
+                Some((_, uses)) => uses.push((ty, contract.wide)),
+                None => out.push((choice, vec![(ty, contract.wide)])),
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Group sizes with generated `settle_N_i_j`, unless a rule is named `settle`.
