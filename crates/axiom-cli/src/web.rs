@@ -273,7 +273,9 @@ fn build_project(
 }
 
 /// `axiom build --lean`: one Lean theorem per rule in `dir`, each checked with
-/// `lean` when it is installed (issue #211). Any rule Lean rejects fails the build.
+/// `lean` when it is installed (issue #211). A rule Lean rejects, cannot
+/// decide in time, or that is not translated fails the build: with `--lean`,
+/// only proofs Lean checked pass.
 fn prove_with_lean(compiled: &[CompiledFunction], dir: &Path) -> Result<(), String> {
     use crate::lean::{Outcome, prove};
     if dir.exists() {
@@ -298,11 +300,16 @@ fn prove_with_lean(compiled: &[CompiledFunction], dir: &Path) -> Result<(), Stri
         "lean_result: {proved} proved, {uncovered} not covered, {unproven} unproven, {} failed",
         failures.len()
     );
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(format!("Lean did not accept:\n{}", failures.join("\n")))
+    if !failures.is_empty() {
+        return Err(format!("Lean did not accept:\n{}", failures.join("\n")));
     }
+    if uncovered + unproven > 0 {
+        return Err(format!(
+            "Lean did not prove {} rule(s): see the NOT_COVERED and UNPROVEN lines above; a `hint` line can help (docs/writing-specs.md, \"Proving with Lean\")",
+            uncovered + unproven
+        ));
+    }
+    Ok(())
 }
 
 pub fn check(config_path: &Path) -> Result<(), String> {

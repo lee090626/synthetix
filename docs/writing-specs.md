@@ -394,8 +394,8 @@ proof no longer rests on Z3. Each rule prints one result:
 |---|---|
 | `PROVED` | Lean accepted the theorem |
 | `FAILED` | Lean found an input the rule gets wrong; the build fails |
-| `UNPROVEN` | Lean ran out of time; neither proven nor disproven |
-| `NOT_COVERED` | The rule uses something not translated yet (arrays, records, loops in `fn`) |
+| `UNPROVEN` | Lean ran out of time; neither proven nor disproven. The build fails |
+| `NOT_COVERED` | The rule uses something not translated yet (arrays, records, loops in `fn`). The build fails |
 | `SKIPPED` | `lean` is not installed; the file is still written |
 
 Lean decides each rule by turning its words into bits. Dividing or
