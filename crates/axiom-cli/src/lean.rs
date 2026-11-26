@@ -6,7 +6,7 @@ use std::process::Command;
 
 use axiom_ami::Expr;
 use axiom_parser::Contract;
-use axiom_verify::lean::{LeanExport, export};
+use axiom_verify::lean::{LeanExport, export, export_split};
 
 pub enum Outcome {
     Proved,
@@ -33,9 +33,22 @@ impl Outcome {
     }
 }
 
-/// Writes the theorem to `path` (unless the rule is not covered) and runs `lean` on it.
+/// Writes the theorem to `path` (unless the rule is not covered) and runs
+/// `lean` on it. When Lean times out, tries once more with a proof split
+/// over the values of an input with a small range (`export_split`).
 pub fn prove(contract: &Contract, candidate: &Expr, path: &Path) -> Result<Outcome, String> {
-    let source = match export(contract, candidate) {
+    let outcome = check(export(contract, candidate), path)?;
+    if !matches!(outcome, Outcome::Unproven) {
+        return Ok(outcome);
+    }
+    match export_split(contract, candidate) {
+        Some(split) => check(split, path),
+        None => Ok(outcome),
+    }
+}
+
+fn check(export: LeanExport, path: &Path) -> Result<Outcome, String> {
+    let source = match export {
         LeanExport::Source(source) => source,
         LeanExport::NotCovered(reason) => return Ok(Outcome::NotCovered(reason)),
     };

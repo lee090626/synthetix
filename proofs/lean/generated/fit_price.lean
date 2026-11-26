@@ -2,6 +2,7 @@
 import Std.Tactic.BVDecide
 
 set_option linter.unusedVariables false
+set_option maxHeartbeats 0
 
 /-- The `need` lines are defined for every input. -/
 theorem x_fit_price_needs_defined (x_price x_min x_max : BitVec 32) :

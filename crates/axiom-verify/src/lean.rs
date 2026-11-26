@@ -46,13 +46,91 @@ struct Ctx<'a> {
 
 /// Writes the Lean theorem for `contract` answered by `candidate`.
 pub fn export(contract: &Contract, candidate: &Expr) -> LeanExport {
-    match build(contract, candidate) {
+    match build(contract, candidate, None) {
         Ok(source) => LeanExport::Source(source),
         Err(reason) => LeanExport::NotCovered(reason),
     }
 }
 
-fn build(contract: &Contract, candidate: &Expr) -> Result<String, String> {
+/// The most cases [`export_split`] proves one by one.
+pub const MAX_SPLIT_CASES: u64 = 64;
+
+/// Like [`export`], but proves the promises once per value of the input with
+/// the fewest values allowed by the `need` lines (at most
+/// [`MAX_SPLIT_CASES`]). Each case then divides and multiplies by a fixed
+/// number, which `bv_decide` solves where a variable divisor times out.
+/// `None` when no input has such a small range.
+pub fn export_split(contract: &Contract, candidate: &Expr) -> Option<LeanExport> {
+    let (name, low, high) = smallest_range(contract)?;
+    Some(match build(contract, candidate, Some((&name, low, high))) {
+        Ok(source) => LeanExport::Source(source),
+        Err(reason) => LeanExport::NotCovered(reason),
+    })
+}
+
+/// The unsigned input with the fewest values, from `need` lines comparing it
+/// with a number (`x <= 50`, `x >= 1`, also inside `and`).
+fn smallest_range(contract: &Contract) -> Option<(String, u64, u64)> {
+    fn conjuncts<'a>(expr: &'a SpecExpr, out: &mut Vec<&'a SpecExpr>) {
+        match expr {
+            SpecExpr::Binary(BinaryOp::And, lhs, rhs) => {
+                conjuncts(lhs, out);
+                conjuncts(rhs, out);
+            }
+            other => out.push(other),
+        }
+    }
+    let mut facts = Vec::new();
+    for clause in &contract.requires {
+        conjuncts(clause, &mut facts);
+    }
+    let mut best: Option<(String, u64, u64)> = None;
+    for param in contract.params.iter().filter(|param| param.ty == Type::U32) {
+        let (mut low, mut high) = (0_u64, None::<u64>);
+        for fact in &facts {
+            let SpecExpr::Binary(op, lhs, rhs) = fact else {
+                continue;
+            };
+            let (op, value) = match (lhs.as_ref(), rhs.as_ref()) {
+                (SpecExpr::Ident(n), SpecExpr::Number(v)) if *n == param.name => (op.clone(), *v),
+                (SpecExpr::Number(v), SpecExpr::Ident(n)) if *n == param.name => (
+                    match op {
+                        BinaryOp::Le => BinaryOp::Ge,
+                        BinaryOp::Lt => BinaryOp::Gt,
+                        BinaryOp::Ge => BinaryOp::Le,
+                        BinaryOp::Gt => BinaryOp::Lt,
+                        other => other.clone(),
+                    },
+                    *v,
+                ),
+                _ => continue,
+            };
+            match op {
+                BinaryOp::Le => high = Some(high.map_or(value, |h| h.min(value))),
+                BinaryOp::Lt if value > 0 => {
+                    high = Some(high.map_or(value - 1, |h| h.min(value - 1)))
+                }
+                BinaryOp::Ge => low = low.max(value),
+                BinaryOp::Gt => low = low.max(value + 1),
+                _ => {}
+            }
+        }
+        let Some(high) = high else { continue };
+        if high < low || high - low >= MAX_SPLIT_CASES {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(_, l, h)| high - low < h - l) {
+            best = Some((param.name.clone(), low, high));
+        }
+    }
+    best
+}
+
+fn build(
+    contract: &Contract,
+    candidate: &Expr,
+    split: Option<(&str, u64, u64)>,
+) -> Result<String, String> {
     if contract.list.is_some() {
         return Err("rules over lists".to_string());
     }
@@ -116,7 +194,8 @@ fn build(contract: &Contract, candidate: &Expr) -> Result<String, String> {
         contract.name
     );
     let _ = writeln!(out, "import Std.Tactic.BVDecide\n");
-    let _ = writeln!(out, "set_option linter.unusedVariables false\n");
+    let _ = writeln!(out, "set_option linter.unusedVariables false");
+    let _ = writeln!(out, "set_option maxHeartbeats 0\n");
     let binders = if names.is_empty() {
         String::new()
     } else {
@@ -128,9 +207,24 @@ fn build(contract: &Contract, candidate: &Expr) -> Result<String, String> {
         ident(&contract.name),
         all(&requires_defined),
     );
+    let hypothesis = format!("({inputs} && {need})");
+    let proof = match split {
+        None => "  bv_decide".to_string(),
+        Some((name, low, high)) => {
+            // Either the `need` lines fail, or the input is one of its values.
+            let cases = (low..=high)
+                .map(|value| format!("{} = {value}#{width}", ident(name)))
+                .collect::<Vec<_>>();
+            let names = vec!["h"; cases.len() + 1].join(" | ");
+            format!(
+                "  rcases (show {} ∨ {hypothesis} = false by bv_decide) with {names}\n  all_goals first | (subst h; bv_decide) | simp [h]",
+                cases.join(" ∨ ")
+            )
+        }
+    };
     let _ = writeln!(
         out,
-        "/-- When the `need` lines hold, the answer is defined and keeps every promise. -/\ntheorem {}_proved{binders} :\n    (!({inputs} && {need}) || {goal}) = true := by\n  bv_decide",
+        "/-- When the `need` lines hold, the answer is defined and keeps every promise. -/\ntheorem {}_proved{binders} :\n    (!{hypothesis} || {goal}) = true := by\n{proof}",
         ident(&contract.name),
     );
     Ok(out)
@@ -534,6 +628,29 @@ mod tests {
         assert!(lean.contains("(BitVec.udiv x_x x_y)"));
         assert!(lean.contains("(x_y != 0#32)"));
         assert!(lean.contains("bv_decide"));
+    }
+
+    #[test]
+    fn splits_on_the_input_with_the_fewest_values() {
+        let contract = parse(
+            "contract f(t: u32, p: u32) -> u32 { requires t <= 1000 && p >= 1 && p <= 3; ensures result == t / p; }",
+        )
+        .unwrap();
+        let candidate = Expr::Div(Box::new(Expr::Arg(0)), Box::new(Expr::Arg(1)));
+        let Some(LeanExport::Source(lean)) = export_split(&contract, &candidate) else {
+            panic!("expected a split proof");
+        };
+        assert!(
+            lean.contains("x_p = 1#32 ∨ x_p = 2#32 ∨ x_p = 3#32 ∨"),
+            "{lean}"
+        );
+        assert!(lean.contains("with h | h | h | h"), "{lean}");
+
+        let wide = parse(
+            "contract g(t: u32, p: u32) -> u32 { requires p <= 100; ensures result == t / (p +% 1); }",
+        )
+        .unwrap();
+        assert!(export_split(&wide, &Expr::Arg(0)).is_none());
     }
 
     #[test]
