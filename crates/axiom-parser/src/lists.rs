@@ -116,6 +116,8 @@ struct Head {
     length: String,
     /// Text after `)`: `can be negative`, `with big numbers`.
     suffix: String,
+    /// Hidden `need`s on list items (`crate::types`: a list of choices).
+    item_marks: Vec<String>,
 }
 
 /// Reads a name line; `None` unless an input is a list of any length.
@@ -153,6 +155,18 @@ fn head(line: &str, line_no: usize) -> Result<Option<Head>, String> {
             "line {line_no}: a rule with a list of any length cannot have decimals yet"
         ));
     }
+    // Hidden `need`s about a list hold for each item; others stay on the name line.
+    let mut marks = suffix.split(crate::types::NEED_MARK);
+    let mut suffix = marks.next().unwrap_or_default().to_string();
+    let mut item_marks = Vec::new();
+    for mark in marks {
+        if out.iter().any(|(p, list)| *list && mentions(mark, p)) {
+            item_marks.push(mark.trim().to_string());
+        } else {
+            suffix += crate::types::NEED_MARK;
+            suffix += mark;
+        }
+    }
     if out.iter().any(|(p, _)| *p == length) {
         return Err(format!(
             "line {line_no}: `{length}` is the length of the lists; give the input another name"
@@ -163,6 +177,7 @@ fn head(line: &str, line_no: usize) -> Result<Option<Head>, String> {
         params: out,
         length,
         suffix: suffix.trim().to_string(),
+        item_marks,
     }))
 }
 
@@ -303,7 +318,11 @@ fn split(
     let mut sums: Vec<(Fold, String)> = Vec::new();
     // For each entry of `sums`, the plain list sums its item rule takes.
     let mut deps: Vec<Vec<usize>> = Vec::new();
-    let mut item_needs: Vec<String> = Vec::new();
+    let mut item_needs: Vec<String> = head
+        .item_marks
+        .iter()
+        .map(|m| format!("need {m}"))
+        .collect();
     let mut core = vec![String::new(); block.len()];
     let mut limit: Option<(usize, u64)> = None;
     // `need n >= k`: the sums' plain ranges start at k items, not 0.
@@ -860,7 +879,20 @@ fn split(
         core[limit_offset] += &format!(" and position >= 1 and position <= {length}");
     }
     core_params.extend(results);
-    core[0] = format!("{}__core({}){suffix}", head.name, core_params.join(", "));
+    // A core run once per item takes the items, and their hidden `need`s.
+    let marks: String = if each {
+        head.item_marks
+            .iter()
+            .map(|m| format!("{}{m}", crate::types::NEED_MARK))
+            .collect()
+    } else {
+        String::new()
+    };
+    core[0] = format!(
+        "{}__core({}){suffix}{marks}",
+        head.name,
+        core_params.join(", ")
+    );
     Ok((
         item_source,
         core,

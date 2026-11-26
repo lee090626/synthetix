@@ -534,9 +534,23 @@ fn rule_block(
             continue;
         };
         let (param, ty) = (param.trim(), ty.trim());
-        if param.contains('[') {
-            return Err(error(first_line, "a list cannot hold a type yet"));
-        }
+        // `sizes[n]: Size`: a list of any length holding a type.
+        let (param, list) = match param.split_once('[') {
+            Some((name, size)) => {
+                let size = size.trim_end_matches(']').trim();
+                if size.parse::<usize>().is_ok() {
+                    return Err(error(
+                        first_line,
+                        format!(
+                            "a list of a type needs a length name, like `{}[n]`",
+                            name.trim()
+                        ),
+                    ));
+                }
+                (name.trim(), format!("[{size}]"))
+            }
+            None => (param, String::new()),
+        };
         check_name(param, first_line)?;
         if types.value(param).is_some() {
             return Err(error(
@@ -546,7 +560,7 @@ fn rule_block(
         }
         match types.get(ty) {
             Some(Def::Choice(_)) => {
-                written.push(param.to_string());
+                written.push(format!("{param}{list}"));
                 choices.push((param.to_string(), types.choice(ty).unwrap()));
                 locals.push((param.to_string(), Local::Choice(ty.to_string())));
             }
@@ -554,7 +568,7 @@ fn rule_block(
                 let mut flat = Vec::new();
                 for (field, choice) in &types.leaves(ty) {
                     let input = format!("{param}__{}", field.replace('.', "__"));
-                    written.push(input.clone());
+                    written.push(format!("{input}{list}"));
                     if let Some(choice) = choice {
                         choices.push((input.clone(), types.choice(choice).unwrap()));
                     }
@@ -865,6 +879,12 @@ fn rewrite(
                 };
                 let before = chars[..start].iter().rev().find(|c| !c.is_whitespace());
                 let next = chars[i..].iter().find(|c| !c.is_whitespace());
+                // `count(orders)` of a list of records: the length, from any field.
+                let lead: String = chars[..start].iter().collect();
+                if path.is_empty() && lead.trim_end().ends_with("count(") && next == Some(&')') {
+                    out += &fields[0].1;
+                    continue;
+                }
                 if !matches!(before, Some('(' | ',')) || !matches!(next, Some(')' | ',')) {
                     let field = &fields
                         .iter()
@@ -987,6 +1007,10 @@ fn check_calls(
             signatures.iter().find(|(n, _, _, _)| *n == callee)
         else {
             // A rule from another file (or `min`, `sum`): its types are not known here.
+            // `count(orders)` counts a list of records.
+            if callee == "count" {
+                continue;
+            }
             if let Some(arg) = args
                 .iter()
                 .find(|a| matches!(arg_type(a, locals, types, signatures), Arg::Record(_)))
@@ -1129,6 +1153,30 @@ mod tests {
         let mixed =
             parse_module(&format!("{TYPES}f(w)\n  w < 10 -> small\n  else -> 7\n")).unwrap();
         assert!(mixed.contracts[0].answer_choice.is_none());
+    }
+
+    #[test]
+    fn a_list_can_hold_a_type() {
+        let module = parse_module(&format!(
+            "{TYPES}boxes(sizes[n]: Size)\n  need n <= 10\n  always -> sum(sizes)\n\npaid(orders[n]: Order)\n  need n <= 10\n  need orders.price <= 100\n  always -> sum(orders.price) + count(orders)\n"
+        ))
+        .unwrap();
+        let item = module
+            .contracts
+            .iter()
+            .find(|c| c.name == "boxes__item1")
+            .unwrap();
+        assert_eq!(item.choices[0].0, "sizes");
+        assert_eq!(item.requires.len(), 1, "an item of `sizes` is at most 2");
+        let paid = module
+            .contracts
+            .iter()
+            .find(|c| c.name == "paid__item1")
+            .unwrap();
+        let names: Vec<&str> = paid.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["orders__price", "orders__quantity", "orders__size"]);
+        let e = err(&format!("{TYPES}f(sizes[3]: Size)\n  always -> 1\n"));
+        assert!(e.contains("needs a length name"), "{e}");
     }
 
     #[test]
