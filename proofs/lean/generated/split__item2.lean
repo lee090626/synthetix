@@ -7,7 +7,7 @@ set_option maxHeartbeats 0
 /-- The `need` lines are defined for every input. -/
 theorem x_split__item2_needs_defined (x_weights x_total x_sum1 : BitVec 32) :
     (!true || (((true && true) && (true && true)) && ((true && true) && (true && true)) && (true && true) && ((true && true) && (true && true)))) = true := by
-  bv_decide
+  bv_decide (config := { timeout := 120 })
 
 /-- `x * y / z <= x` when `y <= z` and `x * y` does not wrap. -/
 theorem mul_div_le {w : Nat} (x y z : BitVec w) :
@@ -28,4 +28,4 @@ theorem x_split__item2_proved (x_weights x_total x_sum1 : BitVec 32) :
     (!(true && (((BitVec.ule 1#32 x_weights) && (BitVec.ule x_weights 1000#32)) && ((BitVec.ule 1#32 x_weights) && (BitVec.ule x_weights 1000#32)) && (BitVec.ule x_total 1000000#32) && ((BitVec.ule x_weights x_sum1) && (BitVec.ule x_sum1 50000#32)))) || (((true && true) && true && (x_sum1 != 0#32)) && ((true && ((true && true) && true && (x_sum1 != 0#32))) && (true && true)) && (((BitVec.udiv (x_total * x_weights) x_sum1) == (BitVec.udiv (x_total * x_weights) x_sum1)) && (BitVec.ule (BitVec.udiv (x_total * x_weights) x_sum1) x_total)))) = true := by
   have h0 := mul_div_le x_total x_weights x_sum1
   generalize BitVec.udiv (x_total * x_weights) x_sum1 = q0 at *
-  bv_decide
+  bv_decide (config := { timeout := 120 })

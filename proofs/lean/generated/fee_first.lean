@@ -7,7 +7,7 @@ set_option maxHeartbeats 0
 /-- The `need` lines are defined for every input. -/
 theorem x_fee_first_needs_defined (x_a x_b x_rate : BitVec 64) :
     (!true || ((true && true) && (true && true) && ((true && true) && true) && (true && true))) = true := by
-  bv_decide
+  bv_decide (config := { timeout := 120 })
 
 /-- `x * y / z <= x` when `y <= z` and `x * y` does not wrap. -/
 theorem mul_div_le {w : Nat} (x y z : BitVec w) :
@@ -28,4 +28,4 @@ theorem x_fee_first_proved (x_a x_b x_rate : BitVec 64) :
     (!(true && ((BitVec.ule x_a 100000000#64) && (BitVec.ule x_b 100000000#64) && (BitVec.ule 1#64 (x_a + x_b)) && (BitVec.ule x_rate 1000#64))) || ((((((true && true) && true) && true && (10000#64 != 0#64)) && true) && (true && true) && ((x_a + x_b) != 0#64)) && ((true && (((((true && true) && true) && true && (10000#64 != 0#64)) && true) && (true && true) && ((x_a + x_b) != 0#64))) && (true && (((true && true) && true) && true && (10000#64 != 0#64)))) && (((BitVec.udiv ((BitVec.udiv ((x_a + x_b) * x_rate) 10000#64) * x_a) (x_a + x_b)) == (BitVec.udiv ((BitVec.udiv ((x_a + x_b) * x_rate) 10000#64) * x_a) (x_a + x_b))) && (BitVec.ule (BitVec.udiv ((BitVec.udiv ((x_a + x_b) * x_rate) 10000#64) * x_a) (x_a + x_b)) (BitVec.udiv ((x_a + x_b) * x_rate) 10000#64))))) = true := by
   have h0 := mul_div_le (BitVec.udiv ((x_a + x_b) * x_rate) 10000#64) x_a (x_a + x_b)
   generalize BitVec.udiv ((BitVec.udiv ((x_a + x_b) * x_rate) 10000#64) * x_a) (x_a + x_b) = q0 at *
-  bv_decide
+  bv_decide (config := { timeout := 120 })

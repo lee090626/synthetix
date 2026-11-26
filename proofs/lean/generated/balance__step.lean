@@ -7,9 +7,9 @@ set_option maxHeartbeats 0
 /-- The `need` lines are defined for every input. -/
 theorem x_balance__step_needs_defined (x_loan x_interest x_payment x_months x_value : BitVec 32) :
     (!true || ((true && true) && (true && true) && (true && true) && (true && true) && ((true && true) && (true && true)))) = true := by
-  bv_decide
+  bv_decide (config := { timeout := 120 })
 
 /-- When the `need` lines hold, the answer is defined and keeps every promise. -/
 theorem x_balance__step_proved (x_loan x_interest x_payment x_months x_value : BitVec 32) :
     (!(true && ((BitVec.ule x_value x_loan) && (BitVec.ule x_months 600#32) && (BitVec.ule x_loan 1000000000#32) && (BitVec.ule x_interest 1000000#32) && ((BitVec.ule x_interest x_payment) && (BitVec.ule x_payment 1000000000#32)))) || ((((true && true) && true) && (bif (BitVec.ult (x_value + x_interest) x_payment) then true else ((true && true) && true))) && ((true && (((true && true) && true) && (bif (BitVec.ult (x_value + x_interest) x_payment) then true else ((true && true) && true && (BitVec.ule x_payment (x_value + x_interest)))))) && (true && true)) && (((bif (BitVec.ult (x_value + x_interest) x_payment) then 0#32 else ((x_value + x_interest) - x_payment)) == (bif (BitVec.ult (x_value + x_interest) x_payment) then 0#32 else ((x_value + x_interest) - x_payment))) && (BitVec.ule (bif (BitVec.ult (x_value + x_interest) x_payment) then 0#32 else ((x_value + x_interest) - x_payment)) x_loan)))) = true := by
-  bv_decide
+  bv_decide (config := { timeout := 120 })

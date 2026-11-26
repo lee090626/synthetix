@@ -74,6 +74,10 @@ theorem mul_div_le {w : Nat} (x y z : BitVec w) :
 ",
 )];
 
+/// `bv_decide` with a SAT time limit well above the default 10 seconds, so a
+/// proof does not pass on a fast machine and time out on a slower one.
+const BV_DECIDE: &str = "bv_decide (config := { timeout := 120 })";
+
 /// The most cases [`export_split`] proves one by one.
 pub const MAX_SPLIT_CASES: u64 = 64;
 
@@ -222,7 +226,7 @@ fn build(
     };
     let _ = writeln!(
         out,
-        "/-- The `need` lines are defined for every input. -/\ntheorem {}_needs_defined{binders} :\n    (!{inputs} || {}) = true := by\n  bv_decide\n",
+        "/-- The `need` lines are defined for every input. -/\ntheorem {}_needs_defined{binders} :\n    (!{inputs} || {}) = true := by\n  {BV_DECIDE}\n",
         ident(&contract.name),
         all(&requires_defined),
     );
@@ -255,7 +259,7 @@ fn build(
     }
     let hypothesis = format!("({inputs} && {need})");
     let proof = match split {
-        None => format!("{steps}  bv_decide"),
+        None => format!("{steps}  {BV_DECIDE}"),
         Some((name, low, high)) => {
             // Either the `need` lines fail, or the input is one of its values.
             let cases = (low..=high)
@@ -263,7 +267,7 @@ fn build(
                 .collect::<Vec<_>>();
             let names = vec!["h"; cases.len() + 1].join(" | ");
             format!(
-                "{steps}  rcases (show {} ∨ {hypothesis} = false by bv_decide) with {names}\n  all_goals first | (subst h; bv_decide) | simp [h]",
+                "{steps}  rcases (show {} ∨ {hypothesis} = false by {BV_DECIDE}) with {names}\n  all_goals first | (subst h; {BV_DECIDE}) | simp [h]",
                 cases.join(" ∨ ")
             )
         }

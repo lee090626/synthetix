@@ -7,9 +7,9 @@ set_option maxHeartbeats 0
 /-- The `need` lines are defined for every input. -/
 theorem x_cart__core_needs_defined (x_n x_sum1 : BitVec 32) :
     (!true || ((((((true && true) && (true && true)) && (true && true)) && (true && true)) && (true && (true && true))) && (true && (true && true)))) = true := by
-  bv_decide
+  bv_decide (config := { timeout := 120 })
 
 /-- When the `need` lines hold, the answer is defined and keeps every promise. -/
 theorem x_cart__core_proved (x_n x_sum1 : BitVec 32) :
     (!(true && ((((((BitVec.ule 0#32 x_n) && (BitVec.ule x_n 1000#32)) && (BitVec.ule 0#32 x_sum1)) && (BitVec.ule x_sum1 100000000#32)) && (BitVec.ule (x_n * 0#32) x_sum1)) && (BitVec.ule x_sum1 (x_n * 100000#32)))) || (((true && true) && (bif (BitVec.ult 200000#32 x_sum1) then true else true)) && ((true && ((true && true) && (bif (BitVec.ult 200000#32 x_sum1) then true else true))) && (true && true) && (true && true)) && (((bif (BitVec.ult 200000#32 x_sum1) then 200000#32 else x_sum1) == (bif (BitVec.ult 200000#32 x_sum1) then 200000#32 else x_sum1)) && (BitVec.ule (bif (BitVec.ult 200000#32 x_sum1) then 200000#32 else x_sum1) x_sum1) && (BitVec.ule (bif (BitVec.ult 200000#32 x_sum1) then 200000#32 else x_sum1) 200000#32)))) = true := by
-  bv_decide
+  bv_decide (config := { timeout := 120 })
