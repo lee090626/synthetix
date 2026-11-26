@@ -1,0 +1,66 @@
+# 상자 크기
+type Size = small | large
+
+# 견적: 상품 금액, 세금, 상자 크기
+type Bill
+  goods
+  tax
+  size: Size
+
+# 받는 곳: 지역과 상자
+type Address
+  zone
+  size: Size
+
+# 주문: 값과 받는 곳(레코드 안의 레코드)
+type Order
+  price
+  to: Address
+
+# 견적: 필드마다 답을 따로 줌
+quote(price, qty) -> Bill
+  need price <= 10000
+  need qty <= 100
+  goods:
+    always -> price * qty
+    promise answer <= 1000000
+  tax:
+    always -> price * qty / 10
+    promise answer <= 100000
+  size:
+    qty > 10 -> large
+    else -> small
+
+# 낼 돈: 견적의 상품 금액과 세금
+pay(price, qty)
+  need price <= 10000
+  need qty <= 100
+  always -> quote(price, qty).goods + quote(price, qty).tax
+  promise answer >= quote(price, qty).goods
+
+# 무게로 정한 상자 크기(선택형 답)
+box_for(weight)
+  need weight <= 100000
+  weight < 5000 -> small
+  else -> large
+
+# 배송비: 지역 요금, 큰 상자는 3000 더함
+delivery(to: Address)
+  need to.zone <= 9
+  match to.size
+    small -> 1000 + to.zone * 100
+    large -> 4000 + to.zone * 100
+  promise answer <= 4900
+
+# 주문 합계: 값 더하기 받는 곳의 배송비
+order_total(order: Order)
+  need order.price <= 1000000
+  need order.to.zone <= 9
+  always -> order.price + delivery(order.to)
+  promise answer >= order.price
+
+# 큰 상자 개수(선택형 목록)
+large_boxes(sizes[n]: Size)
+  need n <= 1000
+  always -> sum(sizes)
+  promise answer <= n

@@ -300,12 +300,40 @@ total(order: Order, weight)
   by rules with big numbers is a `bigint`; in Rust a choice used with several
   number types is a `u8` (`Size::large.into()`).
 
+More types:
+
+- **A record inside a record**: a field may hold another record
+  (`to: Address`), read as `order.to.zone` and passed as `delivery(order.to)`.
+  A record cannot hold itself; that is an error naming the records.
+- **A choice answer**: when every `->` answer is a value of one choice
+  (`-> small`, `-> large`), the answer is that choice. Callers may pass it
+  where the choice is taken (`fee(box_for(w))`), and `axiom run` prints the
+  value's name. Answers mixing values and numbers stay numbers.
+- **A record answer**: `quote(price, qty) -> Bill` answers a `Bill`. Give
+  each field its own lines under `field:`; there `answer` is that field, so
+  its `promise` lines go there too. Lines above the fields (`need`, named
+  values) are shared. Read a field with `quote(price, qty).goods`, or pass
+  the whole answer to a rule that takes a `Bill`. Underneath, each field is
+  its own rule (`quote__goods`), proven on its own; `--emit` adds
+  `quote(price, qty)`, which gives an object in JS, a dict in Python, a
+  `Bill` struct in Rust and Go.
+- **Lists of types**: `sizes[n]: Size` is a list of choices; each item is a
+  value. `lines[n]: Line` is a list of records: `sum(lines.price)` adds a
+  field, `count(lines)` is the length. `--emit` takes one list per field
+  (`lines__price`, ...).
+- **Decimals**: a choice input works in a rule `with 2 decimals`; it keeps
+  its place (pass `Size.large`, or `large` to `axiom run`). Passing it to a
+  rule with other places is an error.
+- **Types from another file**: `from shop: Order, Size, fee` brings the types
+  and the rules. A type the named rules take comes too. Calls to `fee` are
+  checked, and an `Order` is passed whole.
+
 | Not yet | Instead |
 |---|---|
-| A record answer, a record field that is a record, a list of records or choices | Several rules, one per answer |
-| An answer that is a choice | Text answers (`-> "large"`) or the place (`-> large` gives 2) |
-| Types shared between files; passing a record to a rule of another file | Declare the type in each file; pass the fields one by one |
-| A choice input in a rule with decimals | A rule without decimals that the decimal rule calls with whole numbers |
+| A promise naming two fields of a record answer (`answer.tax <= answer.goods`) | A promise on each field |
+| A record answer whose field is a record | Answer the inner record from its own rule |
+| Lists of a fixed size holding a type (`sizes[3]: Size`) | A list of any length (`sizes[n]`) |
+| `sum(lines.price * lines.quantity)`: two fields of one item multiplied | A promise that follows from the ranges, or separate rules |
 | Types on pages | A rule that takes numbers |
 
 ### Numbers must stay in range

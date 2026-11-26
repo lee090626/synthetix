@@ -45,6 +45,12 @@ pub fn parse_module(input: &str) -> Result<Module, String> {
             types::expand(input).map_err(|e| simple::show_source_line(e, input))?
         {
             let mut module = parse_module(&expanded.source)?;
+            for record in expanded.records {
+                let first = &record.fields[0].1;
+                for contract in module.contracts.iter_mut().filter(|c| &c.name == first) {
+                    contract.record_answer = Some(record.clone());
+                }
+            }
             for (rule, choice) in expanded.answers {
                 for contract in module.contracts.iter_mut().filter(|c| c.name == rule) {
                     contract.answer_choice = Some(choice.clone());
@@ -96,10 +102,27 @@ pub fn parse_module(input: &str) -> Result<Module, String> {
         let mut parser = Parser::new(Lexer::new(&translated)).map_err(parse_error)?;
         let mut module = parser.parse_module().map_err(parse_error)?;
         simple::apply_decimals(&mut module, &decimals)?;
+        // A rule may use the answer range of a rule written after it (the
+        // fields of a rule answering a record come last): check until no
+        // rule is left, or none can be checked; then that rule's error.
         let mut known = Vec::new();
-        for contract in &module.contracts {
-            let (low, high) = simple::check_ranges(contract, &known)?;
-            known.push((contract.name.clone(), low, high));
+        let mut left: Vec<&Contract> = module.contracts.iter().collect();
+        while !left.is_empty() {
+            let mut first_error = None;
+            let before = left.len();
+            left.retain(|contract| match simple::check_ranges(contract, &known) {
+                Ok((low, high)) => {
+                    known.push((contract.name.clone(), low, high));
+                    false
+                }
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    true
+                }
+            });
+            if left.len() == before {
+                return Err(first_error.unwrap());
+            }
         }
         return Ok(module);
     }

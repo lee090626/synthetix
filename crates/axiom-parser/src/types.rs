@@ -33,7 +33,7 @@
 //!   `else`, so a `match` must name every value of the choice (or end with
 //!   `else`).
 
-use crate::ast::ChoiceType;
+use crate::ast::{ChoiceType, RecordAnswer};
 use crate::simple::{check_name, strip_comment};
 
 pub(crate) struct Expanded {
@@ -42,6 +42,8 @@ pub(crate) struct Expanded {
     pub choices: Vec<(String, String, ChoiceType)>,
     /// Rules whose every answer is a value of one choice.
     pub answers: Vec<(String, ChoiceType)>,
+    /// Rules that answer a record, written out as one rule per field.
+    pub records: Vec<RecordAnswer>,
 }
 
 /// Marks a `need` the name line adds (`name(a) __need a <= 2`); read by
@@ -159,6 +161,8 @@ pub(crate) fn expand(source: &str) -> Result<Option<Expanded>, String> {
     let signatures = signatures(&lines, &types)?;
     let mut choices = Vec::new();
     let mut answers = Vec::new();
+    let mut records = Vec::new();
+    let mut appended: Vec<String> = Vec::new();
 
     let mut index = 0;
     while index < lines.len() {
@@ -191,6 +195,34 @@ pub(crate) fn expand(source: &str) -> Result<Option<Expanded>, String> {
             index = end;
             continue;
         }
+        if let Some((record, blocks)) = record_answer(&lines[index..end], index + 1, &types)? {
+            let name = rule_name(head);
+            let mut fields = Vec::new();
+            for (k, (field, block)) in blocks.into_iter().enumerate() {
+                if let Some(choice) = answer_choice(&block, &types) {
+                    answers.push((rule_name(&block[0]), types.choice(&choice).unwrap()));
+                }
+                let rule = rule_block(&block, index + 1, &types, &signatures)?;
+                for (param, choice) in rule.choices {
+                    choices.push((rule.name.clone(), param, choice));
+                }
+                fields.push((field, rule.name));
+                if k == 0 {
+                    for (offset, line) in rule.lines.into_iter().enumerate() {
+                        lines[index + offset] = line;
+                    }
+                } else {
+                    appended.push(rule.lines.join("\n"));
+                }
+            }
+            records.push(RecordAnswer {
+                name,
+                record,
+                fields,
+            });
+            index = end;
+            continue;
+        }
         if let Some(choice) = answer_choice(&lines[index..end], &types) {
             answers.push((rule_name(head), types.choice(&choice).unwrap()));
         }
@@ -203,11 +235,154 @@ pub(crate) fn expand(source: &str) -> Result<Option<Expanded>, String> {
         }
         index = end;
     }
+    let mut source = lines.join("\n");
+    for rule in appended {
+        source += "\n\n";
+        source += &rule;
+    }
     Ok(Some(Expanded {
-        source: lines.join("\n"),
+        source,
         choices,
         answers,
+        records,
     }))
+}
+
+/// `name(a) -> Record`: the text between `)` and `->`, and the record.
+fn answer_record(head: &str) -> Option<(&str, &str)> {
+    let (_, suffix) = head.split_once(')')?;
+    let (before, record) = suffix.rsplit_once("->")?;
+    Some((before.trim(), record.trim()))
+}
+
+/// Blocks of one field of a rule answering a record.
+type FieldBlocks = Vec<(String, Vec<String>)>;
+
+/// For a rule that answers a record (`quote(price) -> Bill`), one block per
+/// field, as long as the rule: the name line becomes `quote__total(price)`,
+/// the lines above the fields are shared, and the lines of other fields are
+/// blank, so errors keep the user's line numbers. A field's `promise`
+/// lines go under it, where `answer` is that field.
+fn record_answer(
+    block: &[String],
+    first_line: usize,
+    types: &Types,
+) -> Result<Option<(String, FieldBlocks)>, String> {
+    let head = strip_comment(&block[0]).trim().to_string();
+    let Some((suffix, record)) = answer_record(&head) else {
+        return Ok(None);
+    };
+    let fields = match types.get(record) {
+        Some(Def::Record(fields)) => fields.clone(),
+        Some(Def::Choice(_)) => {
+            return Err(error(
+                first_line,
+                format!(
+                    "`{record}` is a choice: answer its values and drop `-> {record}` from the name line"
+                ),
+            ));
+        }
+        None => return Err(error(first_line, format!("there is no type `{record}`"))),
+    };
+    if let Some((field, _)) = fields.iter().find(|(_, t)| {
+        t.as_deref()
+            .is_some_and(|t| matches!(types.get(t), Some(Def::Record(_))))
+    }) {
+        return Err(error(
+            first_line,
+            format!("`{record}` holds a record (`{field}`); a rule cannot answer it yet"),
+        ));
+    }
+    let (name, rest) = head.split_once('(').unwrap();
+    let params = rest.split_once(')').unwrap().0;
+    let gap = if suffix.is_empty() { "" } else { " " };
+
+    // Each field's line and the end of its lines.
+    let mut places: Vec<(String, usize, usize)> = Vec::new();
+    let mut offset = 1;
+    while offset < block.len() {
+        let text = strip_comment(&block[offset]);
+        let Some(field) = text.trim().strip_suffix(':').map(str::trim) else {
+            offset += 1;
+            continue;
+        };
+        if !fields.iter().any(|(f, _)| f == field) {
+            let names: Vec<&str> = fields.iter().map(|(f, _)| f.as_str()).collect();
+            return Err(error(
+                first_line + offset,
+                format!("`{record}` has no field `{field}` ({})", names.join(", ")),
+            ));
+        }
+        if places.iter().any(|(f, _, _)| f == field) {
+            return Err(error(
+                first_line + offset,
+                format!("`{field}:` is written twice"),
+            ));
+        }
+        let at = indent(text);
+        let mut end = offset + 1;
+        while end < block.len() {
+            let t = strip_comment(&block[end]);
+            if !t.trim().is_empty() && indent(t) <= at {
+                break;
+            }
+            end += 1;
+        }
+        places.push((field.to_string(), offset, end));
+        offset = end;
+    }
+    let missing: Vec<String> = fields
+        .iter()
+        .filter(|(f, _)| !places.iter().any(|(p, _, _)| p == f))
+        .map(|(f, _)| format!("`{f}:`"))
+        .collect();
+    if !missing.is_empty() {
+        return Err(error(
+            first_line,
+            format!(
+                "a rule answering `{record}` gives each field its lines below a line like `{}:`; add {}",
+                fields[0].0,
+                missing.join(", ")
+            ),
+        ));
+    }
+    let inside = |offset: usize| {
+        places
+            .iter()
+            .any(|(_, at, end)| (*at..*end).contains(&offset))
+    };
+    let mut out = Vec::new();
+    for (field, at, end) in &places {
+        let mut lines = vec![String::new(); block.len()];
+        lines[0] = format!("{name}__{field}({params}){gap}{suffix}");
+        for offset in 1..block.len() {
+            let trimmed = strip_comment(&block[offset]).trim();
+            if (*at + 1..*end).contains(&offset) {
+                lines[offset] = block[offset].clone();
+            } else if inside(offset) || trimmed.is_empty() {
+                continue;
+            } else if trimmed.starts_with("promise ") {
+                return Err(error(
+                    first_line + offset,
+                    format!(
+                        "put a promise under its field, after its `->` lines; there `answer` is that field, like `{}`",
+                        fields[0].0
+                    ),
+                ));
+            } else if trimmed.contains("->") {
+                return Err(error(
+                    first_line + offset,
+                    format!("put each answer under its field, like `{}:`", fields[0].0),
+                ));
+            } else {
+                lines[offset] = block[offset].clone();
+            }
+        }
+        out.push((field.clone(), lines));
+    }
+    // In the order the record declares its fields.
+    out.sort_by_key(|(f, _)| fields.iter().position(|(n, _)| n == f));
+    Ok(Some((record.to_string(), out)))
 }
 
 /// Marks the name line of a rule another file declares (`from rules:
@@ -625,10 +800,13 @@ fn signatures(lines: &[String], types: &Types) -> Result<Vec<Signature>, String>
         while end < lines.len() && !is_top(strip_comment(&lines[end])) {
             end += 1;
         }
-        let answer = answer_choice(&lines[index..end], types);
-        let places = rest
-            .split_once(')')
-            .map_or(0, |(_, suffix)| places_of(suffix));
+        let answer = match answer_record(head) {
+            Some((_, record)) => Some(record.to_string()),
+            None => answer_choice(&lines[index..end], types),
+        };
+        let places = rest.split_once(')').map_or(0, |(_, suffix)| {
+            places_of(suffix.split("->").next().unwrap_or_default())
+        });
         out.push((name.trim().to_string(), tys, answer, places));
     }
     Ok(out)
@@ -1052,6 +1230,63 @@ fn rewrite(
                 out += &inputs.join(", ");
             }
             Some(Local::Choice(_)) => out += &word,
+            None if chars.get(i) == Some(&'(')
+                && record_rule(&word, types, signatures).is_some() =>
+            {
+                // `quote(a).total` is `quote__total(a)`; `fee(quote(a))` passes each field.
+                let (record, fields) = record_rule(&word, types, signatures).unwrap();
+                let mut depth = 0;
+                let mut close = i;
+                for (k, c) in chars.iter().enumerate().skip(i) {
+                    match c {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                close = k;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let inner: String = chars[i + 1..close].iter().collect();
+                let args = rewrite(&inner, line, locals, types, signatures, places)?;
+                i = close + 1;
+                if chars.get(i) == Some(&'.') {
+                    let from = i + 1;
+                    let mut to = from;
+                    while to < chars.len() && is_word(chars[to]) {
+                        to += 1;
+                    }
+                    let field: String = chars[from..to].iter().collect();
+                    if !fields.contains(&field) {
+                        return Err(error(
+                            line,
+                            format!("`{record}` has no field `{field}` ({})", fields.join(", ")),
+                        ));
+                    }
+                    out += &format!("{word}__{field}({args})");
+                    i = to;
+                    continue;
+                }
+                let before = chars[..start].iter().rev().find(|c| !c.is_whitespace());
+                let next = chars[i..].iter().find(|c| !c.is_whitespace());
+                if !matches!(before, Some('(' | ',')) || !matches!(next, Some(')' | ',')) {
+                    return Err(error(
+                        line,
+                        format!(
+                            "`{word}` answers a `{record}`; use one of its fields, like `{word}(...).{}`, or pass it to a rule",
+                            fields[0]
+                        ),
+                    ));
+                }
+                let calls: Vec<String> = fields
+                    .iter()
+                    .map(|f| format!("{word}__{f}({args})"))
+                    .collect();
+                out += &calls.join(", ");
+            }
             None => {
                 if chars.get(i) == Some(&'.')
                     && chars
@@ -1070,6 +1305,23 @@ fn rewrite(
     Ok(out)
 }
 
+/// The record a rule of this file answers, and its fields.
+fn record_rule(
+    name: &str,
+    types: &Types,
+    signatures: &[Signature],
+) -> Option<(String, Vec<String>)> {
+    let (_, _, answer, _) = signatures.iter().find(|(n, _, _, _)| n == name)?;
+    let record = answer.as_deref()?;
+    let Some(Def::Record(fields)) = types.get(record) else {
+        return None;
+    };
+    Some((
+        record.to_string(),
+        fields.iter().map(|(f, _)| f.clone()).collect(),
+    ))
+}
+
 /// What an argument is, as far as types go.
 enum Arg {
     Record(String),
@@ -1080,11 +1332,24 @@ enum Arg {
 fn arg_type(arg: &str, locals: &[(String, Local)], types: &Types, signatures: &[Signature]) -> Arg {
     let arg = arg.trim();
     if let Some((callee, rest)) = arg.split_once('(')
-        && rest.ends_with(')')
-        && let Some((_, _, Some(choice), _)) =
+        && let Some((_, _, Some(answer), _)) =
             signatures.iter().find(|(n, _, _, _)| n == callee.trim())
     {
-        return Arg::Choice(choice.clone());
+        if rest.ends_with(')') {
+            return match types.get(answer) {
+                Some(Def::Record(_)) => Arg::Record(answer.clone()),
+                _ => Arg::Choice(answer.clone()),
+            };
+        }
+        // `quote(a).size`: a field of the answer.
+        if let Some((_, field)) = rest.rsplit_once(").")
+            && let Ok(ty) = types.at(answer, field.trim())
+        {
+            return match ty {
+                Some(t) if matches!(types.get(&t), Some(Def::Choice(_))) => Arg::Choice(t),
+                _ => Arg::Number,
+            };
+        }
     }
     if let Some((record, path)) = arg.split_once('.')
         && let Some((_, Local::Record(ty, _))) = locals.iter().find(|(n, _)| n == record)
@@ -1355,6 +1620,34 @@ mod tests {
             e.contains("takes a `Order` as input 1, got a `Size`"),
             "{e}"
         );
+    }
+
+    #[test]
+    fn a_rule_can_answer_a_record() {
+        let rule = "type Bill\n  goods\n  tax\n\nquote(p) -> Bill\n  need p <= 100\n  goods:\n    always -> p\n  tax:\n    always -> p / 10\n";
+        let module = parse_module(&format!(
+            "{rule}\nboth(p)\n  need p <= 100\n  always -> quote(p).goods + quote(p).tax\n"
+        ))
+        .unwrap();
+        let names: Vec<&str> = module.contracts.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["quote__goods", "both", "quote__tax"]);
+        let record = module.contracts[0].record_answer.as_ref().unwrap();
+        assert_eq!(
+            record.fields[1],
+            ("tax".to_string(), "quote__tax".to_string())
+        );
+        let e = err(&rule.replace("  tax:\n    always -> p / 10\n", ""));
+        assert!(e.contains("add `tax:`"), "{e}");
+        let e = err(&rule.replace("  goods:", "  promise answer.goods <= 100\n  goods:"));
+        assert!(e.contains("put a promise under its field"), "{e}");
+        let e = err(&format!(
+            "{rule}\nbad(p)\n  need p <= 100\n  always -> quote(p)\n"
+        ));
+        assert!(e.contains("answers a `Bill`"), "{e}");
+        let e = err(&format!(
+            "{rule}\nbad(p)\n  need p <= 100\n  always -> quote(p).fee\n"
+        ));
+        assert!(e.contains("no field `fee`"), "{e}");
     }
 
     #[test]
