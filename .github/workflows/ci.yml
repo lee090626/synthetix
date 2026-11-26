@@ -54,4 +54,5 @@ jobs:
         run: |
           lean Settle.lean
           lean Lists.lean
-          ! grep -n "sorry" *.lean
+          for f in generated/*.lean; do lean "$f"; done
+          ! grep -rn "sorry" --include="*.lean" .
