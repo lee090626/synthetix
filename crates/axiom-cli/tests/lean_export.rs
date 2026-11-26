@@ -129,3 +129,29 @@ fn repeat_steps_are_proven_by_lean() {
         &["savings__start", "savings__step", "balance__step"],
     );
 }
+
+/// With `--lean`, a rule Lean cannot take fails the build (issue #211):
+/// here a `hint` naming a lemma that does not exist.
+#[test]
+fn a_rule_lean_cannot_take_fails_the_build() {
+    let dir = std::env::temp_dir().join(format!("axiom-lean-strict-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("f.ax"),
+        "f(x)\n  need x <= 10\n  always -> x + 1\n  hint nope(x)\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_axiom"))
+        .args(["build", "f.ax", "-o", "f.wasm", "--lean"])
+        .current_dir(&dir)
+        .env("PATH", "")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("lean_result: NOT_COVERED (hint `nope`: no such lemma)"),
+        "{stdout}"
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Lean did not prove f"));
+}
