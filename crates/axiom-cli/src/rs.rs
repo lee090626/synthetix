@@ -160,6 +160,10 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
             out += "\n";
             out += &any_length_wrapper(contract, rule)?;
         }
+        if let Some(record) = &contract.record_answer {
+            out += "\n";
+            out += &record_wrapper(contract, record, &contracts)?;
+        }
         if let Some(rule) = &contract.repeat {
             out += "\n";
             out += &repeat_wrapper(contract, rule)?;
@@ -363,6 +367,49 @@ fn any_length_wrapper(core: &Contract, rule: &axiom_parser::ListRule) -> Result<
         } else {
             format!("    for i in 0..n {{\n{second_loop}    }}\n")
         },
+    ))
+}
+
+/// `quote(price, qty)` for a rule answering a record: a struct with each
+/// field from its proven rule.
+fn record_wrapper(
+    first: &Contract,
+    record: &axiom_parser::RecordAnswer,
+    all: &[&Contract],
+) -> Result<String, String> {
+    let mut params = Vec::new();
+    let mut args = Vec::new();
+    for (i, param) in first.params.iter().enumerate() {
+        params.push(format!("p{i}: {}", rs_type(&param.ty, first.wide)?));
+        args.push(format!("p{i}"));
+    }
+    let mut fields = String::new();
+    let mut values = String::new();
+    for (field, rule) in &record.fields {
+        let contract = all
+            .iter()
+            .find(|c| &c.name == rule)
+            .ok_or_else(|| format!("missing `{rule}`"))?;
+        fields += &format!(
+            "    pub {}: {},\n",
+            ident(field)?,
+            rs_type(&contract.return_type, contract.wide)?
+        );
+        values += &format!(
+            "        {}: {}({})?,\n",
+            ident(field)?,
+            ident(rule)?,
+            args.join(", ")
+        );
+    }
+    let name = ident(&record.record)?;
+    Ok(format!(
+        "/// `type {}`, as `{}` answers it.\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {name} {{\n{fields}}}\n\n/// A `{}`: each field from its proven rule.\npub fn {}({}) -> Result<{name}, AxiomError> {{\n    Ok({name} {{\n{values}    }})\n}}\n",
+        record.record,
+        record.name,
+        record.record,
+        ident(&record.name)?,
+        params.join(", "),
     ))
 }
 

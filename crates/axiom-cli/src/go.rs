@@ -254,6 +254,41 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
             out += "\n";
             out += &any_length_wrapper(&claim(&rule.name)?, contract, rule)?;
         }
+        if let Some(record) = &contract.record_answer {
+            let go_name = claim(&record.name)?;
+            let type_name = claim(&record.record)?;
+            let names: Vec<String> = contract.params.iter().map(|p| local(&p.name)).collect();
+            let mut params = Vec::new();
+            for (name, param) in names.iter().zip(&contract.params) {
+                params.push(format!("{name} {}", go_type(&param.ty, contract.wide)?));
+            }
+            let mut fields = String::new();
+            let mut sets = String::new();
+            for (field, rule) in &record.fields {
+                let field_rule = contracts
+                    .iter()
+                    .find(|c| &c.name == rule)
+                    .ok_or_else(|| format!("missing `{rule}`"))?;
+                fields += &format!(
+                    "\t{} {}\n",
+                    exported(field),
+                    go_type(&field_rule.return_type, field_rule.wide)?
+                );
+                sets += &format!(
+                    "\tif result.{}, err = {}({}); err != nil {{\n\t\treturn result, err\n\t}}\n",
+                    exported(field),
+                    exported(rule),
+                    names.join(", ")
+                );
+            }
+            out += &format!(
+                "\n// {type_name} is `type {}`, as `{}` answers it.\ntype {type_name} struct {{\n{fields}}}\n\n// {go_name} is the proven rule `{}`: each field from its proven rule.\nfunc {go_name}({}) (result {type_name}, err error) {{\n{sets}\treturn result, nil\n}}\n",
+                record.record,
+                record.name,
+                record.name,
+                params.join(", "),
+            );
+        }
         if let Some(rule) = &contract.repeat {
             let go_name = claim(&rule.name)?;
             let inputs = &contract.params[..contract.params.len() - 1];

@@ -278,6 +278,12 @@ pub fn emit_modules(
             js += &function;
             dts += &declaration;
         }
+        if let Some(record) = &contract.record_answer {
+            let (function, declaration) = record_wrapper(contract, record, &contracts)?;
+            js += "\n";
+            js += &function;
+            dts += &declaration;
+        }
         if let Some(rule) = &contract.repeat {
             let (function, declaration) = repeat_wrapper(contract, rule)?;
             js += "\n";
@@ -330,12 +336,19 @@ type ChoiceUses<'a> = (
 pub(crate) fn choice_types<'a>(contracts: &[&'a Contract]) -> Result<Vec<ChoiceUses<'a>>, String> {
     let mut out: Vec<ChoiceUses> = Vec::new();
     for contract in contracts {
-        for (input, choice) in &contract.choices {
+        let answer = contract
+            .answer_choice
+            .iter()
+            .map(|c| (c, contract.return_type.clone()));
+        let inputs = contract.choices.iter().map(|(input, choice)| {
             let ty = contract
                 .params
                 .iter()
                 .find(|p| &p.name == input)
                 .map_or(axiom_parser::Type::U32, |p| p.ty.clone());
+            (choice, ty)
+        });
+        for (choice, ty) in inputs.chain(answer) {
             match out.iter_mut().find(|(c, _)| c.name == choice.name) {
                 Some((known, _)) if known.values != choice.values => {
                     return Err(format!(
@@ -439,6 +452,49 @@ fn repeat_wrapper(
             "export function {}({}): {ret};\n",
             rule.name,
             typed.join(", ")
+        ),
+    ))
+}
+
+/// `quote(price, qty)` for a rule answering a record: an object with each
+/// field's proven rule.
+fn record_wrapper(
+    first: &Contract,
+    record: &axiom_parser::RecordAnswer,
+    all: &[&Contract],
+) -> Result<(String, String), String> {
+    let args: Vec<String> = (0..first.params.len()).map(|i| format!("p{i}")).collect();
+    let mut typed = Vec::new();
+    for (i, param) in first.params.iter().enumerate() {
+        typed.push(format!("p{i}: {}", ts_type(&param.ty, first.wide)?));
+    }
+    let mut values = Vec::new();
+    let mut types = Vec::new();
+    for (field, rule) in &record.fields {
+        let contract = all
+            .iter()
+            .find(|c| &c.name == rule)
+            .ok_or_else(|| format!("missing `{rule}`"))?;
+        values.push(format!("{field}: {rule}({})", args.join(", ")));
+        types.push(format!(
+            "{field}: {}",
+            ts_type(&contract.return_type, contract.wide)?
+        ));
+    }
+    Ok((
+        format!(
+            "/** `{}`: a `{}`, each field from its proven rule. */\nexport function {}({}) {{\n  return {{ {} }};\n}}\n",
+            record.name,
+            record.record,
+            record.name,
+            args.join(", "),
+            values.join(", ")
+        ),
+        format!(
+            "export function {}({}): {{ {} }};\n",
+            record.name,
+            typed.join(", "),
+            types.join("; ")
         ),
     ))
 }

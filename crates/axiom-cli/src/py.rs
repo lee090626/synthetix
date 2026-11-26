@@ -171,6 +171,22 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
             out += "\n\n";
             out += &any_length_wrapper(contract, rule);
         }
+        if let Some(record) = &contract.record_answer {
+            let names: Vec<String> = contract.params.iter().map(|p| ident(&p.name)).collect();
+            let values: Vec<String> = record
+                .fields
+                .iter()
+                .map(|(field, rule)| format!("\"{field}\": {}({})", ident(rule), names.join(", ")))
+                .collect();
+            // A `{}` with each field from its proven rule.
+            out += &format!(
+                "\n\ndef {}({}):\n    \"\"\"A `{}`: each field from its proven rule.\"\"\"\n    return {{{}}}\n",
+                ident(&record.name),
+                names.join(", "),
+                record.record,
+                values.join(", "),
+            );
+        }
         if let Some(rule) = &contract.repeat {
             let names: Vec<String> = contract.params[..contract.params.len() - 1]
                 .iter()

@@ -33,13 +33,17 @@
 //!   `else`, so a `match` must name every value of the choice (or end with
 //!   `else`).
 
-use crate::ast::ChoiceType;
+use crate::ast::{ChoiceType, RecordAnswer};
 use crate::simple::{check_name, strip_comment};
 
 pub(crate) struct Expanded {
     pub source: String,
     /// For each rule, its choice inputs (after records are written out).
     pub choices: Vec<(String, String, ChoiceType)>,
+    /// Rules whose every answer is a value of one choice.
+    pub answers: Vec<(String, ChoiceType)>,
+    /// Rules that answer a record, written out as one rule per field.
+    pub records: Vec<RecordAnswer>,
 }
 
 /// Marks a `need` the name line adds (`name(a) __need a <= 2`); read by
@@ -56,7 +60,7 @@ const RESERVED: &[&str] = &[
 #[derive(Clone)]
 enum Def {
     Choice(Vec<String>),
-    /// Field name and the choice type it holds, if any.
+    /// Field name and the type it holds (a choice or a record), if any.
     Record(Vec<(String, Option<String>)>),
 }
 
@@ -77,6 +81,40 @@ impl Types {
             }),
             Def::Record(_) => None,
         }
+    }
+
+    /// Every number a record holds, in field order: the dotted path
+    /// (`address.zip`) and the choice it holds, if any. Records inside the
+    /// record are written out in place.
+    fn leaves(&self, record: &str) -> Vec<(String, Option<String>)> {
+        let Some(Def::Record(fields)) = self.get(record) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (field, ty) in fields {
+            match ty.as_deref().map(|t| (t, self.get(t))) {
+                Some((t, Some(Def::Record(_)))) => {
+                    for (path, choice) in self.leaves(t) {
+                        out.push((format!("{field}.{path}"), choice));
+                    }
+                }
+                _ => out.push((field.clone(), ty.clone())),
+            }
+        }
+        out
+    }
+
+    /// The type at `path` inside `record` (`None` for a number), or `Err`
+    /// when the record has no such field.
+    fn at(&self, record: &str, path: &str) -> Result<Option<String>, ()> {
+        let mut ty = Some(record.to_string());
+        for field in path.split('.') {
+            let Some(Def::Record(fields)) = ty.as_deref().and_then(|t| self.get(t)) else {
+                return Err(());
+            };
+            ty = fields.iter().find(|(f, _)| f == field).ok_or(())?.1.clone();
+        }
+        Ok(ty)
     }
 
     /// The choice that has `value`, and its place.
@@ -122,6 +160,9 @@ pub(crate) fn expand(source: &str) -> Result<Option<Expanded>, String> {
     let types = read_types(&mut lines)?;
     let signatures = signatures(&lines, &types)?;
     let mut choices = Vec::new();
+    let mut answers = Vec::new();
+    let mut records = Vec::new();
+    let mut appended: Vec<String> = Vec::new();
 
     let mut index = 0;
     while index < lines.len() {
@@ -131,6 +172,13 @@ pub(crate) fn expand(source: &str) -> Result<Option<Expanded>, String> {
             end += 1;
         }
         let head = text.trim();
+        if head.starts_with(FROM_MARK) {
+            for line in &mut lines[index..end] {
+                line.clear();
+            }
+            index = end;
+            continue;
+        }
         let is_rule = is_top(&text)
             && !head.starts_with("page ")
             && !head.starts_with("from ")
@@ -147,6 +195,37 @@ pub(crate) fn expand(source: &str) -> Result<Option<Expanded>, String> {
             index = end;
             continue;
         }
+        if let Some((record, blocks)) = record_answer(&lines[index..end], index + 1, &types)? {
+            let name = rule_name(head);
+            let mut fields = Vec::new();
+            for (k, (field, block)) in blocks.into_iter().enumerate() {
+                if let Some(choice) = answer_choice(&block, &types) {
+                    answers.push((rule_name(&block[0]), types.choice(&choice).unwrap()));
+                }
+                let rule = rule_block(&block, index + 1, &types, &signatures)?;
+                for (param, choice) in rule.choices {
+                    choices.push((rule.name.clone(), param, choice));
+                }
+                fields.push((field, rule.name));
+                if k == 0 {
+                    for (offset, line) in rule.lines.into_iter().enumerate() {
+                        lines[index + offset] = line;
+                    }
+                } else {
+                    appended.push(rule.lines.join("\n"));
+                }
+            }
+            records.push(RecordAnswer {
+                name,
+                record,
+                fields,
+            });
+            index = end;
+            continue;
+        }
+        if let Some(choice) = answer_choice(&lines[index..end], &types) {
+            answers.push((rule_name(head), types.choice(&choice).unwrap()));
+        }
         let rule = rule_block(&lines[index..end], index + 1, &types, &signatures)?;
         for (offset, line) in rule.lines.into_iter().enumerate() {
             lines[index + offset] = line;
@@ -156,10 +235,315 @@ pub(crate) fn expand(source: &str) -> Result<Option<Expanded>, String> {
         }
         index = end;
     }
+    let mut source = lines.join("\n");
+    for rule in appended {
+        source += "\n\n";
+        source += &rule;
+    }
     Ok(Some(Expanded {
-        source: lines.join("\n"),
+        source,
         choices,
+        answers,
+        records,
     }))
+}
+
+/// `name(a) -> Record`: the text between `)` and `->`, and the record.
+fn answer_record(head: &str) -> Option<(&str, &str)> {
+    let (_, suffix) = head.split_once(')')?;
+    let (before, record) = suffix.rsplit_once("->")?;
+    Some((before.trim(), record.trim()))
+}
+
+/// Blocks of one field of a rule answering a record.
+type FieldBlocks = Vec<(String, Vec<String>)>;
+
+/// For a rule that answers a record (`quote(price) -> Bill`), one block per
+/// field, as long as the rule: the name line becomes `quote__total(price)`,
+/// the lines above the fields are shared, and the lines of other fields are
+/// blank, so errors keep the user's line numbers. A field's `promise`
+/// lines go under it, where `answer` is that field.
+fn record_answer(
+    block: &[String],
+    first_line: usize,
+    types: &Types,
+) -> Result<Option<(String, FieldBlocks)>, String> {
+    let head = strip_comment(&block[0]).trim().to_string();
+    let Some((suffix, record)) = answer_record(&head) else {
+        return Ok(None);
+    };
+    let fields = match types.get(record) {
+        Some(Def::Record(fields)) => fields.clone(),
+        Some(Def::Choice(_)) => {
+            return Err(error(
+                first_line,
+                format!(
+                    "`{record}` is a choice: answer its values and drop `-> {record}` from the name line"
+                ),
+            ));
+        }
+        None => return Err(error(first_line, format!("there is no type `{record}`"))),
+    };
+    if let Some((field, _)) = fields.iter().find(|(_, t)| {
+        t.as_deref()
+            .is_some_and(|t| matches!(types.get(t), Some(Def::Record(_))))
+    }) {
+        return Err(error(
+            first_line,
+            format!("`{record}` holds a record (`{field}`); a rule cannot answer it yet"),
+        ));
+    }
+    let (name, rest) = head.split_once('(').unwrap();
+    let params = rest.split_once(')').unwrap().0;
+    let gap = if suffix.is_empty() { "" } else { " " };
+
+    // Each field's line and the end of its lines.
+    let mut places: Vec<(String, usize, usize)> = Vec::new();
+    let mut offset = 1;
+    while offset < block.len() {
+        let text = strip_comment(&block[offset]);
+        let Some(field) = text.trim().strip_suffix(':').map(str::trim) else {
+            offset += 1;
+            continue;
+        };
+        if !fields.iter().any(|(f, _)| f == field) {
+            let names: Vec<&str> = fields.iter().map(|(f, _)| f.as_str()).collect();
+            return Err(error(
+                first_line + offset,
+                format!("`{record}` has no field `{field}` ({})", names.join(", ")),
+            ));
+        }
+        if places.iter().any(|(f, _, _)| f == field) {
+            return Err(error(
+                first_line + offset,
+                format!("`{field}:` is written twice"),
+            ));
+        }
+        let at = indent(text);
+        let mut end = offset + 1;
+        while end < block.len() {
+            let t = strip_comment(&block[end]);
+            if !t.trim().is_empty() && indent(t) <= at {
+                break;
+            }
+            end += 1;
+        }
+        places.push((field.to_string(), offset, end));
+        offset = end;
+    }
+    let missing: Vec<String> = fields
+        .iter()
+        .filter(|(f, _)| !places.iter().any(|(p, _, _)| p == f))
+        .map(|(f, _)| format!("`{f}:`"))
+        .collect();
+    if !missing.is_empty() {
+        return Err(error(
+            first_line,
+            format!(
+                "a rule answering `{record}` gives each field its lines below a line like `{}:`; add {}",
+                fields[0].0,
+                missing.join(", ")
+            ),
+        ));
+    }
+    let inside = |offset: usize| {
+        places
+            .iter()
+            .any(|(_, at, end)| (*at..*end).contains(&offset))
+    };
+    let mut out = Vec::new();
+    for (field, at, end) in &places {
+        let mut lines = vec![String::new(); block.len()];
+        lines[0] = format!("{name}__{field}({params}){gap}{suffix}");
+        for offset in 1..block.len() {
+            let trimmed = strip_comment(&block[offset]).trim();
+            if (*at + 1..*end).contains(&offset) {
+                lines[offset] = block[offset].clone();
+            } else if inside(offset) || trimmed.is_empty() {
+                continue;
+            } else if trimmed.starts_with("promise ") {
+                return Err(error(
+                    first_line + offset,
+                    format!(
+                        "put a promise under its field, after its `->` lines; there `answer` is that field, like `{}`",
+                        fields[0].0
+                    ),
+                ));
+            } else if trimmed.contains("->") {
+                return Err(error(
+                    first_line + offset,
+                    format!("put each answer under its field, like `{}:`", fields[0].0),
+                ));
+            } else {
+                lines[offset] = block[offset].clone();
+            }
+        }
+        out.push((field.clone(), lines));
+    }
+    // In the order the record declares its fields.
+    out.sort_by_key(|(f, _)| fields.iter().position(|(n, _)| n == f));
+    Ok(Some((record.to_string(), out)))
+}
+
+/// Marks the name line of a rule another file declares (`from rules:
+/// total`), added by [`with_imported_types`] so calls to it are checked.
+const FROM_MARK: &str = "__from ";
+
+/// Adds to `source` the types its `from file: ...` lines name, and the
+/// name lines of the rules they name. `read` gives a file's source from the
+/// path written after `from`. The added lines go after the last line, so
+/// line numbers stay the user's. Types a named rule takes come too.
+pub fn with_imported_types(
+    source: &str,
+    read: &dyn Fn(&str) -> Result<String, String>,
+) -> Result<String, String> {
+    imported(source, read, 0)
+}
+
+fn imported(
+    source: &str,
+    read: &dyn Fn(&str) -> Result<String, String>,
+    depth: usize,
+) -> Result<String, String> {
+    if depth > 16 {
+        return Err("`from` lines import each other in a circle".to_string());
+    }
+    let mut lines: Vec<String> = source.lines().map(String::from).collect();
+    let mut added: Vec<String> = Vec::new();
+    let mut added_types: Vec<String> = Vec::new();
+    for line in &mut lines {
+        let text = strip_comment(line).to_string();
+        let Some(rest) = text.strip_prefix("from ") else {
+            continue;
+        };
+        let Some((file, names)) = rest.split_once(':') else {
+            continue;
+        };
+        let other = imported(&read(file.trim())?, read, depth + 1)?;
+        let mut other_lines: Vec<String> = other.lines().map(String::from).collect();
+        // Each `type` block of the other file, as written, with the types it names.
+        let mut blocks: Vec<(String, String, Vec<String>)> = Vec::new();
+        let mut at = 0;
+        while at < other_lines.len() {
+            let head = strip_comment(&other_lines[at]).to_string();
+            let mut end = at + 1;
+            while end < other_lines.len() && !is_top(strip_comment(&other_lines[end])) {
+                end += 1;
+            }
+            if let Some(decl) = head.strip_prefix("type ") {
+                let name = decl
+                    .split('=')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                let uses = other_lines[at + 1..end]
+                    .iter()
+                    .filter_map(|l| Some(strip_comment(l).split_once(':')?.1.trim().to_string()))
+                    .collect();
+                blocks.push((name, other_lines[at..end].join("\n"), uses));
+            }
+            at = end;
+        }
+        if blocks.is_empty() {
+            continue;
+        }
+        let types = read_types(&mut other_lines)?;
+        let signatures = signatures(&other_lines, &types)?;
+        let mut need: Vec<String> = Vec::new();
+        let mut rules = Vec::new();
+        for name in names.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+            if blocks.iter().any(|(n, _, _)| n == name) {
+                need.push(name.to_string());
+                continue;
+            }
+            rules.push(name.to_string());
+            if let Some((_, params, answer, _)) = signatures.iter().find(|(n, _, _, _)| n == name) {
+                need.extend(params.iter().flatten().cloned());
+                need.extend(answer.iter().cloned());
+            }
+        }
+        // The types the named ones hold, too.
+        let mut k = 0;
+        while k < need.len() {
+            if let Some((_, _, uses)) = blocks.iter().find(|(n, _, _)| *n == need[k]) {
+                for used in uses {
+                    if !need.contains(used) {
+                        need.push(used.clone());
+                    }
+                }
+            }
+            k += 1;
+        }
+        for (name, block, _) in &blocks {
+            if need.contains(name) && !added_types.contains(name) {
+                added_types.push(name.clone());
+                added.push(block.clone());
+            }
+        }
+        for rule in &rules {
+            let Some((_, params, answer, places)) =
+                signatures.iter().find(|(n, _, _, _)| n == rule)
+            else {
+                continue;
+            };
+            if params.iter().all(Option::is_none) && answer.is_none() {
+                continue;
+            }
+            let params: Vec<String> = params
+                .iter()
+                .enumerate()
+                .map(|(k, t)| match t {
+                    Some(t) => format!("v{k}: {t}"),
+                    None => format!("v{k}"),
+                })
+                .collect();
+            let decimals = if *places > 0 {
+                format!(" with {places} decimals")
+            } else {
+                String::new()
+            };
+            let mut sig = format!("{FROM_MARK}{rule}({}){decimals}", params.join(", "));
+            if let Some(Def::Choice(values)) = answer.as_deref().and_then(|a| types.get(a)) {
+                sig += &format!("\n  -> {}", values[0]);
+            }
+            added.push(sig);
+        }
+        let file = file.trim();
+        let rules = rules.join(", ");
+        *line = if rules.is_empty() {
+            String::new()
+        } else {
+            format!("from {file}: {rules}")
+        };
+    }
+    if added.is_empty() {
+        return Ok(source.to_string());
+    }
+    Ok(format!("{}\n\n{}\n", lines.join("\n"), added.join("\n\n")))
+}
+
+fn rule_name(head: &str) -> String {
+    head.split_once('(')
+        .map_or(head, |(n, _)| n)
+        .trim()
+        .to_string()
+}
+
+/// The choice every `->` answer of the rule is a value of, if one is.
+fn answer_choice(block: &[String], types: &Types) -> Option<String> {
+    let mut found: Option<&str> = None;
+    for line in &block[1..] {
+        let Some((_, value)) = strip_comment(line).split_once("->") else {
+            continue;
+        };
+        let (choice, _) = types.value(value.trim())?;
+        if found.is_some_and(|f| f != choice) {
+            return None;
+        }
+        found = Some(choice);
+    }
+    found.map(String::from)
 }
 
 /// Reads every `type` block and blanks its lines.
@@ -259,11 +643,35 @@ fn read_types(lines: &mut [String]) -> Result<Types, String> {
                 let (t, l) = written.rsplit_once('@').unwrap();
                 let l: usize = l.parse().unwrap();
                 match names.iter().find(|(n, _)| n == t) {
-                    Some((_, true)) => *ty = Some(t.to_string()),
-                    Some((_, false)) => {
-                        return Err(error(l, format!("a field cannot be a record (`{t}`) yet")));
-                    }
+                    Some(_) => *ty = Some(format!("{t}@{l}")),
                     None => return Err(error(l, format!("there is no type `{t}`"))),
+                }
+            }
+        }
+    }
+    // A record may hold another record, but not itself.
+    for (name, def, _) in &defs {
+        let Def::Record(fields) = def else { continue };
+        for (_, ty) in fields {
+            let Some((t, l)) = ty.as_deref().and_then(|t| t.rsplit_once('@')) else {
+                continue;
+            };
+            let mut path = vec![name.as_str(), t];
+            if holds(&defs, t, name, &mut path) {
+                return Err(error(
+                    l.parse::<usize>().unwrap(),
+                    format!("a record cannot hold itself yet ({})", path.join(" holds ")),
+                ));
+            }
+        }
+    }
+    for (_, def, _) in &mut defs {
+        if let Def::Record(fields) = def {
+            for (_, ty) in fields.iter_mut() {
+                if let Some(t) = ty.as_mut()
+                    && let Some((name, _)) = t.rsplit_once('@')
+                {
+                    *t = name.to_string();
                 }
             }
         }
@@ -291,8 +699,70 @@ fn read_types(lines: &mut [String]) -> Result<Types, String> {
     })
 }
 
-/// The type of each input of each rule: `None` for a number.
-type Signature = (String, Vec<Option<String>>);
+/// Whether record `from` holds `target`, directly or through its fields;
+/// `path` gets the records on the way.
+fn holds<'a>(
+    defs: &'a [(String, Def, usize)],
+    from: &'a str,
+    target: &str,
+    path: &mut Vec<&'a str>,
+) -> bool {
+    let Some((_, Def::Record(fields), _)) = defs.iter().find(|(n, _, _)| n == from) else {
+        return false;
+    };
+    for (_, ty) in fields {
+        let Some(t) = ty.as_deref() else { continue };
+        let t = t.rsplit_once('@').map_or(t, |(t, _)| t);
+        if t == target {
+            return true;
+        }
+        if path.contains(&t) {
+            continue;
+        }
+        path.push(t);
+        if holds(defs, t, target, path) {
+            return true;
+        }
+        path.pop();
+    }
+    false
+}
+
+/// The type of each input of each rule (`None` for a number), the choice
+/// its answers are, if any, and its decimal places.
+type Signature = (String, Vec<Option<String>>, Option<String>, u32);
+
+/// The decimal places a name line declares (`with 2 decimals`).
+fn places_of(suffix: &str) -> u32 {
+    let Some(rest) = suffix
+        .trim_end()
+        .strip_suffix("decimals")
+        .or_else(|| suffix.trim_end().strip_suffix("decimal"))
+    else {
+        return 0;
+    };
+    rest.trim_end()
+        .rsplit_once("with ")
+        .and_then(|(_, n)| n.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// A choice value's place as a number of a rule with `places` decimals:
+/// the rule reads every number as tenths, hundredths..., so place 2 in a
+/// rule with 2 decimals is written `0.02` and stays 2 underneath, the same
+/// number a rule without decimals takes.
+fn place(at: usize, places: u32) -> String {
+    if places == 0 {
+        return at.to_string();
+    }
+    let scale = 10usize.pow(places);
+    format!(
+        "{}.{:0width$}",
+        at / scale,
+        at % scale,
+        width = places as usize
+    )
+}
 
 fn signatures(lines: &[String], types: &Types) -> Result<Vec<Signature>, String> {
     let mut out = Vec::new();
@@ -306,6 +776,7 @@ fn signatures(lines: &[String], types: &Types) -> Result<Vec<Signature>, String>
         {
             continue;
         }
+        let head = head.strip_prefix(FROM_MARK).unwrap_or(head);
         let Some((name, rest)) = head.split_once('(') else {
             continue;
         };
@@ -325,14 +796,26 @@ fn signatures(lines: &[String], types: &Types) -> Result<Vec<Signature>, String>
                 None => None,
             });
         }
-        out.push((name.trim().to_string(), tys));
+        let mut end = index + 1;
+        while end < lines.len() && !is_top(strip_comment(&lines[end])) {
+            end += 1;
+        }
+        let answer = match answer_record(head) {
+            Some((_, record)) => Some(record.to_string()),
+            None => answer_choice(&lines[index..end], types),
+        };
+        let places = rest.split_once(')').map_or(0, |(_, suffix)| {
+            places_of(suffix.split("->").next().unwrap_or_default())
+        });
+        out.push((name.trim().to_string(), tys, answer, places));
     }
     Ok(out)
 }
 
 /// What a name means inside one rule.
 enum Local {
-    /// A record input: its type and fields (name, written-out input, choice).
+    /// A record input: its type and the numbers it holds (dotted path,
+    /// written-out input, choice).
     Record(String, Vec<(String, String, Option<String>)>),
     /// A choice input (or a record field written out) and its type.
     Choice(String),
@@ -375,9 +858,23 @@ fn rule_block(
             continue;
         };
         let (param, ty) = (param.trim(), ty.trim());
-        if param.contains('[') {
-            return Err(error(first_line, "a list cannot hold a type yet"));
-        }
+        // `sizes[n]: Size`: a list of any length holding a type.
+        let (param, list) = match param.split_once('[') {
+            Some((name, size)) => {
+                let size = size.trim_end_matches(']').trim();
+                if size.parse::<usize>().is_ok() {
+                    return Err(error(
+                        first_line,
+                        format!(
+                            "a list of a type needs a length name, like `{}[n]`",
+                            name.trim()
+                        ),
+                    ));
+                }
+                (name.trim(), format!("[{size}]"))
+            }
+            None => (param, String::new()),
+        };
         check_name(param, first_line)?;
         if types.value(param).is_some() {
             return Err(error(
@@ -387,15 +884,15 @@ fn rule_block(
         }
         match types.get(ty) {
             Some(Def::Choice(_)) => {
-                written.push(param.to_string());
+                written.push(format!("{param}{list}"));
                 choices.push((param.to_string(), types.choice(ty).unwrap()));
                 locals.push((param.to_string(), Local::Choice(ty.to_string())));
             }
-            Some(Def::Record(fields)) => {
+            Some(Def::Record(_)) => {
                 let mut flat = Vec::new();
-                for (field, choice) in fields {
-                    let input = format!("{param}__{field}");
-                    written.push(input.clone());
+                for (field, choice) in &types.leaves(ty) {
+                    let input = format!("{param}__{}", field.replace('.', "__"));
+                    written.push(format!("{input}{list}"));
                     if let Some(choice) = choice {
                         choices.push((input.clone(), types.choice(choice).unwrap()));
                     }
@@ -405,12 +902,6 @@ fn rule_block(
             }
             None => return Err(error(first_line, format!("there is no type `{ty}`"))),
         }
-    }
-    if !choices.is_empty() && suffix.contains("decimal") {
-        return Err(error(
-            first_line,
-            "a rule with a choice input cannot have decimals yet",
-        ));
     }
     let signed = suffix.contains("can be negative");
     let mut needs = String::new();
@@ -424,7 +915,8 @@ fn rule_block(
     let mut out = vec![String::new(); block.len()];
     out[0] = format!("{name}({}){gap}{suffix}{needs}", written.join(", "));
 
-    let rewrite = |text: &str, line: usize| rewrite(text, line, &locals, types, signatures);
+    let places = places_of(suffix);
+    let rewrite = |text: &str, line: usize| rewrite(text, line, &locals, types, signatures, places);
     let mut offset = 1;
     let mut matched = false;
     while offset < block.len() {
@@ -456,6 +948,7 @@ fn rule_block(
                 &locals,
                 types,
                 &rewrite,
+                places,
             )?;
             for (k, arm) in arms.into_iter().enumerate() {
                 out[offset + 1 + k] = arm;
@@ -503,6 +996,7 @@ fn match_arms(
     locals: &[(String, Local)],
     types: &Types,
     rewrite: &dyn Fn(&str, usize) -> Result<String, String>,
+    places: u32,
 ) -> Result<Vec<String>, String> {
     let found = match subject.split_once('.') {
         None => locals.iter().find_map(|(n, l)| match l {
@@ -609,14 +1103,14 @@ fn match_arms(
         _ => {}
     }
     let last = cases.len() - 1;
-    for (n, (k, places, value)) in cases.iter().enumerate() {
+    for (n, (k, at_places, value)) in cases.iter().enumerate() {
         let arm_line = line + 1 + k;
         let value = rewrite(value, arm_line)?;
-        let condition = match places {
+        let condition = match at_places {
             _ if n == last => "else".to_string(),
-            Some(places) => places
+            Some(at_places) => at_places
                 .iter()
-                .map(|at| format!("{input} is {at}"))
+                .map(|at| format!("{input} is {}", place(*at, places)))
                 .collect::<Vec<_>>()
                 .join(" or "),
             None => unreachable!("`else` is last"),
@@ -635,8 +1129,9 @@ fn rewrite(
     locals: &[(String, Local)],
     types: &Types,
     signatures: &[Signature],
+    places: u32,
 ) -> Result<String, String> {
-    check_calls(text, line, locals, types, signatures)?;
+    check_calls(text, line, locals, types, signatures, places)?;
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::new();
     let mut i = 0;
@@ -663,6 +1158,101 @@ fn rewrite(
         }
         match locals.iter().find(|(n, _)| *n == word).map(|(_, l)| l) {
             Some(Local::Record(ty, fields)) => {
+                // `order.address.zip`: the dotted path after the record.
+                let mut path = String::new();
+                while chars.get(i) == Some(&'.') && chars.get(i + 1).is_some_and(|c| is_word(*c)) {
+                    let from = i + 1;
+                    let mut to = from;
+                    while to < chars.len() && is_word(chars[to]) {
+                        to += 1;
+                    }
+                    let field: String = chars[from..to].iter().collect();
+                    let inner = if path.is_empty() {
+                        ty.clone()
+                    } else {
+                        match types.at(ty, &path) {
+                            Ok(Some(t)) if matches!(types.get(&t), Some(Def::Record(_))) => t,
+                            _ => break,
+                        }
+                    };
+                    if types.at(&inner, &field).is_err() {
+                        let Some(Def::Record(names)) = types.get(&inner) else {
+                            break;
+                        };
+                        let names: Vec<&str> = names.iter().map(|(f, _)| f.as_str()).collect();
+                        return Err(error(
+                            line,
+                            format!("`{inner}` has no field `{field}` ({})", names.join(", ")),
+                        ));
+                    }
+                    if !path.is_empty() {
+                        path.push('.');
+                    }
+                    path += &field;
+                    i = to;
+                }
+                if let Some((_, input, _)) = fields.iter().find(|(f, _, _)| *f == path) {
+                    out += input;
+                    continue;
+                }
+                // The whole record, or a record inside it: only as a rule's input.
+                let shown = if path.is_empty() {
+                    word.clone()
+                } else {
+                    format!("{word}.{path}")
+                };
+                let before = chars[..start].iter().rev().find(|c| !c.is_whitespace());
+                let next = chars[i..].iter().find(|c| !c.is_whitespace());
+                // `count(orders)` of a list of records: the length, from any field.
+                let lead: String = chars[..start].iter().collect();
+                if path.is_empty() && lead.trim_end().ends_with("count(") && next == Some(&')') {
+                    out += &fields[0].1;
+                    continue;
+                }
+                if !matches!(before, Some('(' | ',')) || !matches!(next, Some(')' | ',')) {
+                    let field = &fields
+                        .iter()
+                        .find(|(f, _, _)| path.is_empty() || f.starts_with(&format!("{path}.")))
+                        .unwrap()
+                        .0;
+                    return Err(error(
+                        line,
+                        format!(
+                            "`{shown}` is a record; use one of its fields, like `{word}.{field}`, or pass it to a rule"
+                        ),
+                    ));
+                }
+                let inputs: Vec<&str> = fields
+                    .iter()
+                    .filter(|(f, _, _)| path.is_empty() || f.starts_with(&format!("{path}.")))
+                    .map(|(_, n, _)| n.as_str())
+                    .collect();
+                out += &inputs.join(", ");
+            }
+            Some(Local::Choice(_)) => out += &word,
+            None if chars.get(i) == Some(&'(')
+                && record_rule(&word, types, signatures).is_some() =>
+            {
+                // `quote(a).total` is `quote__total(a)`; `fee(quote(a))` passes each field.
+                let (record, fields) = record_rule(&word, types, signatures).unwrap();
+                let mut depth = 0;
+                let mut close = i;
+                for (k, c) in chars.iter().enumerate().skip(i) {
+                    match c {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                close = k;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let inner: String = chars[i + 1..close].iter().collect();
+                let args = rewrite(&inner, line, locals, types, signatures, places)?;
+                i = close + 1;
                 if chars.get(i) == Some(&'.') {
                     let from = i + 1;
                     let mut to = from;
@@ -670,32 +1260,33 @@ fn rewrite(
                         to += 1;
                     }
                     let field: String = chars[from..to].iter().collect();
-                    let Some((_, input, _)) = fields.iter().find(|(f, _, _)| *f == field) else {
-                        let names: Vec<&str> = fields.iter().map(|(f, _, _)| f.as_str()).collect();
+                    if !fields.contains(&field) {
                         return Err(error(
                             line,
-                            format!("`{ty}` has no field `{field}` ({})", names.join(", ")),
-                        ));
-                    };
-                    out += input;
-                    i = to;
-                } else {
-                    let before = chars[..start].iter().rev().find(|c| !c.is_whitespace());
-                    let next = chars[i..].iter().find(|c| !c.is_whitespace());
-                    if !matches!(before, Some('(' | ',')) || !matches!(next, Some(')' | ',')) {
-                        let field = &fields[0].0;
-                        return Err(error(
-                            line,
-                            format!(
-                                "`{word}` is a record; use one of its fields, like `{word}.{field}`, or pass it to a rule"
-                            ),
+                            format!("`{record}` has no field `{field}` ({})", fields.join(", ")),
                         ));
                     }
-                    let inputs: Vec<&str> = fields.iter().map(|(_, n, _)| n.as_str()).collect();
-                    out += &inputs.join(", ");
+                    out += &format!("{word}__{field}({args})");
+                    i = to;
+                    continue;
                 }
+                let before = chars[..start].iter().rev().find(|c| !c.is_whitespace());
+                let next = chars[i..].iter().find(|c| !c.is_whitespace());
+                if !matches!(before, Some('(' | ',')) || !matches!(next, Some(')' | ',')) {
+                    return Err(error(
+                        line,
+                        format!(
+                            "`{word}` answers a `{record}`; use one of its fields, like `{word}(...).{}`, or pass it to a rule",
+                            fields[0]
+                        ),
+                    ));
+                }
+                let calls: Vec<String> = fields
+                    .iter()
+                    .map(|f| format!("{word}__{f}({args})"))
+                    .collect();
+                out += &calls.join(", ");
             }
-            Some(Local::Choice(_)) => out += &word,
             None => {
                 if chars.get(i) == Some(&'.')
                     && chars
@@ -705,13 +1296,30 @@ fn rewrite(
                     return Err(error(line, format!("`{word}` is not a record input")));
                 }
                 match types.value(&word) {
-                    Some((_, at)) => out += &at.to_string(),
+                    Some((_, at)) => out += &place(at, places),
                     None => out += &word,
                 }
             }
         }
     }
     Ok(out)
+}
+
+/// The record a rule of this file answers, and its fields.
+fn record_rule(
+    name: &str,
+    types: &Types,
+    signatures: &[Signature],
+) -> Option<(String, Vec<String>)> {
+    let (_, _, answer, _) = signatures.iter().find(|(n, _, _, _)| n == name)?;
+    let record = answer.as_deref()?;
+    let Some(Def::Record(fields)) = types.get(record) else {
+        return None;
+    };
+    Some((
+        record.to_string(),
+        fields.iter().map(|(f, _)| f.clone()).collect(),
+    ))
 }
 
 /// What an argument is, as far as types go.
@@ -721,13 +1329,36 @@ enum Arg {
     Number,
 }
 
-fn arg_type(arg: &str, locals: &[(String, Local)], types: &Types) -> Arg {
+fn arg_type(arg: &str, locals: &[(String, Local)], types: &Types, signatures: &[Signature]) -> Arg {
     let arg = arg.trim();
-    if let Some((record, field)) = arg.split_once('.')
-        && let Some((_, Local::Record(_, fields))) = locals.iter().find(|(n, _)| n == record)
-        && let Some((_, _, Some(choice))) = fields.iter().find(|(f, _, _)| f == field)
+    if let Some((callee, rest)) = arg.split_once('(')
+        && let Some((_, _, Some(answer), _)) =
+            signatures.iter().find(|(n, _, _, _)| n == callee.trim())
     {
-        return Arg::Choice(choice.clone());
+        if rest.ends_with(')') {
+            return match types.get(answer) {
+                Some(Def::Record(_)) => Arg::Record(answer.clone()),
+                _ => Arg::Choice(answer.clone()),
+            };
+        }
+        // `quote(a).size`: a field of the answer.
+        if let Some((_, field)) = rest.rsplit_once(").")
+            && let Ok(ty) = types.at(answer, field.trim())
+        {
+            return match ty {
+                Some(t) if matches!(types.get(&t), Some(Def::Choice(_))) => Arg::Choice(t),
+                _ => Arg::Number,
+            };
+        }
+    }
+    if let Some((record, path)) = arg.split_once('.')
+        && let Some((_, Local::Record(ty, _))) = locals.iter().find(|(n, _)| n == record)
+        && let Ok(Some(inner)) = types.at(ty, path)
+    {
+        return match types.get(&inner) {
+            Some(Def::Record(_)) => Arg::Record(inner),
+            _ => Arg::Choice(inner),
+        };
     }
     match locals.iter().find(|(n, _)| n == arg).map(|(_, l)| l) {
         Some(Local::Record(ty, _)) => Arg::Record(ty.clone()),
@@ -747,6 +1378,7 @@ fn check_calls(
     locals: &[(String, Local)],
     types: &Types,
     signatures: &[Signature],
+    places: u32,
 ) -> Result<(), String> {
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
@@ -782,11 +1414,17 @@ fn check_calls(
         if args.len() == 1 && args[0].trim().is_empty() {
             args.clear();
         }
-        let Some((_, params)) = signatures.iter().find(|(n, _)| *n == callee) else {
+        let Some((_, params, _, callee_places)) =
+            signatures.iter().find(|(n, _, _, _)| *n == callee)
+        else {
             // A rule from another file (or `min`, `sum`): its types are not known here.
+            // `count(orders)` counts a list of records.
+            if callee == "count" {
+                continue;
+            }
             if let Some(arg) = args
                 .iter()
-                .find(|a| matches!(arg_type(a, locals, types), Arg::Record(_)))
+                .find(|a| matches!(arg_type(a, locals, types, signatures), Arg::Record(_)))
             {
                 return Err(error(
                     line,
@@ -810,7 +1448,18 @@ fn check_calls(
         }
         for (n, (arg, param)) in args.iter().zip(params).enumerate() {
             let place = n + 1;
-            match (arg_type(arg, locals, types), param) {
+            let given = arg_type(arg, locals, types, signatures);
+            // A call moves numbers to the callee's places; a choice keeps its place.
+            if matches!(given, Arg::Choice(_)) && *callee_places != places {
+                return Err(error(
+                    line,
+                    format!(
+                        "`{}` is a choice; `{callee}` has other decimal places, so a choice cannot be passed to it yet",
+                        arg.trim()
+                    ),
+                ));
+            }
+            match (given, param) {
                 (Arg::Record(given), Some(want)) if given == *want => {}
                 (Arg::Choice(given), Some(want)) if given == *want => {}
                 (Arg::Number, Some(want)) if matches!(types.get(want), Some(Def::Choice(_))) => {}
@@ -871,6 +1520,143 @@ mod tests {
             .collect();
         assert_eq!(names, ["order__price", "order__quantity", "order__size"]);
         assert_eq!(module.contracts[1].choices[0].0, "order__size");
+    }
+
+    #[test]
+    fn a_record_may_hold_a_record() {
+        let source = "type Size = small | large\n\ntype Address\n  zone\n  size: Size\n\ntype Order\n  price\n  to: Address\n\nfee(a: Address)\n  need a.zone <= 9\n  match a.size\n    small -> a.zone\n    large -> a.zone + 10\n\ntotal(o: Order)\n  need o.price <= 100\n  need o.to.zone <= 9\n  always -> o.price + fee(o.to)\n";
+        let module = parse_module(source).unwrap();
+        let total = module.contracts.iter().find(|c| c.name == "total").unwrap();
+        let names: Vec<&str> = total.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["o__price", "o__to__zone", "o__to__size"]);
+        assert_eq!(total.choices[0].0, "o__to__size");
+        let e = err(&source.replace("fee(o.to)", "o.to"));
+        assert!(
+            e.contains("`o.to` is a record") && e.contains("o.to.zone"),
+            "{e}"
+        );
+        let e = err(&source.replace("o.to.zone <= 9", "o.to.street <= 9"));
+        assert!(e.contains("`Address` has no field `street`"), "{e}");
+        let e = err(&source.replace("fee(o.to)", "fee(o)"));
+        assert!(
+            e.contains("takes a `Address` as input 1, got a `Order`"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn an_answer_can_be_a_choice() {
+        let source = format!(
+            "{TYPES}classify(w)\n  need w <= 100\n  w < 10 -> small\n  else -> large\n\nfee(size: Size)\n  always -> size\n\nship(w)\n  need w <= 100\n  always -> fee(classify(w))\n"
+        );
+        let module = parse_module(&source).unwrap();
+        let classify = &module.contracts[0];
+        assert_eq!(classify.answer_choice.as_ref().unwrap().name, "Size");
+        assert!(module.contracts[1].answer_choice.is_none());
+        let e = err(&format!(
+            "{source}\ncost(order: Order)\n  always -> order.price\n\nbad(w)\n  need w <= 100\n  always -> cost(classify(w))\n"
+        ));
+        assert!(
+            e.contains("takes a `Order` as input 1, got a `Size`"),
+            "{e}"
+        );
+        // Mixed with numbers, a value is still its place.
+        let mixed =
+            parse_module(&format!("{TYPES}f(w)\n  w < 10 -> small\n  else -> 7\n")).unwrap();
+        assert!(mixed.contracts[0].answer_choice.is_none());
+    }
+
+    #[test]
+    fn a_list_can_hold_a_type() {
+        let module = parse_module(&format!(
+            "{TYPES}boxes(sizes[n]: Size)\n  need n <= 10\n  always -> sum(sizes)\n\npaid(orders[n]: Order)\n  need n <= 10\n  need orders.price <= 100\n  always -> sum(orders.price) + count(orders)\n"
+        ))
+        .unwrap();
+        let item = module
+            .contracts
+            .iter()
+            .find(|c| c.name == "boxes__item1")
+            .unwrap();
+        assert_eq!(item.choices[0].0, "sizes");
+        assert_eq!(item.requires.len(), 1, "an item of `sizes` is at most 2");
+        let paid = module
+            .contracts
+            .iter()
+            .find(|c| c.name == "paid__item1")
+            .unwrap();
+        let names: Vec<&str> = paid.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["orders__price", "orders__quantity", "orders__size"]);
+        let e = err(&format!("{TYPES}f(sizes[3]: Size)\n  always -> 1\n"));
+        assert!(e.contains("needs a length name"), "{e}");
+    }
+
+    #[test]
+    fn types_come_from_other_files() {
+        let shop = format!(
+            "{TYPES}fee(order: Order)\n  need order.price <= 100\n  always -> order.price\n\nsize_of(w)\n  w < 5 -> small\n  else -> large\n"
+        );
+        let read = |file: &str| {
+            assert_eq!(file, "shop");
+            Ok(shop.clone())
+        };
+        let main = "from shop: Order, fee, size_of\n\nf(o: Order)\n  need o.price <= 100\n  always -> fee(o)\n";
+        let module = crate::parse_module_with(main, &read).unwrap();
+        let f = module.contracts.iter().find(|c| c.name == "f").unwrap();
+        let names: Vec<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["o__price", "o__quantity", "o__size"]);
+        assert_eq!(
+            module.imports[0].names.len(),
+            2,
+            "types are not imported as rules"
+        );
+        // `Size` comes with `Order`, which holds it.
+        assert_eq!(f.choices[0].1.name, "Size");
+        let e = crate::parse_module_with(
+            "from shop: Order, fee, size_of\n\ng(w)\n  always -> fee(size_of(w))\n",
+            &read,
+        )
+        .unwrap_err();
+        assert!(
+            e.contains("takes a `Order` as input 1, got a `Size`"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn a_rule_can_answer_a_record() {
+        let rule = "type Bill\n  goods\n  tax\n\nquote(p) -> Bill\n  need p <= 100\n  goods:\n    always -> p\n  tax:\n    always -> p / 10\n";
+        let module = parse_module(&format!(
+            "{rule}\nboth(p)\n  need p <= 100\n  always -> quote(p).goods + quote(p).tax\n"
+        ))
+        .unwrap();
+        let names: Vec<&str> = module.contracts.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["quote__goods", "both", "quote__tax"]);
+        let record = module.contracts[0].record_answer.as_ref().unwrap();
+        assert_eq!(
+            record.fields[1],
+            ("tax".to_string(), "quote__tax".to_string())
+        );
+        let e = err(&rule.replace("  tax:\n    always -> p / 10\n", ""));
+        assert!(e.contains("add `tax:`"), "{e}");
+        let e = err(&rule.replace("  goods:", "  promise answer.goods <= 100\n  goods:"));
+        assert!(e.contains("put a promise under its field"), "{e}");
+        let e = err(&format!(
+            "{rule}\nbad(p)\n  need p <= 100\n  always -> quote(p)\n"
+        ));
+        assert!(e.contains("answers a `Bill`"), "{e}");
+        let e = err(&format!(
+            "{rule}\nbad(p)\n  need p <= 100\n  always -> quote(p).fee\n"
+        ));
+        assert!(e.contains("no field `fee`"), "{e}");
+    }
+
+    #[test]
+    fn a_record_cannot_hold_itself() {
+        let e = err("type A\n  x\n  b: B\n\ntype B\n  a: A\n\nf(v)\n  always -> v\n");
+        assert!(
+            e.contains("cannot hold itself") && e.contains("A holds B"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -951,9 +1737,15 @@ mod tests {
             err("type Size = small | big\nf(a)\n  big = a\n  always -> big\n")
                 .contains("choose another name")
         );
-        assert!(
-            err("type Size = small | big\nf(s: Size) with 2 decimals\n  always -> s\n")
-                .contains("decimals")
+        // In a rule with decimals a choice keeps its place: `big` is `0.01`.
+        let module = parse_module(
+            "type Size = small | big\nf(s: Size, w) with 2 decimals\n  need w <= 100\n  match s\n    small -> w\n    big -> w * 2\n",
+        )
+        .unwrap();
+        assert_eq!(module.contracts[0].choices[0].0, "s");
+        let e = err(
+            "type Size = small | big\ng(s: Size)\n  always -> 1\n\nf(s: Size) with 2 decimals\n  always -> g(s)\n",
         );
+        assert!(e.contains("other decimal places"), "{e}");
     }
 }

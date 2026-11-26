@@ -119,6 +119,22 @@ pub struct Contract {
     /// Inputs that hold a choice (`size: Size`, issue #226): the input's
     /// name and its type. The value is the choice's place, from 0.
     pub choices: Vec<(String, ChoiceType)>,
+    /// Set when every answer is a value of one choice (`-> large`): the
+    /// answer is that value's place, from 0.
+    pub answer_choice: Option<ChoiceType>,
+    /// Set on the first field rule of a rule that answers a record
+    /// (`quote(a) -> Bill`): one rule per field, called together.
+    pub record_answer: Option<RecordAnswer>,
+}
+
+/// A rule answering a record (`quote(price) -> Bill`): each field is the
+/// answer of its own rule (`quote__total`), which takes the same inputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordAnswer {
+    pub name: String,
+    pub record: String,
+    /// Field name and the rule that answers it, in field order.
+    pub fields: Vec<(String, String)>,
 }
 
 /// `type Size = small | medium | large` (issue #226).
