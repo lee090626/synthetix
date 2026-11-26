@@ -160,6 +160,10 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
             out += "\n";
             out += &any_length_wrapper(contract, rule)?;
         }
+        if let Some(rule) = &contract.repeat {
+            out += "\n";
+            out += &repeat_wrapper(contract, rule)?;
+        }
     }
     let sizes = settle_sizes(&contracts);
     if !sizes.is_empty() {
@@ -335,6 +339,32 @@ fn any_length_wrapper(core: &Contract, rule: &axiom_parser::ListRule) -> Result<
         } else {
             format!("    for i in 0..n {{\n{second_loop}    }}\n")
         },
+    ))
+}
+
+/// `savings(principal, rate, years)` for a `repeat` rule: the start, then the
+/// step `years` times. Every promise holds after each step
+/// (`proofs/lean/Repeat.lean`).
+fn repeat_wrapper(step: &Contract, rule: &axiom_parser::RepeatRule) -> Result<String, String> {
+    let inputs = &step.params[..step.params.len() - 1];
+    let mut params = Vec::new();
+    let mut args = Vec::new();
+    for (i, param) in inputs.iter().enumerate() {
+        params.push(format!("p{i}: {}", rs_type(&param.ty, step.wide)?));
+        args.push(format!("p{i}"));
+    }
+    let ret = rs_type(&step.return_type, step.wide)?;
+    let names: Vec<&str> = inputs.iter().map(|p| p.name.as_str()).collect();
+    Ok(format!(
+        "/// Inputs: {}.\npub fn {}({}) -> Result<{ret}, AxiomError> {{\n    let mut value = {}({})?;\n    for _ in 0..p{} {{\n        value = {}({}, value)?;\n    }}\n    Ok(value)\n}}\n",
+        names.join(", "),
+        ident(&rule.name)?,
+        params.join(", "),
+        ident(&rule.start)?,
+        args.join(", "),
+        rule.count,
+        ident(&step.name)?,
+        args.join(", "),
     ))
 }
 

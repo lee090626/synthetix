@@ -254,6 +254,29 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
             out += "\n";
             out += &any_length_wrapper(&claim(&rule.name)?, contract, rule)?;
         }
+        if let Some(rule) = &contract.repeat {
+            let go_name = claim(&rule.name)?;
+            let inputs = &contract.params[..contract.params.len() - 1];
+            let names: Vec<String> = inputs.iter().map(|p| local(&p.name)).collect();
+            let mut params = Vec::new();
+            for (name, param) in names.iter().zip(inputs) {
+                params.push(format!("{name} {}", go_type(&param.ty, contract.wide)?));
+            }
+            let ret = go_type(&contract.return_type, contract.wide)?;
+            let count_ty = go_type(&inputs[rule.count].ty, contract.wide)?;
+            // The start, then the step `count` times (`proofs/lean/Repeat.lean`).
+            out += &format!(
+                "\n// {go_name} is the proven rule `{}`: the start, then the step {} times.\nfunc {go_name}({}) (result {ret}, err error) {{\n\tif result, err = {}({}); err != nil {{\n\t\treturn result, err\n\t}}\n\tfor i := {count_ty}(0); i < {}; i++ {{\n\t\tif result, err = {}({}, result); err != nil {{\n\t\t\treturn result, err\n\t\t}}\n\t}}\n\treturn result, nil\n}}\n",
+                rule.name,
+                names[rule.count],
+                params.join(", "),
+                exported(&rule.start),
+                names.join(", "),
+                names[rule.count],
+                exported(&contract.name),
+                names.join(", "),
+            );
+        }
     }
     let sizes = settle_sizes(&contracts);
     if !sizes.is_empty() {
