@@ -4,6 +4,7 @@ pub mod ast;
 pub mod lexer;
 mod lists;
 pub mod parser;
+mod repeat;
 pub mod simple;
 
 pub use ast::*;
@@ -27,6 +28,17 @@ pub fn parse(input: &str) -> Result<Contract, String> {
 
 pub fn parse_module(input: &str) -> Result<Module, String> {
     if simple::is_simple(input) {
+        if let Some(expanded) =
+            repeat::expand(input).map_err(|e| simple::show_source_line(e, input))?
+        {
+            let mut module = parse_module(&expanded.source)?;
+            for (step, rule) in expanded.rules {
+                if let Some(contract) = module.contracts.iter_mut().find(|c| c.name == step) {
+                    contract.repeat = Some(rule);
+                }
+            }
+            return Ok(module);
+        }
         if let Some(expanded) =
             lists::expand(input).map_err(|e| simple::show_source_line(e, input))?
         {

@@ -1,0 +1,23 @@
+# 적금: 해마다 이자를 붙이되 1억 원에서 멈춤. 몇 년이든 원금 이상, 1억 이하
+savings(principal, rate, years)
+  need years <= 100
+  need principal <= 100000000
+  need rate <= 20
+  start -> principal
+  repeat years
+  value * rate / 100 > 100000000 - value -> 100000000
+  else -> value + value * rate / 100
+  promise answer >= principal
+  promise answer <= 100000000
+
+# 대출 잔액: 달마다 이자를 붙이고 갚은 돈을 뺌. 갚는 돈이 이자 이상이면 처음 빌린 돈을 넘지 않음
+balance(loan, interest, payment, months)
+  need months <= 600
+  need loan <= 1000000000
+  need interest <= 1000000
+  need payment >= interest and payment <= 1000000000
+  start -> loan
+  repeat months
+  value + interest < payment -> 0
+  else -> value + interest - payment
+  promise answer <= loan

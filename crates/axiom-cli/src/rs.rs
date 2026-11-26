@@ -160,6 +160,10 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
             out += "\n";
             out += &any_length_wrapper(contract, rule)?;
         }
+        if let Some(rule) = &contract.repeat {
+            out += "\n";
+            out += &repeat_wrapper(contract, rule)?;
+        }
     }
     let sizes = settle_sizes(&contracts);
     if !sizes.is_empty() {
@@ -269,11 +273,19 @@ fn any_length_wrapper(core: &Contract, rule: &axiom_parser::ListRule) -> Result<
         })
         .collect();
     let mut sums = String::new();
-    let mut body = String::new();
+    let (mut first_loop, mut second_loop) = (String::new(), String::new());
     for (k, (item, fold)) in rule.items.iter().zip(&rule.folds).enumerate() {
         sums += &format!("    let mut sum{}: {ty} = 0;\n", k + 1);
-        let call = format!("{}({})?", ident(item)?, item_args.join(", "));
-        body += &match fold {
+        // An item taking list totals (`sum(w / sum(w))`) runs in a second loop.
+        let mut args = item_args.clone();
+        args.extend(rule.uses[k].iter().map(|j| format!("sum{}", j + 1)));
+        let call = format!("{}({})?", ident(item)?, args.join(", "));
+        let body = if rule.uses[k].is_empty() {
+            &mut first_loop
+        } else {
+            &mut second_loop
+        };
+        *body += &match fold {
             axiom_parser::Fold::Sum => {
                 format!("        sum{0} = sum{0}.wrapping_add({call});\n", k + 1)
             }
@@ -299,6 +311,9 @@ fn any_length_wrapper(core: &Contract, rule: &axiom_parser::ListRule) -> Result<
             .collect()
     };
     core_args.push(format!("n as {ty}"));
+    if rule.position {
+        core_args.push(format!("(i + 1) as {ty}"));
+    }
     core_args.extend((1..=rule.items.len()).map(|k| format!("sum{k}")));
     let call = format!("{}({})", ident(&core.name)?, core_args.join(", "));
     let ret = rs_type(&core.return_type, core.wide)?;
@@ -312,13 +327,44 @@ fn any_length_wrapper(core: &Contract, rule: &axiom_parser::ListRule) -> Result<
     };
     let docs: Vec<&str> = rule.params.iter().map(|(p, _)| p.as_str()).collect();
     Ok(format!(
-        "/// Inputs: {}.\npub fn {}({}) -> Result<{ret}, AxiomError> {{\n{checks}    let n = p{first}.len();\n    if {}n > {} {{\n        return Err(AxiomError(\"{}: input violates a requires clause\"));\n    }}\n{sums}    for i in 0..n {{\n{body}    }}\n    {tail}\n}}\n",
+        "/// Inputs: {}.\npub fn {}({}) -> Result<{ret}, AxiomError> {{\n{checks}    let n = p{first}.len();\n    if {}n > {} {{\n        return Err(AxiomError(\"{}: input violates a requires clause\"));\n    }}\n{sums}    for i in 0..n {{\n{first_loop}    }}\n{}    {tail}\n}}\n",
         docs.join(", "),
         ident(&rule.name)?,
         params.join(", "),
         too_few(rule, "n", "||"),
         rule.max,
         rule.name,
+        if second_loop.is_empty() {
+            String::new()
+        } else {
+            format!("    for i in 0..n {{\n{second_loop}    }}\n")
+        },
+    ))
+}
+
+/// `savings(principal, rate, years)` for a `repeat` rule: the start, then the
+/// step `years` times. Every promise holds after each step
+/// (`proofs/lean/Repeat.lean`).
+fn repeat_wrapper(step: &Contract, rule: &axiom_parser::RepeatRule) -> Result<String, String> {
+    let inputs = &step.params[..step.params.len() - 1];
+    let mut params = Vec::new();
+    let mut args = Vec::new();
+    for (i, param) in inputs.iter().enumerate() {
+        params.push(format!("p{i}: {}", rs_type(&param.ty, step.wide)?));
+        args.push(format!("p{i}"));
+    }
+    let ret = rs_type(&step.return_type, step.wide)?;
+    let names: Vec<&str> = inputs.iter().map(|p| p.name.as_str()).collect();
+    Ok(format!(
+        "/// Inputs: {}.\npub fn {}({}) -> Result<{ret}, AxiomError> {{\n    let mut value = {}({})?;\n    for _ in 0..p{} {{\n        value = {}({}, value)?;\n    }}\n    Ok(value)\n}}\n",
+        names.join(", "),
+        ident(&rule.name)?,
+        params.join(", "),
+        ident(&rule.start)?,
+        args.join(", "),
+        rule.count,
+        ident(&step.name)?,
+        args.join(", "),
     ))
 }
 

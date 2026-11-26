@@ -265,6 +265,8 @@ impl<'a> Parser<'a> {
             labels: Vec::new(),
             wide: false,
             list: None,
+            hints: Vec::new(),
+            repeat: None,
         })
     }
 
@@ -321,9 +323,18 @@ impl<'a> Parser<'a> {
         let mut ensures = Vec::new();
         let mut requires_spans = Vec::new();
         let mut ensures_spans = Vec::new();
+        let mut hints = Vec::new();
 
         while self.current != Token::RBrace && self.current != Token::Eof {
             match self.current {
+                Token::Ident(ref word) if word == "hint" => {
+                    self.advance()?;
+                    match self.parse_expr(0)? {
+                        SpecExpr::Call(lemma, args) => hints.push(Hint { lemma, args }),
+                        _ => return Err(self.error("write a hint as `hint lemma(a, b, c)`")),
+                    }
+                    self.expect(Token::Semi)?;
+                }
                 Token::Return if allow_return => {
                     self.advance()?;
                     if implementation.is_some() {
@@ -377,6 +388,8 @@ impl<'a> Parser<'a> {
             labels: Vec::new(),
             wide: false,
             list: None,
+            hints,
+            repeat: None,
         })
     }
 

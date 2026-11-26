@@ -254,6 +254,29 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
             out += "\n";
             out += &any_length_wrapper(&claim(&rule.name)?, contract, rule)?;
         }
+        if let Some(rule) = &contract.repeat {
+            let go_name = claim(&rule.name)?;
+            let inputs = &contract.params[..contract.params.len() - 1];
+            let names: Vec<String> = inputs.iter().map(|p| local(&p.name)).collect();
+            let mut params = Vec::new();
+            for (name, param) in names.iter().zip(inputs) {
+                params.push(format!("{name} {}", go_type(&param.ty, contract.wide)?));
+            }
+            let ret = go_type(&contract.return_type, contract.wide)?;
+            let count_ty = go_type(&inputs[rule.count].ty, contract.wide)?;
+            // The start, then the step `count` times (`proofs/lean/Repeat.lean`).
+            out += &format!(
+                "\n// {go_name} is the proven rule `{}`: the start, then the step {} times.\nfunc {go_name}({}) (result {ret}, err error) {{\n\tif result, err = {}({}); err != nil {{\n\t\treturn result, err\n\t}}\n\tfor i := {count_ty}(0); i < {}; i++ {{\n\t\tif result, err = {}({}, result); err != nil {{\n\t\t\treturn result, err\n\t\t}}\n\t}}\n\treturn result, nil\n}}\n",
+                rule.name,
+                names[rule.count],
+                params.join(", "),
+                exported(&rule.start),
+                names.join(", "),
+                names[rule.count],
+                exported(&contract.name),
+                names.join(", "),
+            );
+        }
     }
     let sizes = settle_sizes(&contracts);
     if !sizes.is_empty() {
@@ -383,9 +406,12 @@ fn any_length_wrapper(
         })
         .collect();
     let mut sums = String::new();
-    let mut body = String::new();
+    let (mut body, mut second_loop) = (String::new(), String::new());
     for (k, (item, fold)) in rule.items.iter().zip(&rule.folds).enumerate() {
         sums += &format!("\tvar sum{} {ty}\n", k + 1);
+        // An item taking list totals (`sum(w / sum(w))`) runs in a second loop.
+        let mut args = item_args.clone();
+        args.extend(rule.uses[k].iter().map(|j| format!("sum{}", j + 1)));
         let step = match fold {
             axiom_parser::Fold::Sum => format!("sum{} += v", k + 1),
             axiom_parser::Fold::Min | axiom_parser::Fold::Max => format!(
@@ -398,10 +424,15 @@ fn any_length_wrapper(
                 k + 1
             ),
         };
-        body += &format!(
+        let target = if rule.uses[k].is_empty() {
+            &mut body
+        } else {
+            &mut second_loop
+        };
+        *target += &format!(
             "\t\tif v, err := {}({}); err != nil {{\n\t\t\treturn result, err\n\t\t}} else {{\n\t\t\t{step}\n\t\t}}\n",
             exported(item),
-            item_args.join(", "),
+            args.join(", "),
         );
     }
     let mut core_args: Vec<String> = if rule.each {
@@ -415,6 +446,12 @@ fn any_length_wrapper(
             .collect()
     };
     core_args.push(format!("{ty}(n)"));
+    if rule.position {
+        core_args.push(format!("{ty}(_i + 1)"));
+    }
+    if !second_loop.is_empty() {
+        body += &format!("\t}}\n\tfor _i := 0; _i < n; _i++ {{\n{second_loop}");
+    }
     core_args.extend((1..=rule.items.len()).map(|k| format!("sum{k}")));
     let call = format!("{}({})", exported(&core.name), core_args.join(", "));
     let (ret, tail) = if rule.each {

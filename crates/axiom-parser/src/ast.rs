@@ -111,6 +111,32 @@ pub struct Contract {
     pub wide: bool,
     /// Set on the core of a rule over lists of any length (`prices[n]`).
     pub list: Option<ListRule>,
+    /// `hint mul_div_le(a, b, c)` lines: proven facts the Lean proof uses
+    /// (issue #215). Z3 and synthesis ignore them.
+    pub hints: Vec<Hint>,
+    /// Set on the step of a `repeat` rule (issue #214).
+    pub repeat: Option<RepeatRule>,
+}
+
+/// A rule that applies a step a number of times (`repeat years`, issue
+/// #214), split into `name__start(inputs)` and `name__step(inputs, value)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepeatRule {
+    /// The rule name the user wrote.
+    pub name: String,
+    /// The start rule's name.
+    pub start: String,
+    /// Which input is the number of steps.
+    pub count: usize,
+    /// The `need count <= max` limit.
+    pub max: u64,
+}
+
+/// A `hint` line: a lemma from `axiom_verify::lean::LEMMAS` and its arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hint {
+    pub lemma: String,
+    pub args: Vec<SpecExpr>,
 }
 
 /// A rule over lists of any length (`cart(prices[n])`, issue #182), split
@@ -135,6 +161,12 @@ pub struct ListRule {
     /// The answer is a list: the core takes every input (one item of each
     /// list) before the length and sums, and runs once per item.
     pub each: bool,
+    /// For each item rule, the item rules (indexes into `items`, always plain
+    /// `sum(list)`) whose totals it takes after the inputs: `sum(w / sum(w))`.
+    /// Those are added up in a first loop, the rest in a second.
+    pub uses: Vec<Vec<usize>>,
+    /// The core takes `position` (the item's place, from 1) after the length.
+    pub position: bool,
 }
 
 /// How a list rule combines one item rule's answers over the items.

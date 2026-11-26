@@ -22,6 +22,7 @@ type SynthesisOutput = (
 
 mod go;
 mod js;
+mod lean;
 mod py;
 mod rs;
 mod web;
@@ -33,8 +34,8 @@ usage:
   axiom check <contract.ax>
   axiom analyze <contract.ax> [--timeout-ms N] [--report report.json]
   axiom check [--report check.json]
-  axiom build <contract.ax> [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N] [--max-memory-bytes N] [--emit js]
-  axiom build [--emit js|rust]
+  axiom build <contract.ax> [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N] [--max-memory-bytes N] [--emit js] [--lean]
+  axiom build [--emit js|rust|python|go] [--lean]
   axiom run <contract.ax> [--] [<value>...] [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N] [--max-memory-bytes N]
   axiom app-run <contract.ax> [--] [<application-value>...]
   axiom <contract.ax> [-o output.wasm]
@@ -245,17 +246,25 @@ fn analyze_command(args: &[String]) -> Result<(), String> {
 
 fn build_command(args: &[String]) -> Result<(), String> {
     if args.is_empty() || args[0].starts_with("--") {
-        let emit = match args {
-            [] => None,
-            [flag, target] if flag == "--emit" => Some(web::emit_named(target)?),
-            _ => return Err(format!("unknown project build option: {}", args.join(" "))),
-        };
+        let mut emit = None;
+        let mut lean = false;
+        let mut rest = args.iter();
+        while let Some(flag) = rest.next() {
+            match (flag.as_str(), rest.clone().next()) {
+                ("--emit", Some(target)) if emit.is_none() => {
+                    emit = Some(web::emit_named(target)?);
+                    rest.next();
+                }
+                ("--lean", _) if !lean => lean = true,
+                _ => return Err(format!("unknown project build option: {}", args.join(" "))),
+            }
+        }
         let config =
             axiom_project::find_config(env::current_dir().map_err(|error| error.to_string())?)?;
         let root = config
             .parent()
             .ok_or_else(|| "cannot determine project root".to_string())?;
-        return web::build_with_options(&config, &root.join("dist"), emit).map(|_| ());
+        return web::build_with_options(&config, &root.join("dist"), emit, lean).map(|_| ());
     }
     let options = parse_build_args(args)?;
     let (contract, candidate, module, diagnostic, candidates_checked) = match synthesize(
@@ -328,6 +337,9 @@ fn build_command(args: &[String]) -> Result<(), String> {
         println!("diagnostic: {diagnostic}");
     }
     println!("candidate: {candidate:?}");
+    if options.lean {
+        prove_with_lean(&contract, &candidate, &options.output)?;
+    }
     println!("verified: true");
     println!("wrote: {}", options.output.display());
     if let Some(report) = options.report {
@@ -380,6 +392,18 @@ fn run_command(args: &[String]) -> Result<(), String> {
             );
         }
         return run_any_length(&module.contracts, core, &options.values);
+    }
+    if let Ok(source) = fs::read_to_string(options.input)
+        && let Ok(module) = axiom_parser::parse_module(&source)
+        && module.contracts.len() == 2
+        && let Some(step) = module.contracts.iter().find(|c| c.repeat.is_some())
+    {
+        if options.report.is_some() || options.output.is_some() {
+            return Err(
+                "a repeat rule's run prints the result only: drop --report and -o".to_string(),
+            );
+        }
+        return run_repeat(&module.contracts, step, &options.values);
     }
     let contract = read_contract(options.input)?;
     if contract.params.len() != options.values.len() {
@@ -550,6 +574,52 @@ fn application_run_command(args: &[String]) -> Result<(), String> {
 /// `axiom run` on a rule over lists of any length (lists written `[1,2,3]`):
 /// the same steps as emitted code, on the proven candidates of each item
 /// rule and the core.
+/// `axiom run` on a `repeat` rule (issue #214): the start, then the step.
+fn run_repeat(
+    all: &[axiom_parser::Contract],
+    step: &axiom_parser::Contract,
+    values: &[String],
+) -> Result<(), String> {
+    let rule = step.repeat.as_ref().expect("step of a repeat rule");
+    let start = all
+        .iter()
+        .find(|c| c.name == rule.start)
+        .ok_or_else(|| format!("missing start rule {}", rule.start))?;
+    if values.len() != start.params.len() {
+        return Err(format!(
+            "{} expects {} inputs, got {}",
+            rule.name,
+            start.params.len(),
+            values.len()
+        ));
+    }
+    let bits = if step.wide { 64 } else { 32 };
+    let inputs = values
+        .iter()
+        .zip(&start.params)
+        .map(|(v, p)| parse_input_value(v, &p.ty, step.wide))
+        .collect::<Result<Vec<_>, _>>()?;
+    let proven = |contract: &axiom_parser::Contract| {
+        axiom_synth::synthesize_with_options(contract, axiom_synth::SynthesisOptions::default())
+    };
+    check_requires(start, &inputs)?;
+    let mut value = proven(start)?.try_eval_bits(&inputs, bits)?;
+    let code = proven(step)?;
+    for _ in 0..inputs[rule.count] {
+        let args = [inputs.clone(), vec![value]].concat();
+        check_requires(step, &args)?;
+        value = code.try_eval_bits(&args, bits)?;
+    }
+    println!("contract: {}", rule.name);
+    println!("proof_result: VERIFIED");
+    println!("verified: true");
+    println!(
+        "result: {}",
+        display_result(&step.return_type, value, step.wide)
+    );
+    Ok(())
+}
+
 fn run_any_length(
     all: &[axiom_parser::Contract],
     core: &axiom_parser::Contract,
@@ -629,15 +699,18 @@ fn run_any_length(
         axiom_parser::Type::I32 => ((v << shift) as i64) >> shift,
         _ => v as i64 ^ i64::MIN,
     };
-    for (item, fold) in rule.items.iter().zip(&rule.folds) {
+    let base = core_args.len();
+    for (k, (item, fold)) in rule.items.iter().zip(&rule.folds).enumerate() {
         let contract = all
             .iter()
             .find(|c| &c.name == item)
             .ok_or_else(|| format!("missing item rule {item}"))?;
         let code = proven(contract)?;
+        // Totals this item takes (`sum(w / sum(w))`) come before it in `items`.
+        let uses: Vec<u64> = rule.uses[k].iter().map(|&j| core_args[base + j]).collect();
         let mut total = 0u64;
         for i in 0..n {
-            let args = item_args(i);
+            let args = [item_args(i), uses.clone()].concat();
             check_requires(contract, &args)?;
             let v = code.try_eval_bits(&args, bits)?;
             total = match fold {
@@ -658,7 +731,14 @@ fn run_any_length(
     let result = if rule.each {
         let totals = core_args.split_off(core_args.len() - rule.items.len());
         let answers = (0..n)
-            .map(|i| answer(&[item_args(i), vec![n as u64], totals.clone()].concat()))
+            .map(|i| {
+                let position = if rule.position {
+                    vec![i as u64 + 1]
+                } else {
+                    vec![]
+                };
+                answer(&[item_args(i), vec![n as u64], position, totals.clone()].concat())
+            })
             .collect::<Result<Vec<_>, _>>()?;
         format!("[{}]", answers.join(","))
     } else {
@@ -1199,6 +1279,33 @@ struct BuildArgs<'a> {
     max_candidates: usize,
     max_memory_bytes: usize,
     emit_js: bool,
+    lean: bool,
+}
+
+/// `axiom build FILE --lean`: writes the rule's Lean theorem next to the
+/// output and checks it with `lean` when it is installed (issue #211).
+fn prove_with_lean(
+    contract: &axiom_parser::Contract,
+    candidate: &axiom_ami::Expr,
+    output: &Path,
+) -> Result<(), String> {
+    let path = output.with_extension("lean");
+    let outcome = lean::prove(contract, candidate, &path)?;
+    if !matches!(outcome, lean::Outcome::NotCovered(_)) {
+        println!("wrote: {}", path.display());
+    }
+    println!("lean_result: {}", outcome.line());
+    match outcome {
+        lean::Outcome::Failed(output) => {
+            Err(format!("Lean did not accept {}:\n{output}", path.display()))
+        }
+        // With `--lean`, only proofs Lean checked pass.
+        lean::Outcome::NotCovered(_) | lean::Outcome::Unproven => Err(format!(
+            "Lean did not prove {}; a `hint` line can help (docs/writing-specs.md, \"Proving with Lean\")",
+            contract.name
+        )),
+        lean::Outcome::Proved | lean::Outcome::Skipped => Ok(()),
+    }
 }
 
 fn parse_build_args(args: &[String]) -> Result<BuildArgs<'_>, String> {
@@ -1212,6 +1319,7 @@ fn parse_build_args(args: &[String]) -> Result<BuildArgs<'_>, String> {
     let mut max_candidates = axiom_synth::SynthesisOptions::default().max_candidates;
     let mut max_memory_bytes = axiom_synth::SynthesisOptions::default().max_memory_bytes;
     let mut emit_js = false;
+    let mut lean = false;
     let mut index = 1;
 
     while index < args.len() {
@@ -1220,6 +1328,7 @@ fn parse_build_args(args: &[String]) -> Result<BuildArgs<'_>, String> {
                 "js" => emit_js = true,
                 other => return Err(format!("unknown emit target: {other} (supported: js)")),
             },
+            "--lean" => lean = true,
             "-o" | "--output" => {
                 output = PathBuf::from(required_value(args, &mut index, "output path")?);
             }
@@ -1265,6 +1374,7 @@ fn parse_build_args(args: &[String]) -> Result<BuildArgs<'_>, String> {
         max_candidates,
         max_memory_bytes,
         emit_js,
+        lean,
     })
 }
 

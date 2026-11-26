@@ -14,6 +14,7 @@ Rules over lists with any number of items, up to a limit set by `need n <= ...`.
 | `share` | Shares of `total` by weight (a list answer) add up to at most `total` |
 | `fair` | The same shares add up to at most `total` and lose less than one per person |
 | `gap` | Each person's paid minus share (a list answer) adds up to the paid sum minus the share sum |
+| `split` | Shares of `total` by weight, the rest given 1 each from the first person, add up to exactly `total` |
 
 ```bash
 axiom check                     # prove every rule

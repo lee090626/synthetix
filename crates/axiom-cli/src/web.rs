@@ -74,7 +74,7 @@ struct DevState {
 
 #[cfg(test)]
 pub fn build(config_path: &Path, output_dir: &Path) -> Result<BuildResult, String> {
-    build_with_options(config_path, output_dir, None)
+    build_with_options(config_path, output_dir, None, false)
 }
 
 type Items<'a> = [(&'a axiom_parser::Contract, &'a Expr, Option<&'a Expr>)];
@@ -138,10 +138,11 @@ pub fn build_with_options(
     config_path: &Path,
     output_dir: &Path,
     emit: Option<&Emit>,
+    lean: bool,
 ) -> Result<BuildResult, String> {
     let mut cache = VerificationCache::default();
     let result = axiom_project::load(config_path)
-        .and_then(|project| build_project(&project, output_dir, &mut cache, false, emit));
+        .and_then(|project| build_project(&project, output_dir, &mut cache, false, emit, lean));
     if result.is_err() {
         remove_verified_outputs(output_dir)?;
     }
@@ -172,7 +173,7 @@ fn build_with_cache(
     dev_runtime: bool,
 ) -> Result<BuildResult, String> {
     let project = axiom_project::load(config_path)?;
-    build_project(&project, output_dir, cache, dev_runtime, None)
+    build_project(&project, output_dir, cache, dev_runtime, None, false)
 }
 
 fn build_project(
@@ -181,6 +182,7 @@ fn build_project(
     cache: &mut VerificationCache,
     dev_runtime: bool,
     emit: Option<&Emit>,
+    lean: bool,
 ) -> Result<BuildResult, String> {
     let compiled = compile_contracts_with_cache(
         project,
@@ -261,10 +263,53 @@ fn build_project(
     println!("proof_result: VERIFIED");
     println!("verified: {} contract(s)", compiled.len());
     println!("wrote: {}", output_dir.display());
+    if lean {
+        prove_with_lean(&compiled, &output_dir.join("lean"))?;
+    }
     Ok(BuildResult {
         files: project.files.clone(),
         verification_cache: cache.stats,
     })
+}
+
+/// `axiom build --lean`: one Lean theorem per rule in `dir`, each checked with
+/// `lean` when it is installed (issue #211). A rule Lean rejects, cannot
+/// decide in time, or that is not translated fails the build: with `--lean`,
+/// only proofs Lean checked pass.
+fn prove_with_lean(compiled: &[CompiledFunction], dir: &Path) -> Result<(), String> {
+    use crate::lean::{Outcome, prove};
+    if dir.exists() {
+        fs::remove_dir_all(dir)
+            .map_err(|error| format!("cannot remove stale {}: {error}", dir.display()))?;
+    }
+    fs::create_dir_all(dir).map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+    let (mut proved, mut uncovered, mut unproven, mut failures) = (0, 0, 0, Vec::new());
+    for function in compiled {
+        let path = dir.join(format!("{}.lean", function.name));
+        let outcome = prove(&function.contract, &function.candidate, &path)?;
+        println!("lean: {} {}", function.name, outcome.line());
+        match outcome {
+            Outcome::Proved => proved += 1,
+            Outcome::NotCovered(_) => uncovered += 1,
+            Outcome::Unproven => unproven += 1,
+            Outcome::Skipped => {}
+            Outcome::Failed(output) => failures.push(format!("{}:\n{output}", path.display())),
+        }
+    }
+    println!(
+        "lean_result: {proved} proved, {uncovered} not covered, {unproven} unproven, {} failed",
+        failures.len()
+    );
+    if !failures.is_empty() {
+        return Err(format!("Lean did not accept:\n{}", failures.join("\n")));
+    }
+    if uncovered + unproven > 0 {
+        return Err(format!(
+            "Lean did not prove {} rule(s): see the NOT_COVERED and UNPROVEN lines above; a `hint` line can help (docs/writing-specs.md, \"Proving with Lean\")",
+            uncovered + unproven
+        ));
+    }
+    Ok(())
 }
 
 pub fn check(config_path: &Path) -> Result<(), String> {
@@ -295,7 +340,8 @@ pub fn dev(config_path: &Path, port: u16, open_browser: bool, once: bool) -> Res
     // The server also starts on a failed first build and shows the error until a
     // fix rebuilds, the same as a failed rebuild; `--once` still reports it.
     let initial = retained_loader.load(config_path).and_then(|(project, _)| {
-        build_project(&project, &output_dir, &mut cache, true, None).map(|result| result.files)
+        build_project(&project, &output_dir, &mut cache, true, None, false)
+            .map(|result| result.files)
     });
     let (mut watched_files, error) = match initial {
         Ok(files) => (files, None),
@@ -1365,7 +1411,14 @@ fn rebuild_if_changed(
     watched_files.push(config_path.to_path_buf());
     let mut candidate_cache = cache.clone();
     let mut guard = state.lock().expect("dev state lock poisoned");
-    match build_project(&project, output_dir, &mut candidate_cache, true, None) {
+    match build_project(
+        &project,
+        output_dir,
+        &mut candidate_cache,
+        true,
+        None,
+        false,
+    ) {
         Ok(mut result) => {
             let active_ids = project
                 .contracts
@@ -2718,7 +2771,7 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
         std::fs::write(&config, "[project]\nentry = \"rules.ax\"\n").unwrap();
         let output = root.join("dist");
         for target in EMITS {
-            build_with_options(&config, &output, Some(target)).unwrap();
+            build_with_options(&config, &output, Some(target), false).unwrap();
             for name in target.files {
                 assert!(
                     output.join(name).is_file(),
@@ -2726,7 +2779,7 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
                     target.name
                 );
             }
-            build_with_options(&config, &output, None).unwrap();
+            build_with_options(&config, &output, None, false).unwrap();
             for name in target.files {
                 assert!(
                     !output.join(name).exists(),

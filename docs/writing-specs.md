@@ -148,6 +148,8 @@ What you can write:
 | `min(prices)`, `max(prices)` | Smallest or largest item | `need n >= 1` |
 | `count(prices)` | `n` | |
 | `always -> prices - min(prices)` | An answer per item (a list answer) | |
+| `position` | The item's place in a list answer, from 1 | A list answer |
+| `sum(total * weights / sum(weights))` | A sum of items that use a list's own sum; the inner sum is added up first | Items at least 0 |
 | `need prices <= 100000` | Holds for every item | Keep it apart from lines about `n` or `sum(...)` |
 | `balance(paid[n], share[n])`, `order(prices[n], fee)` | Lists share one length; other inputs work as usual | |
 
@@ -160,17 +162,17 @@ What a `promise` can prove:
 | `answer <= prices` for a list answer | It holds for every item |
 | `sum(answer) is sum(paid) - sum(share)` | The list answer is one `always -> ...` line; `sum(answer)` (also `min`, `max`) is that line inside `sum(...)` |
 | `sum(answer) <= total`, `sum(answer) >= total - n + 1` | The answer is `always -> total * weights / sum(weights)`, `total` and the weights are at least 0, and for `>=` `need n >= 1`. Shares round down, losing less than 1 each |
+| `sum(answer) is total` | The answer is `position <= total - sum(E) -> E + 1` then `else -> E`: the first items get the rest, 1 each. Holds when `0 <= total - sum(E) <= n`; for `E = total * weights / sum(weights)` with `need n >= 1` that is always so (`alloc_sum` in `proofs/lean/Lists.lean`) |
 
 What does not work yet, and what to do instead:
 
 | Not yet | Instead |
 |---|---|
 | A promise about `sum(prices / 2)` or `sum(a * b)` of two lists | A promise that follows from the ranges; the failing input may have sums no real list gives |
-| `sum(answer) is total` for shares | `<= total` and `>= total - n + 1`; an exact total needs a rule for what is left over |
-| `sum(answer)` with several answer lines | One `always -> ...` line |
+| `sum(answer)` with several answer lines (other than the `position` form above) | One `always -> ...` line |
 | `total - n + 1` in a rule without `can be negative` when `total` can be below `n` | `need total >= 50` (at least the limit), or `can be negative` |
 | A sum that can pass the number range (`need n <= 1000` and `need prices <= 100000` reach 100000000) | Lower the limit, limit the items with `need`, or add `with big numbers`; the error says when |
-| `prices[1]`, decimals, pages, calling the rule from another rule | |
+| `prices[1]`, decimals, pages, calling the rule from another rule, `repeat` over a list | |
 
 How it is proven: each item is proven like a rule of its own, and the rest of
 the rule is proven for every sum the items allow. The facts about sums, `min`,
@@ -181,6 +183,32 @@ the rule is proven for every sum the items allow. The facts about sums, `min`,
 gives a function taking arrays: `cart([1, 2, 3])` in JS and Python,
 `cart(&[1, 2, 3])` in Rust, `Cart([]uint32{1, 2, 3})` in Go. Example:
 `examples/any-length`.
+
+### Repeated steps
+
+`repeat` applies a step a number of times. `start ->` gives the first value,
+`repeat years` names the input that counts the steps, and the `->` lines
+after it are the step, where `value` is the answer so far:
+
+```
+savings(principal, rate, years)
+  need years <= 100
+  need principal <= 100000000
+  need rate <= 20
+  start -> principal
+  repeat years
+  value * rate / 100 > 100000000 - value -> 100000000
+  else -> value + value * rate / 100
+  promise answer >= principal
+  promise answer <= 100000000
+```
+
+A `need years <= limit` line and at least one `promise` are required. Each
+promise must hold for the start and survive one step from any `value` that
+meets every promise; Synthetix proves those two, and then it holds after any
+number of steps (`loop_inv` in `proofs/lean/Repeat.lean`). The promises are
+also what keeps the step's numbers in range, so bound `value` from above.
+`repeat` does not work with lists yet.
 
 ### Decimals
 
@@ -354,6 +382,44 @@ It also warns when a `->` line can never apply because an earlier line or a
 ```text
 warning: f: `->` line 2 never applies; an earlier line or a `need` line always matches first
 ```
+
+## Proving with Lean
+
+`axiom build --lean` also writes each rule's proof as a Lean theorem
+(`dist/lean/<rule>.lean`, or next to the output for one file) and checks it
+with `lean` when it is installed. Lean's kernel checks the answer, so the
+proof no longer rests on Z3. Each rule prints one result:
+
+| Result | Means |
+|---|---|
+| `PROVED` | Lean accepted the theorem |
+| `FAILED` | Lean found an input the rule gets wrong; the build fails |
+| `UNPROVEN` | Lean ran out of time; neither proven nor disproven. The build fails |
+| `NOT_COVERED` | The rule uses something not translated yet (arrays, records, loops in `fn`). The build fails |
+| `SKIPPED` | `lean` is not installed; the file is still written |
+
+Lean decides each rule by turning its words into bits. Dividing or
+multiplying by an input can make that too slow. Two things help:
+
+- An input with at most 64 values (`need people >= 1`, `need people <= 50`)
+  is tried one value at a time, automatically.
+- A `hint` line names a fact Lean proves once and then uses in place of the
+  division:
+
+```
+fee_first(a, b, rate) with big numbers
+  ...
+  always -> fee(a + b, rate) * a / (a + b)
+  promise answer <= fee(a + b, rate)
+  hint mul_div_le(fee(a + b, rate), a, a + b)
+```
+
+| Hint | Fact | Write it for |
+|---|---|---|
+| `mul_div_le(x, y, z)` | `x * y / z <= x` when `y <= z` and `x * y` stays in range | `x * y / z` exactly as the rule writes it |
+
+Z3 and the generated code ignore `hint` lines; a wrong hint only makes the
+Lean proof fail.
 
 ## Workflow
 

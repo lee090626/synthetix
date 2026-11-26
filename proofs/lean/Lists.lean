@@ -181,3 +181,35 @@ theorem share_ge (total : Nat) (ws : List Nat) (hn : 0 < ws.length) (h : 0 < ws.
   have hlt : total * ws.sum < ((ws.map fun w => total * w / ws.sum).sum + ws.length) * ws.sum := by
     rw [Nat.add_mul]; omega
   exact Nat.lt_of_mul_lt_mul_right hlt
+
+/-- A share's divisor `sum(w)` is at least every weight (issue #207): the item
+rule of `sum(total * w / sum(w))` may assume `sum1 >= w`. -/
+theorem single_le_sum : ∀ (xs : List Nat), ∀ x ∈ xs, x ≤ xs.sum
+  | [], _, h => by simp at h
+  | y :: ys, x, h => by
+    simp only [List.mem_cons] at h
+    simp only [List.sum_cons]
+    rcases h with rfl | h
+    · omega
+    · have := single_le_sum ys x h; omega
+
+/-- The answers `q + 1` at positions `p..R` and `q` after (issue #207). -/
+def bump (R : Nat) : Nat → List Nat → List Nat
+  | _, [] => []
+  | p, q :: qs => (q + if p ≤ R then 1 else 0) :: bump R (p + 1) qs
+
+theorem bump_sum (R : Nat) : ∀ (qs : List Nat) (p : Nat), 1 ≤ p →
+    (bump R p qs).sum = qs.sum + min qs.length (R + 1 - p)
+  | [], _, _ => by simp [bump]
+  | q :: qs, p, hp => by
+    have ih := bump_sum R qs (p + 1) (by omega)
+    simp only [bump, List.sum_cons, List.length_cons, ih]
+    split <;> omega
+
+/-- `position <= R -> q + 1`, `else -> q` with `R` at most the length adds up
+to exactly `sum(q) + R`: with `R = total - sum(q)`, the answers add up to
+`total` (`promise sum(answer) is total`). -/
+theorem alloc_sum (R : Nat) (qs : List Nat) (h : R ≤ qs.length) :
+    (bump R 1 qs).sum = qs.sum + R := by
+  rw [bump_sum R qs 1 (Nat.le_refl 1)]
+  omega

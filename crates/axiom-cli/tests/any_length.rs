@@ -136,15 +136,16 @@ fn expected(
         _ => i128::from(v),
     };
     let mut sums = Vec::new();
-    for (item, fold) in rule.items.iter().zip(&rule.folds) {
+    for (k, (item, fold)) in rule.items.iter().zip(&rule.folds).enumerate() {
         let contract = &compiled[item];
         let mut total = 0u64;
         for i in 0..n {
-            let args: Vec<u64> = values
+            let mut args: Vec<u64> = values
                 .iter()
                 .zip(&rule.params)
                 .map(|(v, (_, list))| word(if *list { v[i] } else { v[0] }, bits))
                 .collect();
+            args.extend(rule.uses[k].iter().map(|&j| sums[j]));
             let Some(value) = contract.eval(&args) else {
                 return "ERR".into();
             };
@@ -173,6 +174,9 @@ fn expected(
                 .map(|(v, (_, list))| word(if *list { v[i] } else { v[0] }, bits))
                 .collect();
             args.push(n as u64);
+            if rule.position {
+                args.push(i as u64 + 1);
+            }
             args.extend(&sums);
             let Some(v) = core.eval(&args) else {
                 return "ERR".into();
