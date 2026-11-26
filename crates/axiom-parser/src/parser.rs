@@ -267,6 +267,7 @@ impl<'a> Parser<'a> {
             list: None,
             hints: Vec::new(),
             repeat: None,
+            choices: Vec::new(),
         })
     }
 
@@ -390,6 +391,7 @@ impl<'a> Parser<'a> {
             list: None,
             hints,
             repeat: None,
+            choices: Vec::new(),
         })
     }
 

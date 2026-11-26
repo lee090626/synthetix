@@ -170,6 +170,30 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
         out += "\n";
         out += &settle_wrapper(&sizes);
     }
+    for (choice, uses) in crate::js::choice_types(&contracts)? {
+        let ty = |(ty, wide): &(Type, bool)| match (ty, wide) {
+            (Type::I32, false) => "i32",
+            (Type::I32, true) => "i64",
+            (_, false) => "u32",
+            (_, true) => "u64",
+        };
+        // One number type when every input agrees; else `u8`, which `.into()` widens.
+        let first = ty(&uses[0]);
+        let word = if uses.iter().all(|u| ty(u) == first) {
+            first
+        } else {
+            "u8"
+        };
+        out += &format!(
+            "\n/// Values of `type {}`: each is its place, from 0.\n#[allow(non_snake_case, non_upper_case_globals, dead_code)]\npub mod {} {{\n",
+            choice.name,
+            ident(&choice.name)?
+        );
+        for (at, value) in choice.values.iter().enumerate() {
+            out += &format!("    pub const {}: {word} = {at};\n", ident(value)?);
+        }
+        out += "}\n";
+    }
     Ok(out)
 }
 

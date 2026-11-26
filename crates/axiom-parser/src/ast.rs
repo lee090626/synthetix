@@ -116,6 +116,17 @@ pub struct Contract {
     pub hints: Vec<Hint>,
     /// Set on the step of a `repeat` rule (issue #214).
     pub repeat: Option<RepeatRule>,
+    /// Inputs that hold a choice (`size: Size`, issue #226): the input's
+    /// name and its type. The value is the choice's place, from 0.
+    pub choices: Vec<(String, ChoiceType)>,
+}
+
+/// `type Size = small | medium | large` (issue #226).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChoiceType {
+    pub name: String,
+    /// In order; a value is its place here, from 0.
+    pub values: Vec<String>,
 }
 
 /// A rule that applies a step a number of times (`repeat years`, issue

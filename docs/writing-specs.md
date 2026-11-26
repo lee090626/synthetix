@@ -243,6 +243,71 @@ grade(score)
 Every `->` line then needs a text answer. A page shows it (below); other rules
 cannot use it.
 
+### Types
+
+`type` declares a **choice** (one of a few named values) or a **record**
+(several values that belong together). Write types before or between rules,
+unindented:
+
+```
+type Size = small | medium | large
+
+type Order
+  price
+  quantity
+  size: Size
+```
+
+An input takes a type with `name: Type`. A record's fields are read with a
+dot (`order.price`), and a record is passed to another rule of the same file
+whole (`subtotal(order)`). `match` gives an answer per value of a choice:
+
+```
+shipping(size: Size, weight)
+  need weight <= 100000
+  match size
+    small -> 3000
+    medium -> 5000
+    large -> 5000 + weight / 1000 * 100
+  promise answer >= 3000
+
+total(order: Order, weight)
+  need order.price <= 10000000
+  need order.quantity <= 100
+  need weight <= 100000
+  goods = subtotal(order)
+  goods >= 100000 -> goods
+  else -> goods + shipping(order.size, weight)
+```
+
+- A `match` names every value once (`small or medium -> ...` covers two), or
+  ends with `else -> value`. A missing value is an error that names it.
+  `match` comes after the other `->` lines; `promise` lines may follow it.
+- A value can also be compared (`order.size is large`) or passed
+  (`shipping(large, weight)`). A value names one thing in a file: no input,
+  named value or other choice may use the same name.
+- Calls are checked: a rule that takes a `Size` gets a `Size` value or input,
+  a rule that takes an `Order` gets an `Order` input, and a rule that takes a
+  number gets no record.
+- Underneath, a value is its place from 0 (`large` is 2), and a choice input
+  only accepts those places. A record input is one input per field, in the
+  order declared. So a rule with types is proven like any other rule, Lean
+  included.
+- `axiom run` takes values by name or place: `axiom run shipping.ax -- large 12000`.
+- `--emit` gives each record field as its own input, named `order__price`, and
+  the values of each choice as constants: `Size.large` in JS and Python,
+  `Size::large` in Rust, `contracts.SizeLarge` in Go. In JS a choice used only
+  by rules with big numbers is a `bigint`; in Rust a choice used with several
+  number types is a `u8` (`Size::large.into()`).
+
+| Not yet | Instead |
+|---|---|
+| A record answer, a record field that is a record, a list of records or choices | Several rules, one per answer |
+| An answer that is a choice | Text answers (`-> "large"`) or the place (`-> large` gives 2) |
+| Types shared between files; passing a record to a rule of another file | Declare the type in each file; pass the fields one by one |
+| A choice input in a rule with decimals | A rule without decimals that the decimal rule calls with whole numbers |
+| Types on pages | A rule that takes numbers |
+
 ### Numbers must stay in range
 
 - `+` and `*` must not go above 4294967295 (or outside -2147483648 to
