@@ -192,16 +192,21 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
                 .iter()
                 .map(|p| ident(&p.name))
                 .collect();
+            // A rule that calls itself passes the step's place as the counted input.
+            let mut step_args = names.clone();
+            if rule.counted {
+                step_args[rule.count] = "step_place_".to_string();
+            }
             // The start, then the step `count` times (`proofs/lean/Repeat.lean`).
             out += &format!(
-                "\n\ndef {}({}):\n    value = {}({})\n    for _ in range({}):\n        value = {}({}, value)\n    return value\n",
+                "\n\ndef {}({}):\n    value = {}({})\n    for step_place_ in range({}):\n        value = {}({}, value)\n    return value\n",
                 ident(&rule.name),
                 names.join(", "),
                 ident(&rule.start),
                 names.join(", "),
                 names[rule.count],
                 ident(&contract.name),
-                names.join(", "),
+                step_args.join(", "),
             );
         }
     }

@@ -39,7 +39,7 @@ fn is_word(c: char) -> bool {
 }
 
 /// `text` with every whole word `from` (outside quotes) replaced by `to`.
-fn rename(text: &str, from: &str, to: &str) -> String {
+pub(crate) fn rename(text: &str, from: &str, to: &str) -> String {
     let mut out = String::new();
     let mut word = String::new();
     let mut quoted = false;
@@ -81,11 +81,16 @@ pub(crate) fn expand(source: &str) -> Result<Option<Expanded>, String> {
             && lines[index + 1..end]
                 .iter()
                 .any(|l| strip_comment(l).trim().starts_with("repeat "));
-        if !repeats {
+        let recurses = top && !repeats && crate::recursion::recurses(&lines[index..end]);
+        if !repeats && !recurses {
             index = end;
             continue;
         }
-        let (start, step, rule) = split(&lines[index..end], index + 1)?;
+        let (start, step, rule) = if repeats {
+            split(&lines[index..end], index + 1)?
+        } else {
+            crate::recursion::split(&lines[index..end], index + 1)?
+        };
         for (offset, line) in step.into_iter().enumerate() {
             lines[index + offset] = line;
         }
@@ -247,6 +252,7 @@ fn split(block: &[String], first_line: usize) -> Result<(String, Vec<String>, Re
             start: format!("{name}__start"),
             count,
             max,
+            counted: false,
         },
     ))
 }

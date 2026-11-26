@@ -637,8 +637,11 @@ fn run_repeat(
     check_requires(start, &inputs)?;
     let mut value = proven(start)?.try_eval_bits(&inputs, bits)?;
     let code = proven(step)?;
-    for _ in 0..inputs[rule.count] {
-        let args = [inputs.clone(), vec![value]].concat();
+    for i in 0..inputs[rule.count] {
+        let mut args = [inputs.clone(), vec![value]].concat();
+        if rule.counted {
+            args[rule.count] = i;
+        }
         check_requires(step, &args)?;
         value = code.try_eval_bits(&args, bits)?;
     }

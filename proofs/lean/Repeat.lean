@@ -19,3 +19,26 @@ theorem loop_inv {α : Type} (P : α → Prop) (step : α → α)
     (hs : ∀ v, P v → P (step v)) : ∀ (n : Nat) (v : α), P v → P (runLoop step n v)
   | 0, _, h => h
   | n + 1, v, h => loop_inv P step hs n (step v) (hs v h)
+
+/-!
+A rule that calls itself once less (`f(n - 1)`, issue #225) is split into a
+start rule (the answer for 0) and a step rule taking `k` and the answer for
+`k`, giving the answer for `k + 1`. Emitted code runs the start, then the step
+for `k` = 0, 1, ... n - 1.
+-/
+
+/-- The loop emitted code runs: `v := start; for k in from..from+n: v := step k v`. -/
+def runFrom {α : Type} (step : Nat → α → α) : Nat → Nat → α → α
+  | _, 0, v => v
+  | k, n + 1, v => runFrom step (k + 1) n (step k v)
+
+/-- If `P 0` holds at the start and the step takes `P k` to `P (k + 1)`, then
+`P n` holds for what the loop returns after `n` steps from 0. -/
+theorem rec_inv {α : Type} (P : Nat → α → Prop) (step : Nat → α → α)
+    (hs : ∀ k v, P k v → P (k + 1) (step k v)) :
+    ∀ (n k : Nat) (v : α), P k v → P (k + n) (runFrom step k n v)
+  | 0, _, _, h => h
+  | n + 1, k, v, h => by
+    have := rec_inv P step hs n (k + 1) (step k v) (hs k v h)
+    rw [show k + (n + 1) = k + 1 + n by omega]
+    exact this
