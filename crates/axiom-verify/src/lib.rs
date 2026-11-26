@@ -10,6 +10,7 @@ use z3::{
 };
 
 mod int_check;
+pub mod lean;
 
 thread_local! {
     /// Word width of the contract being checked on this thread: 32, or 64

@@ -328,6 +328,9 @@ fn build_command(args: &[String]) -> Result<(), String> {
         println!("diagnostic: {diagnostic}");
     }
     println!("candidate: {candidate:?}");
+    if options.lean {
+        prove_with_lean(&contract, &candidate, &options.output)?;
+    }
     println!("verified: true");
     println!("wrote: {}", options.output.display());
     if let Some(report) = options.report {
@@ -1199,6 +1202,42 @@ struct BuildArgs<'a> {
     max_candidates: usize,
     max_memory_bytes: usize,
     emit_js: bool,
+    lean: bool,
+}
+
+/// `axiom build --lean`: writes the rule's Lean theorem next to the output and
+/// checks it with `lean` when it is installed (issue #211).
+fn prove_with_lean(
+    contract: &axiom_parser::Contract,
+    candidate: &axiom_ami::Expr,
+    output: &Path,
+) -> Result<(), String> {
+    use axiom_verify::lean::{LeanExport, export};
+    let source = match export(contract, candidate) {
+        LeanExport::Source(source) => source,
+        LeanExport::NotCovered(reason) => {
+            println!("lean_result: NOT_COVERED ({reason})");
+            return Ok(());
+        }
+    };
+    let path = output.with_extension("lean");
+    fs::write(&path, source)
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    println!("wrote: {}", path.display());
+    match std::process::Command::new("lean").arg(&path).output() {
+        Err(_) => println!("lean_result: SKIPPED (lean not found)"),
+        Ok(run) if run.status.success() => println!("lean_result: PROVED"),
+        Ok(run) => {
+            println!("lean_result: FAILED");
+            return Err(format!(
+                "Lean did not accept {}:\n{}{}",
+                path.display(),
+                String::from_utf8_lossy(&run.stdout),
+                String::from_utf8_lossy(&run.stderr)
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parse_build_args(args: &[String]) -> Result<BuildArgs<'_>, String> {
@@ -1212,6 +1251,7 @@ fn parse_build_args(args: &[String]) -> Result<BuildArgs<'_>, String> {
     let mut max_candidates = axiom_synth::SynthesisOptions::default().max_candidates;
     let mut max_memory_bytes = axiom_synth::SynthesisOptions::default().max_memory_bytes;
     let mut emit_js = false;
+    let mut lean = false;
     let mut index = 1;
 
     while index < args.len() {
@@ -1220,6 +1260,7 @@ fn parse_build_args(args: &[String]) -> Result<BuildArgs<'_>, String> {
                 "js" => emit_js = true,
                 other => return Err(format!("unknown emit target: {other} (supported: js)")),
             },
+            "--lean" => lean = true,
             "-o" | "--output" => {
                 output = PathBuf::from(required_value(args, &mut index, "output path")?);
             }
@@ -1265,6 +1306,7 @@ fn parse_build_args(args: &[String]) -> Result<BuildArgs<'_>, String> {
         max_candidates,
         max_memory_bytes,
         emit_js,
+        lean,
     })
 }
 
