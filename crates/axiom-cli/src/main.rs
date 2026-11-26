@@ -418,10 +418,12 @@ fn run_command(args: &[String]) -> Result<(), String> {
         .iter()
         .zip(&contract.params)
         .map(|(value, param)| {
-            let value = unscale(
-                &choice_value(&contract, &param.name, value)?,
-                contract.decimals,
-            )?;
+            // A choice value is its place, the same in a rule with decimals.
+            let value = if contract.choices.iter().any(|(name, _)| name == &param.name) {
+                choice_value(&contract, &param.name, value)?
+            } else {
+                unscale(value, contract.decimals)?
+            };
             parse_input_value(&value, &param.ty, contract.wide)
         })
         .collect::<Result<Vec<_>, _>>()?;

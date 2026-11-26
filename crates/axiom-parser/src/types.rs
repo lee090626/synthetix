@@ -408,9 +408,41 @@ fn holds<'a>(
     false
 }
 
-/// The type of each input of each rule (`None` for a number), and the
-/// choice its answers are, if any.
-type Signature = (String, Vec<Option<String>>, Option<String>);
+/// The type of each input of each rule (`None` for a number), the choice
+/// its answers are, if any, and its decimal places.
+type Signature = (String, Vec<Option<String>>, Option<String>, u32);
+
+/// The decimal places a name line declares (`with 2 decimals`).
+fn places_of(suffix: &str) -> u32 {
+    let Some(rest) = suffix
+        .trim_end()
+        .strip_suffix("decimals")
+        .or_else(|| suffix.trim_end().strip_suffix("decimal"))
+    else {
+        return 0;
+    };
+    rest.trim_end()
+        .rsplit_once("with ")
+        .and_then(|(_, n)| n.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// A choice value's place as a number of a rule with `places` decimals:
+/// the rule reads every number as tenths, hundredths..., so place 2 in a
+/// rule with 2 decimals is written `0.02` and stays 2 underneath, the same
+/// number a rule without decimals takes.
+fn place(at: usize, places: u32) -> String {
+    if places == 0 {
+        return at.to_string();
+    }
+    let scale = 10usize.pow(places);
+    format!(
+        "{}.{:0width$}",
+        at / scale,
+        at % scale,
+        width = places as usize
+    )
+}
 
 fn signatures(lines: &[String], types: &Types) -> Result<Vec<Signature>, String> {
     let mut out = Vec::new();
@@ -448,7 +480,10 @@ fn signatures(lines: &[String], types: &Types) -> Result<Vec<Signature>, String>
             end += 1;
         }
         let answer = answer_choice(&lines[index..end], types);
-        out.push((name.trim().to_string(), tys, answer));
+        let places = rest
+            .split_once(')')
+            .map_or(0, |(_, suffix)| places_of(suffix));
+        out.push((name.trim().to_string(), tys, answer, places));
     }
     Ok(out)
 }
@@ -530,12 +565,6 @@ fn rule_block(
             None => return Err(error(first_line, format!("there is no type `{ty}`"))),
         }
     }
-    if !choices.is_empty() && suffix.contains("decimal") {
-        return Err(error(
-            first_line,
-            "a rule with a choice input cannot have decimals yet",
-        ));
-    }
     let signed = suffix.contains("can be negative");
     let mut needs = String::new();
     for (input, choice) in &choices {
@@ -548,7 +577,8 @@ fn rule_block(
     let mut out = vec![String::new(); block.len()];
     out[0] = format!("{name}({}){gap}{suffix}{needs}", written.join(", "));
 
-    let rewrite = |text: &str, line: usize| rewrite(text, line, &locals, types, signatures);
+    let places = places_of(suffix);
+    let rewrite = |text: &str, line: usize| rewrite(text, line, &locals, types, signatures, places);
     let mut offset = 1;
     let mut matched = false;
     while offset < block.len() {
@@ -580,6 +610,7 @@ fn rule_block(
                 &locals,
                 types,
                 &rewrite,
+                places,
             )?;
             for (k, arm) in arms.into_iter().enumerate() {
                 out[offset + 1 + k] = arm;
@@ -627,6 +658,7 @@ fn match_arms(
     locals: &[(String, Local)],
     types: &Types,
     rewrite: &dyn Fn(&str, usize) -> Result<String, String>,
+    places: u32,
 ) -> Result<Vec<String>, String> {
     let found = match subject.split_once('.') {
         None => locals.iter().find_map(|(n, l)| match l {
@@ -733,14 +765,14 @@ fn match_arms(
         _ => {}
     }
     let last = cases.len() - 1;
-    for (n, (k, places, value)) in cases.iter().enumerate() {
+    for (n, (k, at_places, value)) in cases.iter().enumerate() {
         let arm_line = line + 1 + k;
         let value = rewrite(value, arm_line)?;
-        let condition = match places {
+        let condition = match at_places {
             _ if n == last => "else".to_string(),
-            Some(places) => places
+            Some(at_places) => at_places
                 .iter()
-                .map(|at| format!("{input} is {at}"))
+                .map(|at| format!("{input} is {}", place(*at, places)))
                 .collect::<Vec<_>>()
                 .join(" or "),
             None => unreachable!("`else` is last"),
@@ -759,8 +791,9 @@ fn rewrite(
     locals: &[(String, Local)],
     types: &Types,
     signatures: &[Signature],
+    places: u32,
 ) -> Result<String, String> {
-    check_calls(text, line, locals, types, signatures)?;
+    check_calls(text, line, locals, types, signatures, places)?;
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::new();
     let mut i = 0;
@@ -862,7 +895,7 @@ fn rewrite(
                     return Err(error(line, format!("`{word}` is not a record input")));
                 }
                 match types.value(&word) {
-                    Some((_, at)) => out += &at.to_string(),
+                    Some((_, at)) => out += &place(at, places),
                     None => out += &word,
                 }
             }
@@ -882,7 +915,8 @@ fn arg_type(arg: &str, locals: &[(String, Local)], types: &Types, signatures: &[
     let arg = arg.trim();
     if let Some((callee, rest)) = arg.split_once('(')
         && rest.ends_with(')')
-        && let Some((_, _, Some(choice))) = signatures.iter().find(|(n, _, _)| n == callee.trim())
+        && let Some((_, _, Some(choice), _)) =
+            signatures.iter().find(|(n, _, _, _)| n == callee.trim())
     {
         return Arg::Choice(choice.clone());
     }
@@ -913,6 +947,7 @@ fn check_calls(
     locals: &[(String, Local)],
     types: &Types,
     signatures: &[Signature],
+    places: u32,
 ) -> Result<(), String> {
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
@@ -948,7 +983,9 @@ fn check_calls(
         if args.len() == 1 && args[0].trim().is_empty() {
             args.clear();
         }
-        let Some((_, params, _)) = signatures.iter().find(|(n, _, _)| *n == callee) else {
+        let Some((_, params, _, callee_places)) =
+            signatures.iter().find(|(n, _, _, _)| *n == callee)
+        else {
             // A rule from another file (or `min`, `sum`): its types are not known here.
             if let Some(arg) = args
                 .iter()
@@ -976,7 +1013,18 @@ fn check_calls(
         }
         for (n, (arg, param)) in args.iter().zip(params).enumerate() {
             let place = n + 1;
-            match (arg_type(arg, locals, types, signatures), param) {
+            let given = arg_type(arg, locals, types, signatures);
+            // A call moves numbers to the callee's places; a choice keeps its place.
+            if matches!(given, Arg::Choice(_)) && *callee_places != places {
+                return Err(error(
+                    line,
+                    format!(
+                        "`{}` is a choice; `{callee}` has other decimal places, so a choice cannot be passed to it yet",
+                        arg.trim()
+                    ),
+                ));
+            }
+            match (given, param) {
                 (Arg::Record(given), Some(want)) if given == *want => {}
                 (Arg::Choice(given), Some(want)) if given == *want => {}
                 (Arg::Number, Some(want)) if matches!(types.get(want), Some(Def::Choice(_))) => {}
@@ -1170,9 +1218,15 @@ mod tests {
             err("type Size = small | big\nf(a)\n  big = a\n  always -> big\n")
                 .contains("choose another name")
         );
-        assert!(
-            err("type Size = small | big\nf(s: Size) with 2 decimals\n  always -> s\n")
-                .contains("decimals")
+        // In a rule with decimals a choice keeps its place: `big` is `0.01`.
+        let module = parse_module(
+            "type Size = small | big\nf(s: Size, w) with 2 decimals\n  need w <= 100\n  match s\n    small -> w\n    big -> w * 2\n",
+        )
+        .unwrap();
+        assert_eq!(module.contracts[0].choices[0].0, "s");
+        let e = err(
+            "type Size = small | big\ng(s: Size)\n  always -> 1\n\nf(s: Size) with 2 decimals\n  always -> g(s)\n",
         );
+        assert!(e.contains("other decimal places"), "{e}");
     }
 }
