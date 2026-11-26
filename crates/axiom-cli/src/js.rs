@@ -386,12 +386,20 @@ fn any_length_wrapper(
             }
         })
         .collect();
-    let mut loop_body = String::new();
+    let (mut loop_body, mut second_loop) = (String::new(), String::new());
     let mut sums = String::new();
     for (k, (item, fold)) in rule.items.iter().zip(&rule.folds).enumerate() {
         sums += &format!("  let sum{} = {zero};\n", k + 1);
-        let call = format!("{item}({})", item_args.join(", "));
-        loop_body += &match fold {
+        // An item taking list totals (`sum(w / sum(w))`) runs in a second loop.
+        let mut args = item_args.clone();
+        args.extend(rule.uses[k].iter().map(|j| format!("sum{}", j + 1)));
+        let call = format!("{item}({})", args.join(", "));
+        let body = if rule.uses[k].is_empty() {
+            &mut loop_body
+        } else {
+            &mut second_loop
+        };
+        *body += &match fold {
             axiom_parser::Fold::Sum => format!("    sum{} += {call};\n", k + 1),
             axiom_parser::Fold::Min | axiom_parser::Fold::Max => format!(
                 "    {{ const v = {call}; if (i === 0 || v {} sum{1}) sum{1} = v; }}\n",
@@ -415,6 +423,16 @@ fn any_length_wrapper(
             .collect()
     };
     core_args.push(if wide { "BigInt(n)".into() } else { "n".into() });
+    if rule.position {
+        core_args.push(if wide {
+            "BigInt(i + 1)".into()
+        } else {
+            "i + 1".into()
+        });
+    }
+    if !second_loop.is_empty() {
+        loop_body += &format!("  }}\n  for (let i = 0; i < n; i++) {{\n{second_loop}");
+    }
     core_args.extend((1..=rule.items.len()).map(|k| format!("sum{k}")));
     let call = format!("{}({})", core.name, core_args.join(", "));
     let ret = ts_type(&core.return_type, wide)?;

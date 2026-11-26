@@ -270,6 +270,7 @@ pub fn translate_with_decimals(source: &str) -> Result<(String, Decimals), Strin
                     decimals: header.decimals,
                     lists: header.lists,
                     promises: Vec::new(),
+                    hints: Vec::new(),
                 }));
             }
             continue;
@@ -359,6 +360,9 @@ fn rule_line(
         }
         let condition = each_item(condition, &block.lists, line_no)?;
         out[index] = format!("    requires {};", expr(&condition)?);
+    } else if let Some(hint) = trimmed.strip_prefix("hint ") {
+        // A fact for the Lean proof (`axiom build --lean`, issue #215).
+        block.hints.push(expr(hint)?);
     } else if let Some(condition) = trimmed.strip_prefix("promise ") {
         if block.rules.is_empty() {
             return Err(format!(
@@ -1340,6 +1344,8 @@ struct Block {
     lists: Vec<(String, usize)>,
     /// `promise` lines, translated: extra facts the answer must always meet.
     promises: Vec<String>,
+    /// `hint` lines, translated: lemmas for the Lean proof (issue #215).
+    hints: Vec<String>,
 }
 
 /// What an expression may use: signed arithmetic and list names.
@@ -1433,6 +1439,7 @@ impl Block {
             .promises
             .iter()
             .map(|p| format!(" ensures {p};"))
+            .chain(self.hints.iter().map(|h| format!(" hint {h};")))
             .collect();
         let Some(size) = size else {
             out[last.index] = format!("    ensures result == ({chain});{promises} }}");

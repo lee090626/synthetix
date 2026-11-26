@@ -641,15 +641,18 @@ fn run_any_length(
         axiom_parser::Type::I32 => ((v << shift) as i64) >> shift,
         _ => v as i64 ^ i64::MIN,
     };
-    for (item, fold) in rule.items.iter().zip(&rule.folds) {
+    let base = core_args.len();
+    for (k, (item, fold)) in rule.items.iter().zip(&rule.folds).enumerate() {
         let contract = all
             .iter()
             .find(|c| &c.name == item)
             .ok_or_else(|| format!("missing item rule {item}"))?;
         let code = proven(contract)?;
+        // Totals this item takes (`sum(w / sum(w))`) come before it in `items`.
+        let uses: Vec<u64> = rule.uses[k].iter().map(|&j| core_args[base + j]).collect();
         let mut total = 0u64;
         for i in 0..n {
-            let args = item_args(i);
+            let args = [item_args(i), uses.clone()].concat();
             check_requires(contract, &args)?;
             let v = code.try_eval_bits(&args, bits)?;
             total = match fold {
@@ -670,7 +673,14 @@ fn run_any_length(
     let result = if rule.each {
         let totals = core_args.split_off(core_args.len() - rule.items.len());
         let answers = (0..n)
-            .map(|i| answer(&[item_args(i), vec![n as u64], totals.clone()].concat()))
+            .map(|i| {
+                let position = if rule.position {
+                    vec![i as u64 + 1]
+                } else {
+                    vec![]
+                };
+                answer(&[item_args(i), vec![n as u64], position, totals.clone()].concat())
+            })
             .collect::<Result<Vec<_>, _>>()?;
         format!("[{}]", answers.join(","))
     } else {

@@ -383,9 +383,12 @@ fn any_length_wrapper(
         })
         .collect();
     let mut sums = String::new();
-    let mut body = String::new();
+    let (mut body, mut second_loop) = (String::new(), String::new());
     for (k, (item, fold)) in rule.items.iter().zip(&rule.folds).enumerate() {
         sums += &format!("\tvar sum{} {ty}\n", k + 1);
+        // An item taking list totals (`sum(w / sum(w))`) runs in a second loop.
+        let mut args = item_args.clone();
+        args.extend(rule.uses[k].iter().map(|j| format!("sum{}", j + 1)));
         let step = match fold {
             axiom_parser::Fold::Sum => format!("sum{} += v", k + 1),
             axiom_parser::Fold::Min | axiom_parser::Fold::Max => format!(
@@ -398,10 +401,15 @@ fn any_length_wrapper(
                 k + 1
             ),
         };
-        body += &format!(
+        let target = if rule.uses[k].is_empty() {
+            &mut body
+        } else {
+            &mut second_loop
+        };
+        *target += &format!(
             "\t\tif v, err := {}({}); err != nil {{\n\t\t\treturn result, err\n\t\t}} else {{\n\t\t\t{step}\n\t\t}}\n",
             exported(item),
-            item_args.join(", "),
+            args.join(", "),
         );
     }
     let mut core_args: Vec<String> = if rule.each {
@@ -415,6 +423,12 @@ fn any_length_wrapper(
             .collect()
     };
     core_args.push(format!("{ty}(n)"));
+    if rule.position {
+        core_args.push(format!("{ty}(_i + 1)"));
+    }
+    if !second_loop.is_empty() {
+        body += &format!("\t}}\n\tfor _i := 0; _i < n; _i++ {{\n{second_loop}");
+    }
     core_args.extend((1..=rule.items.len()).map(|k| format!("sum{k}")));
     let call = format!("{}({})", exported(&core.name), core_args.join(", "));
     let (ret, tail) = if rule.each {

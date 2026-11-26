@@ -111,6 +111,16 @@ pub struct Contract {
     pub wide: bool,
     /// Set on the core of a rule over lists of any length (`prices[n]`).
     pub list: Option<ListRule>,
+    /// `hint mul_div_le(a, b, c)` lines: proven facts the Lean proof uses
+    /// (issue #215). Z3 and synthesis ignore them.
+    pub hints: Vec<Hint>,
+}
+
+/// A `hint` line: a lemma from `axiom_verify::lean::LEMMAS` and its arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hint {
+    pub lemma: String,
+    pub args: Vec<SpecExpr>,
 }
 
 /// A rule over lists of any length (`cart(prices[n])`, issue #182), split
@@ -135,6 +145,12 @@ pub struct ListRule {
     /// The answer is a list: the core takes every input (one item of each
     /// list) before the length and sums, and runs once per item.
     pub each: bool,
+    /// For each item rule, the item rules (indexes into `items`, always plain
+    /// `sum(list)`) whose totals it takes after the inputs: `sum(w / sum(w))`.
+    /// Those are added up in a first loop, the rest in a second.
+    pub uses: Vec<Vec<usize>>,
+    /// The core takes `position` (the item's place, from 1) after the length.
+    pub position: bool,
 }
 
 /// How a list rule combines one item rule's answers over the items.

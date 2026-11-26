@@ -301,6 +301,8 @@ fn split(
         .collect();
     let length = head.length.as_str();
     let mut sums: Vec<(Fold, String)> = Vec::new();
+    // For each entry of `sums`, the plain list sums its item rule takes.
+    let mut deps: Vec<Vec<usize>> = Vec::new();
     let mut item_needs: Vec<String> = Vec::new();
     let mut core = vec![String::new(); block.len()];
     let mut limit: Option<(usize, u64)> = None;
@@ -335,6 +337,17 @@ fn split(
         }
         text.contains("->") && rest.is_ok_and(|t| lists.iter().any(|l| mentions(&t, l)))
     });
+
+    // `position`: where the item is in the list, from 1 (issue #207).
+    let position = block
+        .iter()
+        .skip(1)
+        .any(|raw| mentions(strip_comment(raw), "position"));
+    if position && (!each || head.params.iter().any(|(p, _)| p == "position")) {
+        return Err(format!(
+            "line {first_line}: `position` is the place of an item (from 1) and only works when the answer is a list"
+        ));
+    }
 
     // `sum(answer)` in a promise of a list answer is `sum(E)` of its one
     // `always -> E` line.
@@ -390,6 +403,38 @@ fn split(
                     e.trim()
                 )),
             };
+        }
+        // Issue #207: `position <= T - sum(E) -> E + 1`, `else -> E` gives the
+        // first `T - sum(E)` items one more, so `sum(answer) is T` holds when
+        // `0 <= T - sum(E) <= n` (`alloc_sum`); the core proves that range.
+        if let [first, second] = answers.as_slice()
+            && each
+            && let Some(target) = text
+                .strip_prefix("promise")
+                .map(str::trim)
+                .and_then(|r| r.strip_prefix("sum(answer)"))
+                .map(str::trim)
+                .and_then(|r| r.strip_prefix("is "))
+                .map(str::trim)
+            && let Some((cond, plus)) = first.split_once("->")
+            && let Some(rest) = cond.trim().strip_prefix("position")
+            && let Some(rest) = rest.trim().strip_prefix("<=")
+            && let Some((t, sum_e)) = rest.split_once(" - ")
+            && t.trim() == target
+            && let Some(e) = sum_e
+                .trim()
+                .strip_prefix("sum(")
+                .and_then(|r| r.strip_suffix(')'))
+            && let Some(e_plus) = plus.trim().strip_suffix("+ 1")
+            && e_plus.trim() == e.trim()
+            && second
+                .strip_prefix("else")
+                .map(|r| r.trim().trim_start_matches("->").trim())
+                == Some(e.trim())
+        {
+            return Ok(format!(
+                "promise sum({e}) <= {target} and {target} <= sum({e}) + {length}"
+            ));
         }
         let mut text = text.to_string();
         for f in ["sum", "min", "max"] {
@@ -457,10 +502,44 @@ fn split(
                             "line {line_no}: `sum(...)` must use one of the lists, like `sum(prices)`"
                         ));
                     }
-                    let nested = sums
-                        .iter()
-                        .enumerate()
-                        .any(|(k, (g, _))| mentions(inner, &format!("{}{}", g.word(), k + 1)));
+                    // `sum(total * w / sum(w))`: the inner `sum(w)` of a plain
+                    // list is added up first and given to this item as `sumJ`
+                    // (two loops, `single_le_sum`).
+                    let mut inner = inner.to_string();
+                    let mut uses = Vec::new();
+                    if fold == Fold::Sum && !signed && inner.contains("sum(") {
+                        let mut found = Vec::new();
+                        replace_calls(&inner, "sum", &mut |x| {
+                            found.push(x.to_string());
+                            Ok(String::new())
+                        })?;
+                        if found.iter().all(|x| lists.contains(&x.as_str())) {
+                            for list in &found {
+                                let j = match sums
+                                    .iter()
+                                    .position(|(g, s)| *g == Fold::Sum && s == list)
+                                {
+                                    Some(j) => j,
+                                    None => {
+                                        sums.push((Fold::Sum, list.clone()));
+                                        deps.push(Vec::new());
+                                        sums.len() - 1
+                                    }
+                                };
+                                if !uses.contains(&j) {
+                                    uses.push(j);
+                                }
+                            }
+                            inner = replace_calls(&inner, "sum", &mut |x| {
+                                let j = sums.iter().position(|(g, s)| *g == Fold::Sum && s == x);
+                                Ok(format!("sum{}", j.unwrap_or(0) + 1))
+                            })?;
+                        }
+                    }
+                    let inner = inner.as_str();
+                    let nested = sums.iter().enumerate().any(|(k, (g, _))| {
+                        !uses.contains(&k) && mentions(inner, &format!("{}{}", g.word(), k + 1))
+                    });
                     if nested
                         || mentions(inner, length)
                         || inner.contains("sum(")
@@ -474,6 +553,7 @@ fn split(
                         Some(k) => k,
                         None => {
                             sums.push((fold, inner.to_string()));
+                            deps.push(uses);
                             sums.len() - 1
                         }
                     };
@@ -598,6 +678,7 @@ fn split(
             });
         if fits {
             sums.push((Fold::Sum, list.to_string()));
+            deps.push(Vec::new());
         }
     }
 
@@ -613,13 +694,75 @@ fn split(
         ));
     }
 
+    // `sum(T * w / sum(w))` with every weight at least 0: each share is at
+    // most `T` (the item rule promises it), the shares add up to at most `T`
+    // (`share_le`) and, with an item, more than `T - n` (`share_ge`).
+    let shares: Vec<Option<String>> = sums
+        .iter()
+        .zip(&deps)
+        .map(|((fold, inner), uses)| {
+            let compact: String = inner.split_whitespace().collect();
+            let [j] = uses.as_slice() else { return None };
+            let (top, by) = compact.split_once('/')?;
+            let (a, b) = top.split_once('*')?;
+            let list = &sums[*j].1;
+            let total = if a == list {
+                b
+            } else if b == list {
+                a
+            } else {
+                return None;
+            };
+            (*fold == Fold::Sum && by == format!("sum{}", j + 1) && scalars.contains(&total))
+                .then(|| total.to_string())
+        })
+        .collect();
+
     // Item rules, then their answer ranges.
     let items: Vec<String> = (1..=sums.len())
         .map(|k| format!("{}__item{k}", head.name))
         .collect();
     let mut item_source = String::new();
-    for (name, (_, inner)) in items.iter().zip(&sums) {
-        item_source += &item_rule(name, inner);
+    for ((name, (_, inner)), uses) in items.iter().zip(&sums).zip(&deps) {
+        if uses.is_empty() {
+            item_source += &item_rule(name, inner);
+            continue;
+        }
+        // An item taking `sumJ`: every item is at most the sum of its list
+        // (`single_le_sum`, items at least 0), and the sum stays in range.
+        let mut params: Vec<String> = all.iter().map(|p| p.to_string()).collect();
+        let mut extra = String::new();
+        for &j in uses {
+            let list = &sums[j].1;
+            let (_, hi) = crate::parse_module(&item_rule("probe", list))
+                .map_err(|error| format!("line {first_line}: {error}"))
+                .and_then(|m| check_ranges(&m.contracts[0], &[]))?;
+            let name = format!("sum{}", j + 1);
+            extra += &format!(
+                "  need {name} >= {list} and {name} <= {}\n",
+                hi * i128::from(max)
+            );
+            params.push(name);
+        }
+        // The Lean proof of that promise uses `mul_div_le` (issue #215) when
+        // the share is written `total * weights / sum(weights)`.
+        let promise = match &shares[items.iter().position(|i| i == name).unwrap_or(0)] {
+            Some(total) => {
+                let compact: String = inner.split_whitespace().collect();
+                let hint = match uses.as_slice() {
+                    [j] if compact.starts_with(&format!("{total}*")) => {
+                        format!("  hint mul_div_le({total}, {}, sum{})\n", sums[*j].1, j + 1)
+                    }
+                    _ => String::new(),
+                };
+                format!("  promise answer <= {total}\n{hint}")
+            }
+            None => String::new(),
+        };
+        item_source += &format!(
+            "\n{name}({}){suffix}\n{needs}{extra}  always -> {inner}\n{promise}",
+            params.join(", ")
+        );
     }
     let mut bounds = String::new();
     if !sums.is_empty() {
@@ -650,6 +793,13 @@ fn split(
                 }
                 continue;
             }
+            let k = results.iter().position(|r| r == s).unwrap_or(0);
+            let hi = match &shares[k] {
+                Some(t) => crate::parse_module(&item_rule("probe", t))
+                    .and_then(|m| check_ranges(&m.contracts[0], &[]))
+                    .map_or(hi, |(_, t_hi)| hi.min(t_hi)),
+                None => hi,
+            };
             let (total_lo, total_hi) = total(lo, hi);
             if total_lo < low || total_hi > high {
                 let reach = if total_hi > high { total_hi } else { total_lo };
@@ -688,6 +838,13 @@ fn split(
         }
         bounds += &format!(" and {} is {}", sides[0].join(" + "), sides[1].join(" + "));
     }
+    for (k, share) in shares.iter().enumerate() {
+        let Some(total) = share else { continue };
+        bounds += &format!(" and {} <= {total}", results[k]);
+        if least >= 1 {
+            bounds += &format!(" and {total} + 1 <= {} + {length}", results[k]);
+        }
+    }
     let indent = {
         let raw = &block[limit_offset];
         raw[..raw.len() - raw.trim_start().len()].to_string()
@@ -698,6 +855,10 @@ fn split(
         .map(|s| s.to_string())
         .collect();
     core_params.push(length.to_string());
+    if position {
+        core_params.push("position".to_string());
+        core[limit_offset] += &format!(" and position >= 1 and position <= {length}");
+    }
     core_params.extend(results);
     core[0] = format!("{}__core({}){suffix}", head.name, core_params.join(", "));
     Ok((
@@ -711,6 +872,8 @@ fn split(
             max,
             least,
             each,
+            uses: deps,
+            position,
         },
     ))
 }
@@ -747,6 +910,30 @@ mod tests {
         assert!(
             error("share(weights[n], total)\n  need n <= 50\n  need weights <= 1000\n  need total <= 1000000\n  always -> total * weights / sum(weights)\n  promise sum(answer) >= 0\n")
                 .contains("may divide by 0")
+        );
+    }
+
+    #[test]
+    fn position_needs_a_list_answer() {
+        assert!(
+            error(
+                "f(a[n])\n  need n <= 5\n  need a <= 10\n  position <= 2 -> sum(a)\n  else -> 0\n"
+            )
+            .contains("only works when the answer is a list")
+        );
+    }
+
+    #[test]
+    fn an_exact_total_needs_the_rest_given_out_one_each() {
+        let rule = "split(weights[n], total)\n  need n <= 50\n  need n >= 1\n  need weights >= 1 and weights <= 1000\n  need total <= 1000000\n";
+        let core = parse_module(&format!("{rule}  position <= total - sum(total * weights / sum(weights)) -> total * weights / sum(weights) + 1\n  else -> total * weights / sum(weights)\n  promise sum(answer) is total\n")).unwrap();
+        let list = core.contracts.iter().find_map(|c| c.list.clone()).unwrap();
+        assert!(list.position);
+        assert_eq!(list.uses, vec![vec![], vec![0]]);
+        // Two of each extra unit is not the rule `alloc_sum` proves.
+        assert!(
+            error(&format!("{rule}  position <= total - sum(total * weights / sum(weights)) -> total * weights / sum(weights) + 2\n  else -> total * weights / sum(weights)\n  promise sum(answer) is total\n"))
+                .contains("needs one `always -> ...` line")
         );
     }
 

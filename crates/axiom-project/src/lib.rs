@@ -1141,6 +1141,13 @@ fn expand_contract(
         .iter()
         .map(|expr| expand_expr(expr, scope, definitions, scopes, cache, stack))
         .collect::<Result<_, _>>()?;
+    for hint in &mut linked.hints {
+        hint.args = hint
+            .args
+            .iter()
+            .map(|expr| expand_expr(expr, scope, definitions, scopes, cache, stack))
+            .collect::<Result<_, _>>()?;
+    }
     stack.pop();
     cache.insert(key.clone(), linked.clone());
     Ok(linked)
