@@ -266,6 +266,7 @@ impl<'a> Parser<'a> {
             wide: false,
             list: None,
             hints: Vec::new(),
+            repeat: None,
         })
     }
 
@@ -388,6 +389,7 @@ impl<'a> Parser<'a> {
             wide: false,
             list: None,
             hints,
+            repeat: None,
         })
     }
 

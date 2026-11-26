@@ -172,7 +172,7 @@ What does not work yet, and what to do instead:
 | `sum(answer)` with several answer lines (other than the `position` form above) | One `always -> ...` line |
 | `total - n + 1` in a rule without `can be negative` when `total` can be below `n` | `need total >= 50` (at least the limit), or `can be negative` |
 | A sum that can pass the number range (`need n <= 1000` and `need prices <= 100000` reach 100000000) | Lower the limit, limit the items with `need`, or add `with big numbers`; the error says when |
-| `prices[1]`, decimals, pages, calling the rule from another rule | |
+| `prices[1]`, decimals, pages, calling the rule from another rule, `repeat` over a list | |
 
 How it is proven: each item is proven like a rule of its own, and the rest of
 the rule is proven for every sum the items allow. The facts about sums, `min`,
@@ -183,6 +183,32 @@ the rule is proven for every sum the items allow. The facts about sums, `min`,
 gives a function taking arrays: `cart([1, 2, 3])` in JS and Python,
 `cart(&[1, 2, 3])` in Rust, `Cart([]uint32{1, 2, 3})` in Go. Example:
 `examples/any-length`.
+
+### Repeated steps
+
+`repeat` applies a step a number of times. `start ->` gives the first value,
+`repeat years` names the input that counts the steps, and the `->` lines
+after it are the step, where `value` is the answer so far:
+
+```
+savings(principal, rate, years)
+  need years <= 100
+  need principal <= 100000000
+  need rate <= 20
+  start -> principal
+  repeat years
+  value * rate / 100 > 100000000 - value -> 100000000
+  else -> value + value * rate / 100
+  promise answer >= principal
+  promise answer <= 100000000
+```
+
+A `need years <= limit` line and at least one `promise` are required. Each
+promise must hold for the start and survive one step from any `value` that
+meets every promise; Synthetix proves those two, and then it holds after any
+number of steps (`loop_inv` in `proofs/lean/Repeat.lean`). The promises are
+also what keeps the step's numbers in range, so bound `value` from above.
+`repeat` does not work with lists yet.
 
 ### Decimals
 

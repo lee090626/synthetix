@@ -278,6 +278,12 @@ pub fn emit_modules(
             js += &function;
             dts += &declaration;
         }
+        if let Some(rule) = &contract.repeat {
+            let (function, declaration) = repeat_wrapper(contract, rule)?;
+            js += "\n";
+            js += &function;
+            dts += &declaration;
+        }
     }
     if let Some((function, declaration)) = settle_wrapper(&contracts) {
         js += "\n";
@@ -341,6 +347,41 @@ fn settle_wrapper(all: &[&Contract]) -> Option<(String, String)> {
             list.join(" or ")
         ),
         "export function settle(owe: number[]): number[];\n".to_string(),
+    ))
+}
+
+/// `savings(principal, rate, years)` for a `repeat` rule: the start, then the
+/// step `years` times. Every promise holds after each step
+/// (`proofs/lean/Repeat.lean`).
+fn repeat_wrapper(
+    step: &Contract,
+    rule: &axiom_parser::RepeatRule,
+) -> Result<(String, String), String> {
+    let inputs = &step.params[..step.params.len() - 1];
+    let args: Vec<String> = (0..inputs.len()).map(|i| format!("p{i}")).collect();
+    let mut typed = Vec::new();
+    for (i, param) in inputs.iter().enumerate() {
+        typed.push(format!("p{i}: {}", ts_type(&param.ty, step.wide)?));
+    }
+    let ret = ts_type(&step.return_type, step.wide)?;
+    let zero = if step.wide { "0n" } else { "0" };
+    let one = if step.wide { "1n" } else { "1" };
+    Ok((
+        format!(
+            "export function {}({}) {{\n  let value = {}({});\n  for (let i = {zero}; i < p{}; i += {one}) value = {}({}, value);\n  return value;\n}}\n",
+            rule.name,
+            args.join(", "),
+            rule.start,
+            args.join(", "),
+            rule.count,
+            step.name,
+            args.join(", "),
+        ),
+        format!(
+            "export function {}({}): {ret};\n",
+            rule.name,
+            typed.join(", ")
+        ),
     ))
 }
 

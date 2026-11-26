@@ -171,6 +171,23 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
             out += "\n\n";
             out += &any_length_wrapper(contract, rule);
         }
+        if let Some(rule) = &contract.repeat {
+            let names: Vec<String> = contract.params[..contract.params.len() - 1]
+                .iter()
+                .map(|p| ident(&p.name))
+                .collect();
+            // The start, then the step `count` times (`proofs/lean/Repeat.lean`).
+            out += &format!(
+                "\n\ndef {}({}):\n    value = {}({})\n    for _ in range({}):\n        value = {}({}, value)\n    return value\n",
+                ident(&rule.name),
+                names.join(", "),
+                ident(&rule.start),
+                names.join(", "),
+                names[rule.count],
+                ident(&contract.name),
+                names.join(", "),
+            );
+        }
     }
     let sizes = settle_sizes(&contracts);
     if !sizes.is_empty() {

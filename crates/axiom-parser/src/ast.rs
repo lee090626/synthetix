@@ -114,6 +114,22 @@ pub struct Contract {
     /// `hint mul_div_le(a, b, c)` lines: proven facts the Lean proof uses
     /// (issue #215). Z3 and synthesis ignore them.
     pub hints: Vec<Hint>,
+    /// Set on the step of a `repeat` rule (issue #214).
+    pub repeat: Option<RepeatRule>,
+}
+
+/// A rule that applies a step a number of times (`repeat years`, issue
+/// #214), split into `name__start(inputs)` and `name__step(inputs, value)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepeatRule {
+    /// The rule name the user wrote.
+    pub name: String,
+    /// The start rule's name.
+    pub start: String,
+    /// Which input is the number of steps.
+    pub count: usize,
+    /// The `need count <= max` limit.
+    pub max: u64,
 }
 
 /// A `hint` line: a lemma from `axiom_verify::lean::LEMMAS` and its arguments.

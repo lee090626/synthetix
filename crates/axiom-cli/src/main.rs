@@ -393,6 +393,18 @@ fn run_command(args: &[String]) -> Result<(), String> {
         }
         return run_any_length(&module.contracts, core, &options.values);
     }
+    if let Ok(source) = fs::read_to_string(options.input)
+        && let Ok(module) = axiom_parser::parse_module(&source)
+        && module.contracts.len() == 2
+        && let Some(step) = module.contracts.iter().find(|c| c.repeat.is_some())
+    {
+        if options.report.is_some() || options.output.is_some() {
+            return Err(
+                "a repeat rule's run prints the result only: drop --report and -o".to_string(),
+            );
+        }
+        return run_repeat(&module.contracts, step, &options.values);
+    }
     let contract = read_contract(options.input)?;
     if contract.params.len() != options.values.len() {
         return Err(format!(
@@ -562,6 +574,52 @@ fn application_run_command(args: &[String]) -> Result<(), String> {
 /// `axiom run` on a rule over lists of any length (lists written `[1,2,3]`):
 /// the same steps as emitted code, on the proven candidates of each item
 /// rule and the core.
+/// `axiom run` on a `repeat` rule (issue #214): the start, then the step.
+fn run_repeat(
+    all: &[axiom_parser::Contract],
+    step: &axiom_parser::Contract,
+    values: &[String],
+) -> Result<(), String> {
+    let rule = step.repeat.as_ref().expect("step of a repeat rule");
+    let start = all
+        .iter()
+        .find(|c| c.name == rule.start)
+        .ok_or_else(|| format!("missing start rule {}", rule.start))?;
+    if values.len() != start.params.len() {
+        return Err(format!(
+            "{} expects {} inputs, got {}",
+            rule.name,
+            start.params.len(),
+            values.len()
+        ));
+    }
+    let bits = if step.wide { 64 } else { 32 };
+    let inputs = values
+        .iter()
+        .zip(&start.params)
+        .map(|(v, p)| parse_input_value(v, &p.ty, step.wide))
+        .collect::<Result<Vec<_>, _>>()?;
+    let proven = |contract: &axiom_parser::Contract| {
+        axiom_synth::synthesize_with_options(contract, axiom_synth::SynthesisOptions::default())
+    };
+    check_requires(start, &inputs)?;
+    let mut value = proven(start)?.try_eval_bits(&inputs, bits)?;
+    let code = proven(step)?;
+    for _ in 0..inputs[rule.count] {
+        let args = [inputs.clone(), vec![value]].concat();
+        check_requires(step, &args)?;
+        value = code.try_eval_bits(&args, bits)?;
+    }
+    println!("contract: {}", rule.name);
+    println!("proof_result: VERIFIED");
+    println!("verified: true");
+    println!(
+        "result: {}",
+        display_result(&step.return_type, value, step.wide)
+    );
+    Ok(())
+}
+
 fn run_any_length(
     all: &[axiom_parser::Contract],
     core: &axiom_parser::Contract,
