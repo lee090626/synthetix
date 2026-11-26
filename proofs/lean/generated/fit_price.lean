@@ -7,9 +7,9 @@ set_option maxHeartbeats 0
 /-- The `need` lines are defined for every input. -/
 theorem x_fit_price_needs_defined (x_price x_min x_max : BitVec 32) :
     (!true || (true && true)) = true := by
-  bv_decide
+  bv_decide (config := { timeout := 120 })
 
 /-- When the `need` lines hold, the answer is defined and keeps every promise. -/
 theorem x_fit_price_proved (x_price x_min x_max : BitVec 32) :
     (!(true && (BitVec.ule x_min x_max)) || (((true && true) && (bif (BitVec.ult x_price x_min) then true else ((true && true) && (bif (BitVec.ult x_max x_price) then true else true)))) && (true && ((true && true) && (bif (BitVec.ult x_price x_min) then true else ((true && true) && (bif (BitVec.ult x_max x_price) then true else true))))) && ((bif (BitVec.ult x_price x_min) then x_min else (bif (BitVec.ult x_max x_price) then x_max else x_price)) == (bif (BitVec.ult x_price x_min) then x_min else (bif (BitVec.ult x_max x_price) then x_max else x_price))))) = true := by
-  bv_decide
+  bv_decide (config := { timeout := 120 })

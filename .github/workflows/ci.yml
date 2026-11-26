@@ -57,3 +57,27 @@ jobs:
           lean Repeat.lean
           for f in generated/*.lean; do lean "$f"; done
           ! grep -rn "sorry" --include="*.lean" .
+
+  lean-examples:
+    name: lean examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+      - name: Install elan
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain "$(cat proofs/lean/lean-toolchain)"
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Build axiom
+        run: cargo build --locked -p axiom-cli
+      # Every example rule must be proven by Lean, not only by Z3 (issue #211).
+      - name: Prove every example with Lean
+        run: |
+          for config in examples/*/synthetix.toml; do
+            dir=$(dirname "$config")
+            echo "== $dir"
+            (cd "$dir" && "$GITHUB_WORKSPACE/target/debug/axiom" build --lean)
+          done

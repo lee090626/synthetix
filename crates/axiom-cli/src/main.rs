@@ -1295,10 +1295,17 @@ fn prove_with_lean(
         println!("wrote: {}", path.display());
     }
     println!("lean_result: {}", outcome.line());
-    if let lean::Outcome::Failed(output) = outcome {
-        return Err(format!("Lean did not accept {}:\n{output}", path.display()));
+    match outcome {
+        lean::Outcome::Failed(output) => {
+            Err(format!("Lean did not accept {}:\n{output}", path.display()))
+        }
+        // With `--lean`, only proofs Lean checked pass.
+        lean::Outcome::NotCovered(_) | lean::Outcome::Unproven => Err(format!(
+            "Lean did not prove {}; a `hint` line can help (docs/writing-specs.md, \"Proving with Lean\")",
+            contract.name
+        )),
+        lean::Outcome::Proved | lean::Outcome::Skipped => Ok(()),
     }
-    Ok(())
 }
 
 fn parse_build_args(args: &[String]) -> Result<BuildArgs<'_>, String> {
