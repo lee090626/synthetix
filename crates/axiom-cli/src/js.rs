@@ -218,7 +218,7 @@ fn check_for(name: &str, ty: &Type, var: &str, wide: bool) -> Result<String, Str
             "  if (typeof {var} !== \"bigint\" || {var} < -0x8000000000000000n || {var} > 0x7fffffffffffffffn) throw new TypeError(\"{name}: expected i64 bigint\");\n"
         ),
         Type::U32 => format!(
-            "  if (!Number.isInteger({var}) || {var} < 0 || {var} > 0xffffffff) throw new TypeError(\"{name}: expected u32\");\n"
+            "  if (typeof {var} !== \"number\" || ({var} >>> 0) !== {var}) throw new TypeError(\"{name}: expected u32\");\n"
         ),
         Type::I32 => format!(
             "  if (!Number.isInteger({var}) || {var} < -0x80000000 || {var} > 0x7fffffff) throw new TypeError(\"{name}: expected i32\");\n"
