@@ -37,8 +37,12 @@ does not. The detailed rules are in [semantics.md](semantics.md) and
 - **Some number forms do not mix.** A button passes values only to a rule with
   the same decimal places, and a rule uses a rule from another file only with
   the same places; pages calculate only with values that cannot be negative.
-- **Text answers are for pages.** A rule with text answers cannot be used by
-  another rule, and `contracts.js` returns the answer's position, not the text.
+- **Text answers are for pages.** A rule with text answers that are not in a
+  `type` cannot be used by another rule, and `contracts.js` returns the answer's
+  position, not the text. Texts in a `type` (`type Grade = "A" | "B"`) can be
+  used by rules, and a page reaches them through a text state (see
+  writing-specs.md). The browser maps that text to its place; the mapping is
+  tested, not proven.
 - **Settling is not the fewest transfers.** `settle` uses at most n - 1
   transfers, not always the fewest. Its proof is in Lean and covers the formula;
   that the generated code matches the formula is checked by tests, not proven.

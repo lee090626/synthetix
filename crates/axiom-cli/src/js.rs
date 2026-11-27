@@ -307,7 +307,7 @@ pub fn emit_modules(
             .values
             .iter()
             .enumerate()
-            .map(|(at, value)| format!("{value}: {at}{big}"))
+            .map(|(at, value)| format!("{}: {at}{big}", axiom_parser::value_ident(value)))
             .collect();
         js += &format!(
             "\n/** Values of `type {}`: each is its place, from 0. */\nexport const {} = Object.freeze({{ {} }});\n",

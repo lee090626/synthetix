@@ -129,6 +129,63 @@ impl Types {
     }
 }
 
+/// The values after `=`: split at `|`, except inside quoted texts.
+fn split_values(text: &str) -> Vec<String> {
+    let mut values = vec![String::new()];
+    let mut quoted = false;
+    for c in text.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                values.last_mut().unwrap().push(c);
+            }
+            '|' if !quoted => values.push(String::new()),
+            _ => values.last_mut().unwrap().push(c),
+        }
+    }
+    values.into_iter().map(|v| v.trim().to_string()).collect()
+}
+
+/// A text value of a choice: `"A"`, written in quotes.
+fn is_text(value: &str) -> bool {
+    value.len() >= 2 && value.starts_with('"') && value.ends_with('"')
+}
+
+/// The text a choice value shows: `A` for `"A"`, the name itself otherwise.
+pub fn value_text(value: &str) -> &str {
+    if is_text(value) {
+        &value[1..value.len() - 1]
+    } else {
+        value
+    }
+}
+
+/// The name generated code gives a choice value: a name stays as written,
+/// a text is kept when it is ASCII, else every other character is spelled
+/// in hex (`T_uD569_`), so each text gets its own name.
+pub fn value_ident(value: &str) -> String {
+    if !is_text(value) {
+        return value.to_string();
+    }
+    let text = value_text(value);
+    let plain = text
+        .chars()
+        .enumerate()
+        .all(|(i, c)| c == '_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit()));
+    if plain && !text.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::from("T");
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            out.push(c);
+        } else {
+            out += &format!("_u{:X}_", c as u32);
+        }
+    }
+    out
+}
+
 fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
@@ -559,15 +616,28 @@ fn read_types(lines: &mut [String]) -> Result<Types, String> {
         let line_no = index + 1;
         lines[index].clear();
         let (name, def) = if let Some((name, values)) = rest.split_once('=') {
-            let values: Vec<String> = values.split('|').map(|v| v.trim().to_string()).collect();
+            let values: Vec<String> = split_values(values);
             if values.iter().any(String::is_empty) {
                 return Err(error(
                     line_no,
                     "write a choice as `type Size = small | medium | large`",
                 ));
             }
+            let texts = values.iter().filter(|v| is_text(v)).count();
+            if texts != 0 && texts != values.len() {
+                return Err(error(
+                    line_no,
+                    "a choice holds either names or quoted texts, not both",
+                ));
+            }
             for value in &values {
-                check_name(value, line_no)?;
+                if is_text(value) {
+                    if value[1..value.len() - 1].trim().is_empty() {
+                        return Err(error(line_no, "a text value cannot be empty"));
+                    }
+                } else {
+                    check_name(value, line_no)?;
+                }
                 if RESERVED.contains(&value.as_str()) {
                     return Err(error(
                         line_no,
@@ -1138,7 +1208,17 @@ fn rewrite(
     let mut quoted = false;
     while i < chars.len() {
         let c = chars[i];
-        if c == '"' {
+        if c == '"' && !quoted {
+            // A quoted text that is a value of a choice is its place.
+            let close = chars[i + 1..].iter().position(|c| *c == '"');
+            if let Some(close) = close {
+                let text: String = chars[i..=i + 1 + close].iter().collect();
+                if let Some((_, at)) = types.value(&text) {
+                    out += &place(at, places);
+                    i += close + 2;
+                    continue;
+                }
+            }
             quoted = !quoted;
         }
         if quoted || !is_word(c) {

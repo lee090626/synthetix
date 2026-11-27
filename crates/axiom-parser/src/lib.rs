@@ -8,6 +8,7 @@ mod recursion;
 mod repeat;
 pub mod simple;
 mod types;
+pub use types::{value_ident, value_text};
 
 pub use ast::*;
 pub use lexer::Lexer;

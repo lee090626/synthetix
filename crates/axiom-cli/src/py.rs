@@ -222,7 +222,7 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
             choice.name
         );
         for (at, value) in choice.values.iter().enumerate() {
-            out += &format!("    {} = {at}\n", ident(value));
+            out += &format!("    {} = {at}\n", ident(&axiom_parser::value_ident(value)));
         }
     }
     Ok(out)

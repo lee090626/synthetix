@@ -272,6 +272,30 @@ grade(score)
 Every `->` line then needs a text answer. A page shows it (below); other rules
 cannot use it.
 
+To use texts in rules, name them in a type. Each text is a value, like a
+word value, so it is proven like any choice:
+
+```
+type Grade = "A" | "B" | "C"
+
+bonus(grade: Grade)
+  grade is "A" -> 10
+  grade is "B" -> 5
+  else -> 0
+```
+
+`bonus("B")` gives 5. A `->` line that answers a text of the type makes the
+rule answer that type, so another rule can use it. A type holds either words
+or quoted texts, not both. A text may hold `|`. Texts are fixed in the type: a
+rule cannot take any text.
+
+A page uses it with a text state: `save grade = ""` and `ask "Grade" for grade`
+show a box of the values (the first line is blank), and `result = bonus(grade)`
+passes the chosen text. A literal works too: `result = bonus("B")`. A text that
+is not a value is an error. A state given
+to two types is an error. The page passes the value's place, which the browser
+maps from the text; that mapping is checked by tests, not proven.
+
 ### Types
 
 `type` declares a **choice** (one of a few named values) or a **record**
@@ -363,7 +387,6 @@ More types:
 | A record answer whose field is a record | Answer the inner record from its own rule |
 | Lists of a fixed size holding a type (`sizes[3]: Size`) | A list of any length (`sizes[n]`) |
 | A promise about `sum(lines.price * lines.qty)` (as for two lists, above) | A promise that follows from the ranges |
-| Types on pages | A rule that takes numbers |
 
 ### Numbers must stay in range
 

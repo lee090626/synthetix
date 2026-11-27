@@ -524,14 +524,14 @@ fn run_command(args: &[String]) -> Result<(), String> {
     if values.len() == 1 {
         println!(
             "input: {}",
-            shown(&contract, &contract.params[0].ty, values[0])
+            shown_input(&contract, &contract.params[0], values[0])
         );
     } else {
         let inputs = contract
             .params
             .iter()
             .zip(&values)
-            .map(|(param, value)| shown(&contract, &param.ty, *value))
+            .map(|(param, value)| shown_input(&contract, param, *value))
             .collect::<Vec<_>>();
         println!("inputs: {inputs:?}");
     }
@@ -584,7 +584,10 @@ fn application_run_command(args: &[String]) -> Result<(), String> {
 /// The value name of a choice answer (`large` for 2).
 fn choice_name(contract: &axiom_parser::Contract, answer: u64) -> Option<String> {
     let choice = contract.answer_choice.as_ref()?;
-    choice.values.get(usize::try_from(answer).ok()?).cloned()
+    choice
+        .values
+        .get(usize::try_from(answer).ok()?)
+        .map(|v| axiom_parser::value_text(v).to_string())
 }
 
 /// A choice value typed by name (`large`) as its place (`2`, issue #226).
@@ -596,7 +599,11 @@ fn choice_value(
     let Some((_, choice)) = contract.choices.iter().find(|(name, _)| name == input) else {
         return Ok(token.to_string());
     };
-    match choice.values.iter().position(|v| v == token) {
+    match choice
+        .values
+        .iter()
+        .position(|v| v == token || axiom_parser::value_text(v) == token)
+    {
         Some(at) => Ok(at.to_string()),
         None if token.parse::<u64>().is_ok() => Ok(token.to_string()),
         None => Err(format!(
@@ -800,6 +807,26 @@ fn check_requires(contract: &axiom_parser::Contract, values: &[u64]) -> Result<(
 }
 
 /// A value as written in the rule: with its decimal places (`12.50`).
+/// An input as the user typed it: a choice input shows its value's text
+/// (`B`, `large`), other inputs their number.
+fn shown_input(
+    contract: &axiom_parser::Contract,
+    param: &axiom_parser::Param,
+    value: u64,
+) -> String {
+    if let Some((_, choice)) = contract
+        .choices
+        .iter()
+        .find(|(name, _)| name == &param.name)
+        && let Some(v) = choice
+            .values
+            .get(usize::try_from(value).unwrap_or(usize::MAX))
+    {
+        return axiom_parser::value_text(v).to_string();
+    }
+    shown(contract, &param.ty, value)
+}
+
 fn shown(contract: &axiom_parser::Contract, ty: &axiom_parser::Type, value: u64) -> String {
     let text = display_result(ty, value, contract.wide);
     let places = contract.decimals as usize;
@@ -945,7 +972,7 @@ pub(crate) fn print_unreachable_rules(contract: &axiom_parser::Contract) {
         let args: Vec<String> = args
             .iter()
             .zip(&contract.params)
-            .map(|(value, param)| shown(contract, &param.ty, u64::from(*value)))
+            .map(|(value, param)| shown_input(contract, param, u64::from(*value)))
             .collect();
         let answer = match contract.labels.get(answer as usize) {
             Some(label) => format!("{label:?}"),
