@@ -18,7 +18,10 @@
 //! `max_bounds`).
 //! Emitted code runs that loop, then calls the core.
 
+use std::collections::BTreeMap;
+
 use crate::ast::{BinaryOp, Fold, ListRule, SpecExpr};
+use crate::repeat::rename;
 use crate::simple::{check_ranges, strip_comment};
 
 /// The rewritten source (same lines, item rules appended) and, for each
@@ -116,6 +119,8 @@ struct Head {
     length: String,
     /// Text after `)`: `can be negative`, `with big numbers`.
     suffix: String,
+    /// Hidden `need`s on list items (`crate::types`: a list of choices).
+    item_marks: Vec<String>,
 }
 
 /// Reads a name line; `None` unless an input is a list of any length.
@@ -153,6 +158,18 @@ fn head(line: &str, line_no: usize) -> Result<Option<Head>, String> {
             "line {line_no}: a rule with a list of any length cannot have decimals yet"
         ));
     }
+    // Hidden `need`s about a list hold for each item; others stay on the name line.
+    let mut marks = suffix.split(crate::types::NEED_MARK);
+    let mut suffix = marks.next().unwrap_or_default().to_string();
+    let mut item_marks = Vec::new();
+    for mark in marks {
+        if out.iter().any(|(p, list)| *list && mentions(mark, p)) {
+            item_marks.push(mark.trim().to_string());
+        } else {
+            suffix += crate::types::NEED_MARK;
+            suffix += mark;
+        }
+    }
     if out.iter().any(|(p, _)| *p == length) {
         return Err(format!(
             "line {line_no}: `{length}` is the length of the lists; give the input another name"
@@ -163,6 +180,7 @@ fn head(line: &str, line_no: usize) -> Result<Option<Head>, String> {
         params: out,
         length,
         suffix: suffix.trim().to_string(),
+        item_marks,
     }))
 }
 
@@ -235,8 +253,38 @@ fn times(length: &str, v: i128) -> String {
 
 pub(crate) fn expand(source: &str) -> Result<Option<Expanded>, String> {
     let mut lines: Vec<String> = source.lines().map(String::from).collect();
+    let blocks = top_blocks(&lines)?;
+    let callees = callees_of(&lines, &blocks)?;
+    if !callees.is_empty() {
+        for (start, end, head) in &blocks {
+            let lists = list_names(&head.params);
+            for line in &mut lines[start + 1..*end] {
+                *line = rewrite_calls(line, &lists, &head.name, &callees)?;
+            }
+        }
+    }
     let mut appended = String::new();
     let mut rules = Vec::new();
+    for (start, end, head) in blocks {
+        let (item_rules, core_text, rule) = split(&head, &lines[start..end], start + 1)?;
+        for (offset, line) in core_text.into_iter().enumerate() {
+            lines[start + offset] = line;
+        }
+        appended += &item_rules;
+        rules.push((format!("{}__core", head.name), rule));
+    }
+    if rules.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Expanded {
+        source: lines.join("\n") + "\n" + &appended,
+        rules,
+    }))
+}
+
+/// Top-level list rules: first line, end line (exclusive) and head.
+fn top_blocks(lines: &[String]) -> Result<Vec<(usize, usize, Head)>, String> {
+    let mut blocks = Vec::new();
     let mut index = 0;
     while index < lines.len() {
         let text = strip_comment(&lines[index]).to_string();
@@ -263,21 +311,152 @@ pub(crate) fn expand(source: &str) -> Result<Option<Expanded>, String> {
             }
             end += 1;
         }
-        let (item_rules, core_text, rule) = split(&head, &lines[start..end], start + 1)?;
-        for (offset, line) in core_text.into_iter().enumerate() {
-            lines[start + offset] = line;
-        }
-        appended += &item_rules;
-        rules.push((format!("{}__core", head.name), rule));
+        blocks.push((start, end, head));
         index = end;
     }
-    if rules.is_empty() {
-        return Ok(None);
+    Ok(blocks)
+}
+
+fn list_names(params: &[(String, bool)]) -> Vec<&str> {
+    params
+        .iter()
+        .filter(|(_, list)| *list)
+        .map(|(p, _)| p.as_str())
+        .collect()
+}
+
+/// A list rule that another list rule of this file may call: its inputs, and
+/// the one fold (`sum`, `min` or `max`) its core takes, written in terms of
+/// its list.
+struct Callee {
+    params: Vec<(String, bool)>,
+    list: String,
+    fold: Fold,
+    expr: String,
+}
+
+/// The list rules whose answer is one plain fold (`sum`, `min` or `max`) over
+/// their items (and no `each`/`position`). A caller computes that fold over its
+/// own list and calls the core, so the callee's loop is not repeated per call.
+fn callees_of(
+    lines: &[String],
+    blocks: &[(usize, usize, Head)],
+) -> Result<BTreeMap<String, Callee>, String> {
+    let mut found = BTreeMap::new();
+    for (start, end, head) in blocks {
+        let lists = list_names(&head.params);
+        let [list] = lists.as_slice() else {
+            continue;
+        };
+        let Ok((_, _, rule)) = split(head, &lines[*start..*end], start + 1) else {
+            continue;
+        };
+        let [fold] = rule.folds.as_slice() else {
+            continue;
+        };
+        if rule.each || rule.position || rule.items.len() != 1 {
+            continue;
+        }
+        let mut exprs: Vec<String> = Vec::new();
+        for raw in &lines[start + 1..*end] {
+            replace_calls(strip_comment(raw), fold.word(), &mut |inner: &str| {
+                exprs.push(inner.to_string());
+                Ok(String::new())
+            })?;
+        }
+        exprs.sort();
+        exprs.dedup();
+        let [expr] = exprs.as_slice() else {
+            continue;
+        };
+        if head
+            .params
+            .iter()
+            .filter(|(_, is_list)| !*is_list)
+            .any(|(p, _)| mentions(expr, p))
+        {
+            continue;
+        }
+        found.insert(
+            head.name.clone(),
+            Callee {
+                params: head.params.clone(),
+                list: list.to_string(),
+                fold: *fold,
+                expr: expr.clone(),
+            },
+        );
     }
-    Ok(Some(Expanded {
-        source: lines.join("\n") + "\n" + &appended,
-        rules,
-    }))
+    Ok(found)
+}
+
+/// Rewrites each call `R(args)` to `R__core(scalars, count(list), sum(...))`,
+/// where `list` is a list of the caller and the sum is `R`'s over it. Calls
+/// that do not match stay as written.
+fn rewrite_calls(
+    text: &str,
+    lists: &[&str],
+    own: &str,
+    callees: &BTreeMap<String, Callee>,
+) -> Result<String, String> {
+    let mut out = text.to_string();
+    for (name, callee) in callees {
+        if name == own {
+            continue;
+        }
+        out = replace_calls(&out, name, &mut |inner: &str| {
+            let original = format!("{name}({inner})");
+            let args = top_args(inner);
+            if args.len() != callee.params.len() {
+                return Ok(original);
+            }
+            let mut scalars: Vec<&str> = Vec::new();
+            let mut ours: Option<&str> = None;
+            for ((_, is_list), arg) in callee.params.iter().zip(&args) {
+                if !*is_list {
+                    scalars.push(arg);
+                } else if lists.contains(arg) {
+                    ours = Some(arg);
+                } else {
+                    return Ok(original);
+                }
+            }
+            let Some(list) = ours else {
+                return Ok(original);
+            };
+            let mut core_args: Vec<String> = scalars.iter().map(|s| s.to_string()).collect();
+            core_args.push(format!("count({list})"));
+            core_args.push(format!(
+                "{}({})",
+                callee.fold.word(),
+                rename(&callee.expr, &callee.list, list)
+            ));
+            Ok(format!("{name}__core({})", core_args.join(", ")))
+        })?;
+    }
+    Ok(out)
+}
+
+/// The arguments of a call, split at commas outside parentheses and quotes.
+fn top_args(inner: &str) -> Vec<&str> {
+    let mut args = Vec::new();
+    let mut depth = 0;
+    let mut quoted = false;
+    let mut start = 0;
+    for (i, c) in inner.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '(' if !quoted => depth += 1,
+            ')' if !quoted => depth -= 1,
+            ',' if !quoted && depth == 0 => {
+                args.push(inner[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    args.push(inner[start..].trim());
+    args
 }
 
 /// Splits one list rule (its lines, the first at `first_line`) into the item
@@ -303,7 +482,11 @@ fn split(
     let mut sums: Vec<(Fold, String)> = Vec::new();
     // For each entry of `sums`, the plain list sums its item rule takes.
     let mut deps: Vec<Vec<usize>> = Vec::new();
-    let mut item_needs: Vec<String> = Vec::new();
+    let mut item_needs: Vec<String> = head
+        .item_marks
+        .iter()
+        .map(|m| format!("need {m}"))
+        .collect();
     let mut core = vec![String::new(); block.len()];
     let mut limit: Option<(usize, u64)> = None;
     // `need n >= k`: the sums' plain ranges start at k items, not 0.
@@ -860,7 +1043,20 @@ fn split(
         core[limit_offset] += &format!(" and position >= 1 and position <= {length}");
     }
     core_params.extend(results);
-    core[0] = format!("{}__core({}){suffix}", head.name, core_params.join(", "));
+    // A core run once per item takes the items, and their hidden `need`s.
+    let marks: String = if each {
+        head.item_marks
+            .iter()
+            .map(|m| format!("{}{m}", crate::types::NEED_MARK))
+            .collect()
+    } else {
+        String::new()
+    };
+    core[0] = format!(
+        "{}__core({}){suffix}{marks}",
+        head.name,
+        core_params.join(", ")
+    );
     Ok((
         item_source,
         core,
@@ -967,6 +1163,22 @@ mod tests {
             .find(|c| c.name == "cart__item1")
             .unwrap();
         assert_eq!(item.params.len(), 2);
+    }
+
+    #[test]
+    fn a_call_to_a_list_rule_sums_the_callers_list_once_and_calls_the_core() {
+        let expanded = super::expand(
+            "total(prices[n])\n  need n <= 10\n  need prices <= 1000\n  always -> sum(prices)\n  promise answer <= 10000\n\ncopy(items[n])\n  need n <= 10\n  need items <= 1000\n  always -> total(items) * 2 + total(items)\n  promise answer <= 30000\n",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!expanded.source.contains("total(items)"));
+        let (_, copy) = expanded
+            .rules
+            .iter()
+            .find(|(name, _)| name == "copy__core")
+            .unwrap();
+        assert_eq!(copy.items, ["copy__item1"]);
     }
 
     #[test]

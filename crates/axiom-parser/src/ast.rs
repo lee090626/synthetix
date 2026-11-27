@@ -116,6 +116,33 @@ pub struct Contract {
     pub hints: Vec<Hint>,
     /// Set on the step of a `repeat` rule (issue #214).
     pub repeat: Option<RepeatRule>,
+    /// Inputs that hold a choice (`size: Size`, issue #226): the input's
+    /// name and its type. The value is the choice's place, from 0.
+    pub choices: Vec<(String, ChoiceType)>,
+    /// Set when every answer is a value of one choice (`-> large`): the
+    /// answer is that value's place, from 0.
+    pub answer_choice: Option<ChoiceType>,
+    /// Set on the first field rule of a rule that answers a record
+    /// (`quote(a) -> Bill`): one rule per field, called together.
+    pub record_answer: Option<RecordAnswer>,
+}
+
+/// A rule answering a record (`quote(price) -> Bill`): each field is the
+/// answer of its own rule (`quote__total`), which takes the same inputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordAnswer {
+    pub name: String,
+    pub record: String,
+    /// Field name and the rule that answers it, in field order.
+    pub fields: Vec<(String, String)>,
+}
+
+/// `type Size = small | medium | large` (issue #226).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChoiceType {
+    pub name: String,
+    /// In order; a value is its place here, from 0.
+    pub values: Vec<String>,
 }
 
 /// A rule that applies a step a number of times (`repeat years`, issue
@@ -130,6 +157,9 @@ pub struct RepeatRule {
     pub count: usize,
     /// The `need count <= max` limit.
     pub max: u64,
+    /// Set for a rule that calls itself (`f(n - 1)`): the step takes its
+    /// place, from 0, as the counted input.
+    pub counted: bool,
 }
 
 /// A `hint` line: a lemma from `axiom_verify::lean::LEMMAS` and its arguments.
@@ -191,7 +221,10 @@ impl Fold {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Import {
+    /// Names as the other file declares them.
     pub names: Vec<String>,
+    /// For each name, the name it has here (`fee as price_fee`), if any.
+    pub aliases: Vec<Option<String>>,
     pub path: String,
     pub span: Span,
 }

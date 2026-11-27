@@ -1,0 +1,40 @@
+# 상자 크기: 작음, 보통, 큼
+type Size = small | medium | large
+
+# 주문 한 건
+type Order
+  price
+  quantity
+  size: Size
+
+# 배송비: 크기마다 기본료, 큰 상자는 무게 1kg마다 100원 더함
+shipping(size: Size, weight)
+  need weight <= 100000
+  match size
+    small -> 3000
+    medium -> 5000
+    large -> 5000 + weight / 1000 * 100
+  promise answer >= 3000
+  promise answer <= 15000
+
+# 상품 금액: 값 × 개수
+subtotal(order: Order)
+  need order.price <= 10000000
+  need order.quantity <= 100
+  always -> order.price * order.quantity
+
+# 주문 합계: 10만 원 이상이면 배송비 없음
+total(order: Order, weight)
+  need order.price <= 10000000
+  need order.quantity <= 100
+  need weight <= 100000
+  goods = subtotal(order)
+  goods >= 100000 -> goods
+  else -> goods + shipping(order.size, weight)
+  promise answer >= goods
+  promise answer <= goods + 15000
+
+# 큰 상자만 따로 포장
+wrap_fee(order: Order)
+  order.size is large -> 2000
+  else -> 0

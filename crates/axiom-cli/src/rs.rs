@@ -160,6 +160,10 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
             out += "\n";
             out += &any_length_wrapper(contract, rule)?;
         }
+        if let Some(record) = &contract.record_answer {
+            out += "\n";
+            out += &record_wrapper(contract, record, &contracts)?;
+        }
         if let Some(rule) = &contract.repeat {
             out += "\n";
             out += &repeat_wrapper(contract, rule)?;
@@ -169,6 +173,33 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
     if !sizes.is_empty() {
         out += "\n";
         out += &settle_wrapper(&sizes);
+    }
+    for (choice, uses) in crate::js::choice_types(&contracts)? {
+        let ty = |(ty, wide): &(Type, bool)| match (ty, wide) {
+            (Type::I32, false) => "i32",
+            (Type::I32, true) => "i64",
+            (_, false) => "u32",
+            (_, true) => "u64",
+        };
+        // One number type when every input agrees; else `u8`, which `.into()` widens.
+        let first = ty(&uses[0]);
+        let word = if uses.iter().all(|u| ty(u) == first) {
+            first
+        } else {
+            "u8"
+        };
+        out += &format!(
+            "\n/// Values of `type {}`: each is its place, from 0.\n#[allow(non_snake_case, non_upper_case_globals, dead_code)]\npub mod {} {{\n",
+            choice.name,
+            ident(&choice.name)?
+        );
+        for (at, value) in choice.values.iter().enumerate() {
+            out += &format!(
+                "    pub const {}: {word} = {at};\n",
+                ident(&axiom_parser::value_ident(value))?
+            );
+        }
+        out += "}\n";
     }
     Ok(out)
 }
@@ -342,6 +373,49 @@ fn any_length_wrapper(core: &Contract, rule: &axiom_parser::ListRule) -> Result<
     ))
 }
 
+/// `quote(price, qty)` for a rule answering a record: a struct with each
+/// field from its proven rule.
+fn record_wrapper(
+    first: &Contract,
+    record: &axiom_parser::RecordAnswer,
+    all: &[&Contract],
+) -> Result<String, String> {
+    let mut params = Vec::new();
+    let mut args = Vec::new();
+    for (i, param) in first.params.iter().enumerate() {
+        params.push(format!("p{i}: {}", rs_type(&param.ty, first.wide)?));
+        args.push(format!("p{i}"));
+    }
+    let mut fields = String::new();
+    let mut values = String::new();
+    for (field, rule) in &record.fields {
+        let contract = all
+            .iter()
+            .find(|c| &c.name == rule)
+            .ok_or_else(|| format!("missing `{rule}`"))?;
+        fields += &format!(
+            "    pub {}: {},\n",
+            ident(field)?,
+            rs_type(&contract.return_type, contract.wide)?
+        );
+        values += &format!(
+            "        {}: {}({})?,\n",
+            ident(field)?,
+            ident(rule)?,
+            args.join(", ")
+        );
+    }
+    let name = ident(&record.record)?;
+    Ok(format!(
+        "/// `type {}`, as `{}` answers it.\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {name} {{\n{fields}}}\n\n/// A `{}`: each field from its proven rule.\npub fn {}({}) -> Result<{name}, AxiomError> {{\n    Ok({name} {{\n{values}    }})\n}}\n",
+        record.record,
+        record.name,
+        record.record,
+        ident(&record.name)?,
+        params.join(", "),
+    ))
+}
+
 /// `savings(principal, rate, years)` for a `repeat` rule: the start, then the
 /// step `years` times. Every promise holds after each step
 /// (`proofs/lean/Repeat.lean`).
@@ -355,16 +429,21 @@ fn repeat_wrapper(step: &Contract, rule: &axiom_parser::RepeatRule) -> Result<St
     }
     let ret = rs_type(&step.return_type, step.wide)?;
     let names: Vec<&str> = inputs.iter().map(|p| p.name.as_str()).collect();
+    let mut step_args = args.clone();
+    if rule.counted {
+        step_args[rule.count] = "i".to_string();
+    }
     Ok(format!(
-        "/// Inputs: {}.\npub fn {}({}) -> Result<{ret}, AxiomError> {{\n    let mut value = {}({})?;\n    for _ in 0..p{} {{\n        value = {}({}, value)?;\n    }}\n    Ok(value)\n}}\n",
+        "/// Inputs: {}.\npub fn {}({}) -> Result<{ret}, AxiomError> {{\n    let mut value = {}({})?;\n    for {} in 0..p{} {{\n        value = {}({}, value)?;\n    }}\n    Ok(value)\n}}\n",
         names.join(", "),
         ident(&rule.name)?,
         params.join(", "),
         ident(&rule.start)?,
         args.join(", "),
+        if rule.counted { "i" } else { "_" },
         rule.count,
         ident(&step.name)?,
-        args.join(", "),
+        step_args.join(", "),
     ))
 }
 

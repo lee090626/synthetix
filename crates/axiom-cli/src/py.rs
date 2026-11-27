@@ -5,6 +5,8 @@
 //! so every operation is cut to 32 bits (64 for `wide` rules). Equivalence is
 //! checked by `tests/py_emit.rs`, not proven.
 
+use std::collections::HashMap;
+
 use axiom_ami::Expr;
 use axiom_parser::{Contract, Type};
 
@@ -166,26 +168,51 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
             out += &list_wrapper(base, &parts);
         }
     }
+    let inlinable: HashMap<&str, (&Contract, &Expr, Option<&Expr>)> = items
+        .iter()
+        .map(|&(contract, candidate, guard)| (contract.name.as_str(), (contract, candidate, guard)))
+        .collect();
     for contract in &contracts {
         if let Some(rule) = &contract.list {
             out += "\n\n";
-            out += &any_length_wrapper(contract, rule);
+            out += &any_length_wrapper(contract, rule, &inlinable)?;
+        }
+        if let Some(record) = &contract.record_answer {
+            let names: Vec<String> = contract.params.iter().map(|p| ident(&p.name)).collect();
+            let values: Vec<String> = record
+                .fields
+                .iter()
+                .map(|(field, rule)| format!("\"{field}\": {}({})", ident(rule), names.join(", ")))
+                .collect();
+            // A `{}` with each field from its proven rule.
+            out += &format!(
+                "\n\ndef {}({}):\n    \"\"\"A `{}`: each field from its proven rule.\"\"\"\n    return {{{}}}\n",
+                ident(&record.name),
+                names.join(", "),
+                record.record,
+                values.join(", "),
+            );
         }
         if let Some(rule) = &contract.repeat {
             let names: Vec<String> = contract.params[..contract.params.len() - 1]
                 .iter()
                 .map(|p| ident(&p.name))
                 .collect();
+            // A rule that calls itself passes the step's place as the counted input.
+            let mut step_args = names.clone();
+            if rule.counted {
+                step_args[rule.count] = "step_place_".to_string();
+            }
             // The start, then the step `count` times (`proofs/lean/Repeat.lean`).
             out += &format!(
-                "\n\ndef {}({}):\n    value = {}({})\n    for _ in range({}):\n        value = {}({}, value)\n    return value\n",
+                "\n\ndef {}({}):\n    value = {}({})\n    for step_place_ in range({}):\n        value = {}({}, value)\n    return value\n",
                 ident(&rule.name),
                 names.join(", "),
                 ident(&rule.start),
                 names.join(", "),
                 names[rule.count],
                 ident(&contract.name),
-                names.join(", "),
+                step_args.join(", "),
             );
         }
     }
@@ -194,22 +221,35 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
         out += "\n\n";
         out += &settle_wrapper(&sizes);
     }
+    for (choice, _) in crate::js::choice_types(&contracts)? {
+        out += &format!(
+            "\n\nclass {}:\n    \"\"\"Values of `type {}`: each is its place, from 0.\"\"\"\n",
+            ident(&choice.name),
+            choice.name
+        );
+        for (at, value) in choice.values.iter().enumerate() {
+            out += &format!("    {} = {at}\n", ident(&axiom_parser::value_ident(value)));
+        }
+    }
     Ok(out)
 }
 
-/// Checks one input and lowers it to an unsigned word `a{index}`.
-fn lower(name: &str, ty: &Type, bits: u32, index: usize) -> Result<String, String> {
+/// Checks one input `var`, named `label` in its messages, and lowers it to an
+/// unsigned word `a{index}`.
+fn lower(label: &str, var: &str, ty: &Type, bits: u32, index: usize) -> Result<String, String> {
     Ok(match ty {
+        // The common case is tested inline; anything else goes to `_word`, which
+        // accepts the same values and raises the same errors.
         Type::U32 => format!(
-            "    _a{index} = _word(\"{name}\", {name}, 0, {})\n",
-            (1u128 << bits) - 1
+            "    _a{index} = {var} if type({var}) is int and 0 <= {var} <= {max} else _word(\"{label}\", {var}, 0, {max})\n",
+            max = (1u128 << bits) - 1
         ),
         Type::I32 => format!(
-            "    _a{index} = _word(\"{name}\", {name}, {}, {}) & _M{bits}\n",
+            "    _a{index} = _word(\"{label}\", {var}, {}, {}) & _M{bits}\n",
             -(1i128 << (bits - 1)),
             (1i128 << (bits - 1)) - 1
         ),
-        Type::Bool => format!("    _a{index} = _flag(\"{name}\", {name})\n"),
+        Type::Bool => format!("    _a{index} = _flag(\"{label}\", {var})\n"),
         other => {
             return Err(format!(
                 "Python output supports only u32, i32 and bool, found {other:?}"
@@ -223,11 +263,33 @@ fn emit_function(
     candidate: &Expr,
     guard: Option<&Expr>,
 ) -> Result<String, String> {
-    let bits = if contract.wide { 64 } else { 32 };
     let names: Vec<String> = contract.params.iter().map(|p| ident(&p.name)).collect();
+    let (body, result) = body_parts(contract, &names, candidate, guard)?;
+    Ok(format!(
+        "def {}({}):\n{body}    return {result}\n",
+        ident(&contract.name),
+        names.join(", "),
+    ))
+}
+
+/// A scalar contract's input checks and requires guard (the first string), and
+/// its result expression, reading the inputs from `vars`.
+fn body_parts(
+    contract: &Contract,
+    vars: &[String],
+    candidate: &Expr,
+    guard: Option<&Expr>,
+) -> Result<(String, String), String> {
+    let bits = if contract.wide { 64 } else { 32 };
     let mut body = String::new();
-    for (index, (p, name)) in contract.params.iter().zip(&names).enumerate() {
-        body += &lower(name, &p.ty, bits, index)?;
+    for (index, ((p, var), name)) in contract
+        .params
+        .iter()
+        .zip(vars)
+        .zip(names_of(contract))
+        .enumerate()
+    {
+        body += &lower(&name, var, &p.ty, bits, index)?;
     }
     if let Some(g) = guard {
         body += &format!(
@@ -247,11 +309,29 @@ fn emit_function(
             ));
         }
     };
-    Ok(format!(
-        "def {}({}):\n{body}    return {result}\n",
-        ident(&contract.name),
-        names.join(", "),
-    ))
+    Ok((body, result))
+}
+
+fn names_of(contract: &Contract) -> Vec<String> {
+    contract.params.iter().map(|p| ident(&p.name)).collect()
+}
+
+/// One item of a list rule, inlined into its loop: the statements that bind
+/// the arguments (`args`) and check them as the item's own function does, then
+/// the item's value.
+fn inline_item(
+    item: &Contract,
+    candidate: &Expr,
+    guard: Option<&Expr>,
+    args: &[String],
+) -> Result<(String, String), String> {
+    let vars: Vec<String> = (0..args.len()).map(|i| format!("_it{i}")).collect();
+    let mut pre = String::new();
+    for (var, arg) in vars.iter().zip(args) {
+        pre += &format!("    {var} = {arg}\n");
+    }
+    let (body, value) = body_parts(item, &vars, candidate, guard)?;
+    Ok((format!("{pre}{body}"), value))
 }
 
 /// `f(x, y)` over `f_1..f_N` when the rule's answer was a list; `x_1..x_k`
@@ -286,7 +366,11 @@ fn list_wrapper(base: &str, parts: &[&Contract]) -> String {
 
 /// `cart(prices)` for a rule over lists of any length: checks the length,
 /// adds each item rule over the items in a loop, then calls the core.
-fn any_length_wrapper(core: &Contract, rule: &axiom_parser::ListRule) -> String {
+fn any_length_wrapper(
+    core: &Contract,
+    rule: &axiom_parser::ListRule,
+    items: &HashMap<&str, (&Contract, &Expr, Option<&Expr>)>,
+) -> Result<String, String> {
     let names: Vec<String> = rule.params.iter().map(|(p, _)| ident(p)).collect();
     let first = rule.params.iter().position(|(_, list)| *list).unwrap_or(0);
     let mut checks = String::new();
@@ -317,16 +401,30 @@ fn any_length_wrapper(core: &Contract, rule: &axiom_parser::ListRule) -> String 
         // An item taking list totals (`sum(w / sum(w))`) runs in a second loop.
         let mut args = item_args.clone();
         args.extend(rule.uses[k].iter().map(|j| format!("sum{}", j + 1)));
-        let call = format!("{}({})", ident(item), args.join(", "));
+        // Inlined when the item is in this module with as many inputs as args:
+        // no call per item.
+        let (pre, value) = match items.get(item.as_str()) {
+            Some(&(contract, candidate, guard)) if contract.params.len() == args.len() => {
+                let (pre, value) = inline_item(contract, candidate, guard, &args)?;
+                (
+                    pre.lines().map(|line| format!("    {line}\n")).collect(),
+                    value,
+                )
+            }
+            _ => (
+                String::new(),
+                format!("{}({})", ident(item), args.join(", ")),
+            ),
+        };
         let target = if rule.uses[k].is_empty() {
             &mut body
         } else {
             &mut second_loop
         };
         *target += &match fold {
-            axiom_parser::Fold::Sum => format!("        sum{} += {call}\n", k + 1),
+            axiom_parser::Fold::Sum => format!("{pre}        sum{} += {value}\n", k + 1),
             axiom_parser::Fold::Min | axiom_parser::Fold::Max => format!(
-                "        _v = {call}\n        if _i == 0 or _v {} sum{1}:\n            sum{1} = _v\n",
+                "{pre}        _v = {value}\n        if _i == 0 or _v {} sum{1}:\n            sum{1} = _v\n",
                 if *fold == axiom_parser::Fold::Min {
                     "<"
                 } else {
@@ -363,7 +461,7 @@ fn any_length_wrapper(core: &Contract, rule: &axiom_parser::ListRule) -> String 
     } else {
         call
     };
-    format!(
+    Ok(format!(
         "def {}({}):\n{checks}    _n = len({})\n    if {}_n > {}:\n        _fail(\"{}: input violates a requires clause\")\n{sums}{body}    return {tail}\n",
         ident(&rule.name),
         names.join(", "),
@@ -371,7 +469,7 @@ fn any_length_wrapper(core: &Contract, rule: &axiom_parser::ListRule) -> String 
         crate::rs::too_few(rule, "_n", "or"),
         rule.max,
         rule.name,
-    )
+    ))
 }
 
 /// `settle(owe)`: N from the list length, N * N transfers, item (i-1)*N+j

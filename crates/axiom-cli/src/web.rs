@@ -262,6 +262,16 @@ fn build_project(
     println!("synthesis_result: FOUND");
     println!("proof_result: VERIFIED");
     println!("verified: {} contract(s)", compiled.len());
+    // Effects run host code that no proof covers, so they are counted apart from rules.
+    let effects = project
+        .verification_summaries
+        .iter()
+        .filter(|linked| linked.contract.kind == DeclarationKind::Extern)
+        .count();
+    println!(
+        "proof: {} rule(s) VERIFIED, {effects} effect(s) UNVERIFIED",
+        compiled.len()
+    );
     println!("wrote: {}", output_dir.display());
     if lean {
         prove_with_lean(&compiled, &output_dir.join("lean"))?;
@@ -867,7 +877,7 @@ fn page_json(linked: &LinkedPage, root: &Path, storage_schema_version: u32) -> S
     let elements = page
         .elements
         .iter()
-        .map(|element| element_json(element, &page.reducers, &page.states))
+        .map(|element| element_json(element, &page.reducers, &page.states, &linked.text_choices))
         .collect::<Vec<_>>();
     let reducers = page
         .reducers
@@ -929,6 +939,7 @@ fn element_json(
     element: &PageElement,
     reducers: &[Reducer],
     states: &[axiom_parser::State],
+    choices: &[(String, axiom_parser::ChoiceType)],
 ) -> String {
     match element {
         PageElement::Show { state } => {
@@ -1014,11 +1025,19 @@ fn element_json(
                 updates
             )
         }
-        PageElement::Input { state, placeholder } => format!(
-            "{{\"kind\":\"input\",\"state\":{},\"placeholder\":{}}}",
-            json_string(state),
-            json_string(placeholder)
-        ),
+        PageElement::Input { state, placeholder } => {
+            // A text state a rule takes as a type offers the type's values.
+            let options = choices
+                .iter()
+                .find(|(name, _)| name == state)
+                .map(|(_, choice)| format!(",\"options\":[{}]", choice_values_json(&choice.values)))
+                .unwrap_or_default();
+            format!(
+                "{{\"kind\":\"input\",\"state\":{},\"placeholder\":{}{options}}}",
+                json_string(state),
+                json_string(placeholder)
+            )
+        }
         PageElement::List {
             state,
             item,
@@ -1029,7 +1048,7 @@ fn element_json(
             json_string(item),
             elements
                 .iter()
-                .map(|element| element_json(element, reducers, states))
+                .map(|element| element_json(element, reducers, states, choices))
                 .collect::<Vec<_>>()
                 .join(",")
         ),
@@ -1047,6 +1066,15 @@ fn element_json(
             format!("{{\"kind\":\"text\",\"text\":{}}}", json_string(name))
         }
     }
+}
+
+/// Choice values as text, in order (a value's text, not its quotes).
+fn choice_values_json(values: &[String]) -> String {
+    values
+        .iter()
+        .map(|value| json_string(axiom_parser::value_text(value)))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn error_json(error: &str) -> String {
@@ -1140,6 +1168,33 @@ fn contracts_json(project: &Project) -> String {
                 .map(|line| json_string(line.trim()))
                 .collect::<Vec<_>>()
                 .join(",");
+            // Each input that is a type: its name and values, for text to place.
+            let choice_field = if linked.contract.choices.is_empty() {
+                String::new()
+            } else {
+                let choices = linked
+                    .contract
+                    .params
+                    .iter()
+                    .map(|param| {
+                        match linked
+                            .contract
+                            .choices
+                            .iter()
+                            .find(|(name, _)| name == &param.name)
+                        {
+                            Some((_, choice)) => format!(
+                                "{{\"name\":{},\"values\":[{}]}}",
+                                json_string(&choice.name),
+                                choice_values_json(&choice.values)
+                            ),
+                            None => "null".to_string(),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!(",\"choices\":[{choices}]")
+            };
             let labels = if linked.contract.labels.is_empty() {
                 String::new()
             } else {
@@ -1155,7 +1210,7 @@ fn contracts_json(project: &Project) -> String {
                 )
             };
             format!(
-                "{}:{{\"source\":{},\"params\":[{}],\"result\":{},\"requires\":{},\"needs\":[{needs}]{labels}}}",
+                "{}:{{\"source\":{},\"params\":[{}],\"result\":{},\"requires\":{},\"needs\":[{needs}]{labels}{choice_field}}}",
                 json_string(&linked.contract.name),
                 json_string(&source_label(&project.config.root, &linked.source)),
                 params,
@@ -1300,7 +1355,9 @@ fn expr_json(expr: &SpecExpr) -> Result<String, String> {
             expr_json(lhs)?,
             expr_json(rhs)?
         )),
-        SpecExpr::Call(name, _) => Err(format!("page expressions cannot call contract {name}")),
+        SpecExpr::Call(name, _) => Err(format!(
+            "page expressions cannot call {name}; set a value with `x = {name}(...)` on a `when` line"
+        )),
     }
 }
 
@@ -1615,6 +1672,13 @@ fn json_string(value: &str) -> String {
             '\n' => result.push_str("\\n"),
             '\r' => result.push_str("\\r"),
             '\t' => result.push_str("\\t"),
+            // Escaped so the text cannot close a <script> block or a tag when
+            // embedded in HTML; JSON readers decode these the same way.
+            '<' => result.push_str("\\u003c"),
+            '>' => result.push_str("\\u003e"),
+            '&' => result.push_str("\\u0026"),
+            '\u{2028}' => result.push_str("\\u2028"),
+            '\u{2029}' => result.push_str("\\u2029"),
             character if character.is_control() => {
                 result.push_str(&format!("\\u{:04x}", character as u32));
             }
@@ -2914,6 +2978,7 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
             pages: vec![LinkedPage {
                 source: PathBuf::from("/tmp/synthetix/main.ax"),
                 page,
+                text_choices: Vec::new(),
             }],
             files: Vec::new(),
         };
@@ -3548,6 +3613,209 @@ async function launch(storage, migration = null) {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// M5: an effect cannot be part of a rule or shown on a page; the error says where it may go.
+    #[test]
+    fn effect_cannot_be_used_in_a_rule_or_a_page_expression() {
+        for (body, message) in [
+            (
+                "bad(n)\n  need n < 100\n  always -> lookup_price(n)\n",
+                "effect lookup_price cannot be used in a rule",
+            ),
+            (
+                "double(n)\n  need n < 100\n  always -> n * 2\n\npage Shop\n  item = 0\n  show lookup_price(item)\n",
+                "page expressions cannot call lookup_price; set a value with `x = lookup_price(...)`",
+            ),
+        ] {
+            let root = std::env::temp_dir().join(format!(
+                "synthetix-web-effect-misuse-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(
+                root.join("main.ax"),
+                format!("effect lookup_price(id: u32) -> u32\n{body}"),
+            )
+            .unwrap();
+            let config = root.join("synthetix.toml");
+            std::fs::write(
+                &config,
+                "[project]\nentry = \"main.ax\"\ntarget = \"web\"\n",
+            )
+            .unwrap();
+            let error = build(&config, &root.join("dist")).unwrap_err();
+            assert!(error.contains(message), "{error}");
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    /// M5: an `effect` line in a page's `when` runs the host adapter; the page
+    /// state changes only when the answer is valid for its declared type.
+    #[test]
+    fn effect_buttons_commit_only_valid_host_answers() {
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-web-effect-button-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("main.ax"),
+            "effect lookup_price(id: u32) -> u32\n\
+             double(n)\n\
+             \x20 need n < 1000\n\
+             \x20 always -> n * 2\n\
+             \n\
+             page Shop\n\
+             \x20 item = 0\n\
+             \x20 price = 0\n\
+             \x20 count = 0\n\
+             \n\
+             \x20 ask \"Item\" for item\n\
+             \x20 show price\n\
+             \x20 when \"Load\" is clicked\n\
+             \x20   price = lookup_price(item)\n\
+             \x20 when \"Add\" is clicked\n\
+             \x20   count = double(count)\n",
+        )
+        .unwrap();
+        let config = root.join("synthetix.toml");
+        std::fs::write(
+            &config,
+            "[project]\nentry = \"main.ax\"\ntarget = \"web\"\n",
+        )
+        .unwrap();
+        let output = root.join("dist");
+        build(&config, &output).unwrap();
+
+        let script = r#"
+const fs = require('node:fs');
+const vm = require('node:vm');
+const bytes = fs.readFileSync(process.env.AXIOM_TEST_WASM);
+class Element {
+  constructor(tagName) { this.tagName = tagName; this.children = []; this.listeners = {}; this.dataset = {}; this.hidden = true; this.textContent = ''; }
+  append(...items) { this.children.push(...items); }
+  replaceChildren() { this.children = []; }
+  addEventListener(name, callback) { this.listeners[name] = callback; }
+}
+const root = new Element('main');
+const error = new Element('div');
+global.window = {};
+global.location = { reload() {} };
+global.localStorage = { getItem() { return null; }, setItem() {} };
+global.document = {
+  querySelector(selector) { return selector === '#app' ? root : error; },
+  createElement(tagName) { return new Element(tagName); },
+};
+global.setInterval = () => 0;
+global.fetch = async (url) => url === './app.wasm'
+  ? { ok: true, arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) }
+  : { ok: false, text: async () => '' };
+vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
+const sleep = () => new Promise((resolve) => setTimeout(resolve, 0));
+const findButton = (node, label) => {
+  if (node.tagName === 'button' && node.textContent === label) return node;
+  for (const child of node.children) {
+    const found = findButton(child, label);
+    if (found) return found;
+  }
+  return null;
+};
+(async () => {
+  for (let attempt = 0; attempt < 100 && !window.synthetix?.state; attempt++) await sleep();
+  if (!window.synthetix?.state) throw new Error('runtime did not instantiate verified WASM');
+  const clickLoad = async () => {
+    const before = window.synthetix.lastTransition;
+    findButton(root, 'Load').listeners.click();
+    for (let attempt = 0; attempt < 200 && window.synthetix.lastTransition === before; attempt++) await sleep();
+    return window.synthetix.lastTransition;
+  };
+  const summary = (transition) => [transition.status, transition.error?.category ?? '-', window.synthetix.state.price, window.synthetix.lastEffect.status].join('|');
+
+  window.synthetix.state.item = 2;
+  const noAdapter = await clickLoad();
+  const noAdapterResult = summary(noAdapter);
+
+  const requests = [];
+  window.synthetix.registerEffectAdapter(async (request) => {
+    requests.push(request);
+    return request.inputs[0] + 40;
+  });
+  const applied = await clickLoad();
+  const appliedResult = [summary(applied), requests[0].name, JSON.stringify(requests[0].inputs), requests[0].responseType, requests[0].source].join('|');
+
+  window.synthetix.registerEffectAdapter(async () => -1);
+  const outOfRange = await clickLoad();
+  const outOfRangeResult = summary(outOfRange);
+
+  window.synthetix.registerEffectAdapter(async () => { throw new Error('upstream unavailable'); });
+  const adapterFailed = await clickLoad();
+  const adapterFailedResult = [summary(adapterFailed), adapterFailed.error?.message ?? '-'].join('|');
+
+  let firstSignal = null;
+  let calls = 0;
+  window.synthetix.registerEffectAdapter(async (_request, { signal }) => {
+    calls++;
+    if (calls === 1) {
+      firstSignal = signal;
+      return new Promise(() => {});
+    }
+    return 7;
+  });
+  const first = findButton(root, 'Load');
+  first.listeners.click();
+  const second = await clickLoad();
+  for (let attempt = 0; attempt < 20; attempt++) await sleep();
+  const supersededResult = [summary(second), String(firstSignal.aborted), window.synthetix.state.price].join('|');
+
+  // A rule button clicked while an effect is pending keeps its change when the effect commits.
+  let releaseFirst;
+  window.synthetix.registerEffectAdapter(async () => new Promise((resolve) => { releaseFirst = resolve; }));
+  window.synthetix.state.count = 5;
+  findButton(root, 'Load').listeners.click();
+  for (let attempt = 0; attempt < 100 && !releaseFirst; attempt++) await sleep();
+  findButton(root, 'Add').listeners.click();
+  const countWhilePending = window.synthetix.state.count;
+  const beforePending = window.synthetix.lastTransition;
+  releaseFirst(9);
+  for (let attempt = 0; attempt < 200 && window.synthetix.lastTransition === beforePending; attempt++) await sleep();
+  const pendingResult = [summary(window.synthetix.lastTransition), countWhilePending, window.synthetix.state.count].join('|');
+
+  process.stdout.write([noAdapterResult, appliedResult, outOfRangeResult, adapterFailedResult, supersededResult, pendingResult].join('\n'));
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"#;
+        let result = std::process::Command::new("node")
+            .arg("-e")
+            .arg(script)
+            .env("AXIOM_TEST_JS", output.join("app.js"))
+            .env("AXIOM_TEST_WASM", output.join("app.wasm"))
+            .output()
+            .expect("Node.js is required to execute the generated browser runtime");
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let stdout = String::from_utf8(result.stdout).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(
+            stdout,
+            [
+                "FAILED|APPLICATION_TRANSITION_FAILURE|0|ERROR",
+                "APPLIED|-|42|SUCCEEDED|lookup_price|[2]|u32|main.ax",
+                "FAILED|APPLICATION_TRANSITION_FAILURE|42|ERROR",
+                "FAILED|APPLICATION_TRANSITION_FAILURE|42|ERROR|main.ax: upstream unavailable",
+                "APPLIED|-|7|SUCCEEDED|true|7",
+                "APPLIED|-|9|SUCCEEDED|10|10",
+            ]
+            .join("\n")
+        );
+    }
+
     #[test]
     fn extern_requests_use_typed_adapters_outside_verified_wasm() {
         let root = std::env::temp_dir().join(format!(
@@ -3946,5 +4214,15 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
             Box::new(expected),
         )];
         point
+    }
+}
+
+#[cfg(test)]
+mod json_escape_tests {
+    #[test]
+    fn html_sensitive_characters_are_escaped_in_json_text() {
+        let text = super::json_string("</script>&\u{2028}");
+        assert_eq!(text, "\"\\u003c/script\\u003e\\u0026\\u2028\"");
+        assert!(!text.contains(['<', '>', '&']));
     }
 }

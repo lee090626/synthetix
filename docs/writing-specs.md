@@ -152,6 +152,7 @@ What you can write:
 | `sum(total * weights / sum(weights))` | A sum of items that use a list's own sum; the inner sum is added up first | Items at least 0 |
 | `need prices <= 100000` | Holds for every item | Keep it apart from lines about `n` or `sum(...)` |
 | `balance(paid[n], share[n])`, `order(prices[n], fee)` | Lists share one length; other inputs work as usual | |
+| `total(items) * 2` in a rule over `items[n]`, where `total` is a rule over `prices[n]` whose answer is one `sum(prices)` | The caller adds up `items` once and calls `total`'s core; repeated calls share that sum | The caller's own `need`s for `items` and `n` (the callee's `need`s) |
 
 What a `promise` can prove:
 
@@ -210,6 +211,35 @@ number of steps (`loop_inv` in `proofs/lean/Repeat.lean`). The promises are
 also what keeps the step's numbers in range, so bound `value` from above.
 `repeat` does not work with lists yet.
 
+### A rule that calls itself
+
+A rule may call itself with one less. The first `->` line answers for 0;
+the other lines may call the rule with the same inputs and `n - 1` for `n`:
+
+```
+triangle(n)
+  need n <= 1000
+  n is 0 -> 0
+  else -> n + triangle(n - 1)
+  promise answer * 2 is n * (n + 1)
+  promise answer <= 1000000
+```
+
+A `need n <= limit` line and at least one `promise` are required. Each
+promise must hold for 0, and for `n` whenever it holds for the call's answer
+(for `n - 1`); Synthetix proves those two, and then it holds for every `n`
+(`rec_inv` in `proofs/lean/Repeat.lean`). As with `repeat`, the promises keep
+the numbers in range, so bound the answer from above. A failing input names
+`n__prev` (that is `n - 1`) and `value` (the call's answer). Example:
+`examples/recursion`.
+
+| Not yet | Instead |
+|---|---|
+| Calls with other inputs changed, or `n - 2` | Keep the other inputs; one less each call |
+| A `need` about `n` other than `n <= limit` (`need n >= 3`) | A condition line (`n < 3 -> ...`) |
+| Named values, lists, decimals, `can be negative`, a record answer | `->` lines on numbers |
+| Calling the rule from another rule, or from a page | `--emit` or `axiom run` |
+
 ### Decimals
 
 Add `with 2 decimals` (1 to 6 places) to the name line. Every value in the rule,
@@ -242,6 +272,132 @@ grade(score)
 
 Every `->` line then needs a text answer. A page shows it (below); other rules
 cannot use it.
+
+To use texts in rules, name them in a type. Each text is a value, like a
+word value, so it is proven like any choice:
+
+```
+type Grade = "A" | "B" | "C"
+
+bonus(grade: Grade)
+  grade is "A" -> 10
+  grade is "B" -> 5
+  else -> 0
+```
+
+`bonus("B")` gives 5. A `->` line that answers a text of the type makes the
+rule answer that type, so another rule can use it. A type holds either words
+or quoted texts, not both. A text may hold `|`. Texts are fixed in the type: a
+rule cannot take any text.
+
+A page uses it with a text state: `save grade = ""` and `ask "Grade" for grade`
+show a box of the values (the first line is blank), and `result = bonus(grade)`
+passes the chosen text. A literal works too: `result = bonus("B")`. A text that
+is not a value is an error. A state given
+to two types is an error. The page passes the value's place, which the browser
+maps from the text; that mapping is checked by tests, not proven.
+
+### Types
+
+`type` declares a **choice** (one of a few named values) or a **record**
+(several values that belong together). Write types before or between rules,
+unindented:
+
+```
+type Size = small | medium | large
+
+type Order
+  price
+  quantity
+  size: Size
+```
+
+An input takes a type with `name: Type`. A record's fields are read with a
+dot (`order.price`), and a record is passed to another rule of the same file
+whole (`subtotal(order)`). `match` gives an answer per value of a choice:
+
+```
+shipping(size: Size, weight)
+  need weight <= 100000
+  match size
+    small -> 3000
+    medium -> 5000
+    large -> 5000 + weight / 1000 * 100
+  promise answer >= 3000
+
+total(order: Order, weight)
+  need order.price <= 10000000
+  need order.quantity <= 100
+  need weight <= 100000
+  goods = subtotal(order)
+  goods >= 100000 -> goods
+  else -> goods + shipping(order.size, weight)
+```
+
+- A `match` names every value once (`small or medium -> ...` covers two), or
+  ends with `else -> value`. A missing value is an error that names it.
+  `match` comes after the other `->` lines; `promise` lines may follow it.
+- A value can also be compared (`order.size is large`) or passed
+  (`shipping(large, weight)`). A value names one thing in a file: no input,
+  named value or other choice may use the same name.
+- Calls are checked: a rule that takes a `Size` gets a `Size` value or input,
+  a rule that takes an `Order` gets an `Order` input, and a rule that takes a
+  number gets no record.
+- Underneath, a value is its place from 0 (`large` is 2), and a choice input
+  only accepts those places. A record input is one input per field, in the
+  order declared. So a rule with types is proven like any other rule, Lean
+  included.
+- `axiom run` takes values by name or place: `axiom run shipping.ax -- large 12000`.
+- `--emit` gives each record field as its own input, named `order__price`, and
+  the values of each choice as constants: `Size.large` in JS and Python,
+  `Size::large` in Rust, `contracts.SizeLarge` in Go. In JS a choice used only
+  by rules with big numbers is a `bigint`; in Rust a choice used with several
+  number types is a `u8` (`Size::large.into()`).
+
+More types:
+
+- **A record inside a record**: a field may hold another record
+  (`to: Address`), read as `order.to.zone` and passed as `delivery(order.to)`.
+  A record cannot hold itself; that is an error naming the records.
+- **A choice answer**: when every `->` answer is a value of one choice
+  (`-> small`, `-> large`), the answer is that choice. Callers may pass it
+  where the choice is taken (`fee(box_for(w))`), and `axiom run` prints the
+  value's name. Answers mixing values and numbers stay numbers.
+- **A record answer**: `quote(price, qty) -> Bill` answers a `Bill`. Give
+  each field its own lines under `field:`; there `answer` is that field, so
+  its `promise` lines go there too. Lines above the fields (`need`, named
+  values) are shared. Read a field with `quote(price, qty).goods`, or pass
+  the whole answer to a rule that takes a `Bill`. Underneath, each field is
+  its own rule (`quote__goods`), proven on its own; `--emit` adds
+  `quote(price, qty)`, which gives an object in JS, a dict in Python, a
+  `Bill` struct in Rust and Go.
+- **Lists of types**: `sizes[n]: Size` is a list of choices; each item is a
+  value. `lines[n]: Line` is a list of records: `sum(lines.price)` adds a
+  field, `count(lines)` is the length. `--emit` takes one list per field
+  (`lines__price`, ...).
+- **Decimals**: a choice input works in a rule `with 2 decimals`; it keeps
+  its place (pass `Size.large`, or `large` to `axiom run`). Passing it to a
+  rule with other places is an error.
+- **Types from another file**: `from shop: Order, Size, fee` brings the types
+  and the rules. A type the named rules take comes too. Calls to `fee` are
+  checked, and an `Order` is passed whole. A `from` line names a file next to
+  the one it is in: `from lib/tax: charge` in `rules.ax`, `from money: fee` in
+  `lib/tax.ax`. A type reaches a file through the files that name it, and the
+  answer range of an imported rule bounds arithmetic on its answer, as inside
+  one file (`fee(p) + p` needs `fee` to answer a bounded value). `as` gives
+  a name here: `from shop: Order as Purchase, fee as price_fee`. Two files may
+  not both define a rule of the same name, even with `as`. A rule that
+  answers a record (`quote(price, qty) -> Bill`) comes with its fields, so
+  `quote(price, qty).goods` works in the file that names it. Example:
+  `examples/modules`.
+
+| Not yet | Instead |
+|---|---|
+| A promise naming two fields of a record answer (`answer.tax <= answer.goods`) | A promise on each field |
+| A record answer whose field is a record | Answer the inner record from its own rule |
+| Lists of a fixed size holding a type (`sizes[3]: Size`) | A list of any length (`sizes[n]`) |
+| Calling a rule from another rule when it takes a list and its answer is not one `sum`: `repeat`, recursion, `min`, `max`, a list answer, or a rule in another file | Call it from `--emit` or `axiom run` |
+| A promise about `sum(lines.price * lines.qty)` (as for two lists, above) | A promise that follows from the ranges |
 
 ### Numbers must stay in range
 
@@ -334,6 +490,53 @@ negative are only shown or compared, and calculated in a rule. A whole number
 up to 2147483647 may go into a `can be negative` rule. A rule with text answers
 sets a text value: `grade = grade_of(score)`.
 
+## Effects
+
+An effect asks the host for a value: an API, a stored number, a clock. Declare
+it with its input and answer types:
+
+```
+effect lookup_price(id: u32) -> u32
+```
+
+Inputs and the answer are `u32`, `i32` or `bool`. An effect runs only from a
+`when` line, as `price = lookup_price(item)`; a rule or a `show` line cannot
+call it.
+
+Axiom does not run or prove an effect. The host answers through an adapter,
+and Axiom checks only that the answer has the declared type. A missing or
+refused answer leaves the page as it was, and the button's transition is
+`FAILED`. `axiom build` counts the effects apart from the rules:
+
+```text
+proof: 1 rule(s) VERIFIED, 1 effect(s) UNVERIFIED
+```
+
+`axiom run` presses one button without a browser, with Node.js installed. It
+starts from the declared values and does not read or write saved ones:
+
+```bash
+axiom run . --action Load --set item=2 --adapter effects.js
+```
+
+`--wait-ms N` (default 5000) bounds how long an effect may take to answer.
+
+The adapter is a JavaScript file. It exports one function that gets the request
+(`name`, `inputs`, `responseType`, `source`, and the trust-boundary fields) and
+returns the answer:
+
+```js
+module.exports = async (request) => request.inputs[0] + 40;
+```
+
+The output lists the transition, the effect, and the state:
+
+```text
+transition: APPLIED
+effect: SUCCEEDED lookup_price
+state: {"item":2,"price":42}
+```
+
 ## When it fails
 
 | Message | What to do |
@@ -349,6 +552,10 @@ sets a text value: `grade = grade_of(score)`.
 | `call-site precondition ... is not established` | The values passed to another rule may break its `need` lines; add `need` lines or a condition |
 | `UNSATISFIABLE_PRECONDITION` | The `need` lines contradict each other |
 | `old syntax, which is no longer supported` | Rewrite the file in the forms above |
+| `an effect line has no body` | Put the lines under a rule or page, or delete them |
+| `effect ... cannot be used in a rule` | Call the effect from a page's `when` line (`x = name(...)`) |
+| `page expressions cannot call name` | Set the value with `x = name(...)` on a `when` line |
+| `an effect takes and answers u32, i32 or bool` | Use one of the three types |
 
 On a failed build, earlier verified output is removed, so a broken rule never
 keeps serving an old result. Fix the file and save; `axiom dev` rebuilds and
@@ -431,7 +638,8 @@ axiom dev        # live app; edits to .ax files rebuild it
 axiom build      # static output in dist/
 ```
 
-Use `axiom run file.ax -- <inputs>` to try a single rule.
+Use `axiom run file.ax -- <inputs>` to try a single rule, and
+`axiom run . --action "Label"` to press one button of a project (see Effects).
 
 ## Using rules from JavaScript, TypeScript, Rust, Python or Go
 

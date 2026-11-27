@@ -220,6 +220,17 @@ function validateEffectResponse(value, type = null) {
   return value;
 }
 
+// A text given to a type's input is the type's value; its place is passed on.
+// This mapping is not verified: the rule is proven for every place.
+function choicePlace(contract, value, index) {
+  const choice = contract.choices?.[index];
+  if (!choice || typeof value !== 'string') return value;
+  const place = choice.values.indexOf(value);
+  if (place < 0)
+    throw new TypeError(`argument ${index + 1}: "${value}" is not a value of ${choice.name} (${choice.values.join(', ')})`);
+  return place;
+}
+
 function callContract(name, args) {
   try {
     const contract = __contracts[name];
@@ -228,7 +239,8 @@ function callContract(name, args) {
       throw new TypeError(`${name}: expected ${contract.params.length} arguments`);
     const fn = __exports?.[name];
     if (typeof fn !== 'function') throw new Error(`Missing WASM export: ${name}`);
-    const lowered = args.map((value, index) => lowerArgument(value, contract.params[index], index));
+    const lowered = args.map((value, index) =>
+      lowerArgument(choicePlace(contract, value, index), contract.params[index], index));
     if (contract.requires) {
       const check = __exports?.[contract.requires];
       if (typeof check !== 'function') throw new Error(`Missing WASM precondition check: ${name}`);
@@ -362,49 +374,47 @@ function callVerified(element, scope, target) {
   render();
 }
 
-function applyReducerTransition(element) {
-  const nextState = structuredClone(__state);
-  let updateIndex = 0;
-  let functionName = null;
-  try {
-    for (; updateIndex < element.updates.length; updateIndex++) {
-      const update = element.updates[updateIndex];
-      // Table rows are page bookkeeping, not rules.
-      if (update.function === '__append') {
-        getPath(nextState, update.state).push(evaluate(update.args[0], nextState));
-        continue;
-      }
-      if (update.function === '__empty') {
-        setPath(nextState, update.state, []);
-        continue;
-      }
-      functionName = update.function;
-      const value = callContract(update.function, update.args.map((arg) => evaluate(arg, nextState)));
-      setPath(nextState, update.state, value);
-    }
-    functionName = null;
-    saveState(nextState);
-  } catch (error) {
-    const cause = applicationError(error, functionName);
-    const failure = new Error(cause.message);
-    failure.category = 'APPLICATION_TRANSITION_FAILURE';
-    failure.source = cause.source;
-    failure.contract = cause.contract;
-    failure.event = element.event;
-    failure.failedUpdate = updateIndex;
-    failure.cause = cause;
-    __lastTransition = {
-      event: element.event,
-      status: 'FAILED',
-      updatesApplied: 0,
-      failedUpdate: updateIndex,
-      state: structuredClone(__state),
-      error: failure,
-    };
-    reportApplicationError(failure);
-    return __lastTransition;
+// Table rows and rows cleared are page bookkeeping, not rules. Returns false otherwise.
+function applyTableUpdate(update, nextState) {
+  if (update.function === '__append') {
+    getPath(nextState, update.state).push(evaluate(update.args[0], nextState));
+    return true;
   }
+  if (update.function === '__empty') {
+    setPath(nextState, update.state, []);
+    return true;
+  }
+  return false;
+}
 
+// Effects are host calls, not verified rules: they are only reachable from
+// page actions, and their answers are checked by the declared type.
+function isExtern(name) {
+  return Object.hasOwn(__externs, name);
+}
+
+function failTransition(element, updateIndex, functionName, error) {
+  const cause = applicationError(error, functionName);
+  const failure = new Error(cause.message);
+  failure.category = 'APPLICATION_TRANSITION_FAILURE';
+  failure.source = cause.source;
+  failure.contract = cause.contract;
+  failure.event = element.event;
+  failure.failedUpdate = updateIndex;
+  failure.cause = cause;
+  __lastTransition = {
+    event: element.event,
+    status: 'FAILED',
+    updatesApplied: 0,
+    failedUpdate: updateIndex,
+    state: structuredClone(__state),
+    error: failure,
+  };
+  reportApplicationError(failure);
+  return __lastTransition;
+}
+
+function commitTransition(element, nextState) {
   for (const key of Object.keys(__state)) delete __state[key];
   Object.assign(__state, nextState);
   __lastTransition = {
@@ -420,6 +430,69 @@ function applyReducerTransition(element) {
     reportApplicationError(error);
   }
   return __lastTransition;
+}
+
+function applyReducerTransition(element) {
+  if (element.updates.some((update) => isExtern(update.function))) return applyEffectTransition(element);
+  const nextState = structuredClone(__state);
+  let updateIndex = 0;
+  let functionName = null;
+  try {
+    for (; updateIndex < element.updates.length; updateIndex++) {
+      const update = element.updates[updateIndex];
+      if (applyTableUpdate(update, nextState)) continue;
+      functionName = update.function;
+      const value = callContract(update.function, update.args.map((arg) => evaluate(arg, nextState)));
+      setPath(nextState, update.state, value);
+    }
+    functionName = null;
+    saveState(nextState);
+  } catch (error) {
+    return failTransition(element, updateIndex, functionName, error);
+  }
+  return commitTransition(element, nextState);
+}
+
+// Like applyReducerTransition, for updates that call an effect. Each answer is
+// awaited before the next update reads it. The state changes only when every
+// update succeeds, and then only the paths the transition sets are written, so
+// changes made by other clicks while the effect was pending are kept.
+// A superseded or cancelled effect resolves to undefined and changes nothing.
+async function applyEffectTransition(element) {
+  const nextState = structuredClone(__state);
+  const written = [];
+  let updateIndex = 0;
+  let functionName = null;
+  try {
+    for (; updateIndex < element.updates.length; updateIndex++) {
+      const update = element.updates[updateIndex];
+      written.push(update.state);
+      if (applyTableUpdate(update, nextState)) continue;
+      functionName = update.function;
+      const args = update.args.map((arg) => evaluate(arg, nextState));
+      const value = isExtern(update.function)
+        ? await window.synthetix.requestExtern(update.function, args)
+        : callContract(update.function, args);
+      if (value === undefined) {
+        __lastTransition = {
+          event: element.event,
+          status: 'CANCELLED',
+          updatesApplied: 0,
+          failedUpdate: updateIndex,
+          state: structuredClone(__state),
+        };
+        return __lastTransition;
+      }
+      setPath(nextState, update.state, value);
+    }
+    functionName = null;
+    const committed = structuredClone(__state);
+    for (const path of written) setPath(committed, path, getPath(nextState, path));
+    saveState(committed);
+    return commitTransition(element, committed);
+  } catch (error) {
+    return failTransition(element, updateIndex, functionName, error);
+  }
 }
 
 function renderElement(element, root, scope) {
@@ -448,6 +521,28 @@ function renderElement(element, root, scope) {
       message.textContent = element.text;
       root.append(message);
     }
+    return;
+  }
+  if (element.kind === 'input' && element.options) {
+    // A text state a rule takes as a type: a box of the type's values.
+    const select = document.createElement('select');
+    const blank = document.createElement('option');
+    blank.value = '';
+    blank.textContent = element.placeholder;
+    select.append(blank);
+    for (const value of element.options) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = value;
+      select.append(option);
+    }
+    select.value = getPath(__state, element.state) ?? '';
+    select.addEventListener('change', () => {
+      setPath(__state, element.state, select.value);
+      saveState();
+      clearApplicationError();
+    });
+    root.append(select);
     return;
   }
   if (element.kind === 'input') {
@@ -486,6 +581,14 @@ function renderElement(element, root, scope) {
     button.type = 'button';
     button.textContent = element.label;
     button.addEventListener('click', () => {
+      // An effect button runs as a one-update transition, so its result is reported like a reducer's.
+      if (isExtern(element.function)) {
+        applyReducerTransition({
+          event: element.label,
+          updates: [{ state: element.state, function: element.function, args: element.args }],
+        });
+        return;
+      }
       try { callVerified(element, scope, element.state); clearApplicationError(); }
       catch (error) { reportApplicationError(error, element.function); }
     });

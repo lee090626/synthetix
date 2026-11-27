@@ -254,6 +254,41 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
             out += "\n";
             out += &any_length_wrapper(&claim(&rule.name)?, contract, rule)?;
         }
+        if let Some(record) = &contract.record_answer {
+            let go_name = claim(&record.name)?;
+            let type_name = claim(&record.record)?;
+            let names: Vec<String> = contract.params.iter().map(|p| local(&p.name)).collect();
+            let mut params = Vec::new();
+            for (name, param) in names.iter().zip(&contract.params) {
+                params.push(format!("{name} {}", go_type(&param.ty, contract.wide)?));
+            }
+            let mut fields = String::new();
+            let mut sets = String::new();
+            for (field, rule) in &record.fields {
+                let field_rule = contracts
+                    .iter()
+                    .find(|c| &c.name == rule)
+                    .ok_or_else(|| format!("missing `{rule}`"))?;
+                fields += &format!(
+                    "\t{} {}\n",
+                    exported(field),
+                    go_type(&field_rule.return_type, field_rule.wide)?
+                );
+                sets += &format!(
+                    "\tif result.{}, err = {}({}); err != nil {{\n\t\treturn result, err\n\t}}\n",
+                    exported(field),
+                    exported(rule),
+                    names.join(", ")
+                );
+            }
+            out += &format!(
+                "\n// {type_name} is `type {}`, as `{}` answers it.\ntype {type_name} struct {{\n{fields}}}\n\n// {go_name} is the proven rule `{}`: each field from its proven rule.\nfunc {go_name}({}) (result {type_name}, err error) {{\n{sets}\treturn result, nil\n}}\n",
+                record.record,
+                record.name,
+                record.name,
+                params.join(", "),
+            );
+        }
         if let Some(rule) = &contract.repeat {
             let go_name = claim(&rule.name)?;
             let inputs = &contract.params[..contract.params.len() - 1];
@@ -264,9 +299,13 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
             }
             let ret = go_type(&contract.return_type, contract.wide)?;
             let count_ty = go_type(&inputs[rule.count].ty, contract.wide)?;
+            let mut step_args = names.clone();
+            if rule.counted {
+                step_args[rule.count] = "stepPlace".to_string();
+            }
             // The start, then the step `count` times (`proofs/lean/Repeat.lean`).
             out += &format!(
-                "\n// {go_name} is the proven rule `{}`: the start, then the step {} times.\nfunc {go_name}({}) (result {ret}, err error) {{\n\tif result, err = {}({}); err != nil {{\n\t\treturn result, err\n\t}}\n\tfor i := {count_ty}(0); i < {}; i++ {{\n\t\tif result, err = {}({}, result); err != nil {{\n\t\t\treturn result, err\n\t\t}}\n\t}}\n\treturn result, nil\n}}\n",
+                "\n// {go_name} is the proven rule `{}`: the start, then the step {} times.\nfunc {go_name}({}) (result {ret}, err error) {{\n\tif result, err = {}({}); err != nil {{\n\t\treturn result, err\n\t}}\n\tfor stepPlace := {count_ty}(0); stepPlace < {}; stepPlace++ {{\n\t\tif result, err = {}({}, result); err != nil {{\n\t\t\treturn result, err\n\t\t}}\n\t}}\n\treturn result, nil\n}}\n",
                 rule.name,
                 names[rule.count],
                 params.join(", "),
@@ -274,7 +313,7 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
                 names.join(", "),
                 names[rule.count],
                 exported(&contract.name),
-                names.join(", "),
+                step_args.join(", "),
             );
         }
     }
@@ -282,6 +321,24 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
     if !sizes.is_empty() {
         out += "\n";
         out += &settle_wrapper(&claim("settle")?, &sizes);
+    }
+    for (choice, _) in crate::js::choice_types(&contracts)? {
+        // Untyped constants fit every number type a rule takes.
+        out += &format!(
+            "\n// Values of `type {}`: each is its place, from 0.\nconst (\n",
+            choice.name
+        );
+        for (at, value) in choice.values.iter().enumerate() {
+            out += &format!(
+                "\t{} = {at}\n",
+                claim(&format!(
+                    "{}_{}",
+                    choice.name,
+                    axiom_parser::value_ident(value)
+                ))?
+            );
+        }
+        out += ")\n";
     }
     Ok(out)
 }

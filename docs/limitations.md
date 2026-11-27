@@ -17,8 +17,9 @@ does not. The detailed rules are in [semantics.md](semantics.md) and
 - **Rules:** `need` lines, `condition -> value` lines read top to bottom, and a
   final `else -> value` (or `always -> value` for a rule with one answer).
 - **Web target:** `synthetix.toml` projects with pages, state, buttons,
-  persisted state with schema migration, and adapters through the application
-  boundary. Start one with `axiom new <dir>`.
+  persisted state with schema migration, effects declared with `effect` (see
+  writing-specs.md), and adapters through the application boundary. Start one
+  with `axiom new <dir>`.
 
 ## Known limitations
 
@@ -37,10 +38,21 @@ does not. The detailed rules are in [semantics.md](semantics.md) and
 - **Some number forms do not mix.** A button passes values only to a rule with
   the same decimal places, and a rule uses a rule from another file only with
   the same places; pages calculate only with values that cannot be negative.
-- **Text answers are for pages.** A rule with text answers cannot be used by
-  another rule, and `contracts.js` returns the answer's position, not the text.
+- **Text answers are for pages.** A rule with text answers that are not in a
+  `type` cannot be used by another rule, and `contracts.js` returns the answer's
+  position, not the text. Texts in a `type` (`type Grade = "A" | "B"`) can be
+  used by rules, and a page reaches them through a text state (see
+  writing-specs.md). The browser maps that text to its place; the mapping is
+  tested, not proven.
 - **Settling is not the fewest transfers.** `settle` uses at most n - 1
   transfers, not always the fewest. Its proof is in Lean and covers the formula;
   that the generated code matches the formula is checked by tests, not proven.
+- **Effects are unproven host calls.** An effect takes and answers `u32`,
+  `i32`, or `bool` only, and runs only from a page's `when` line. Axiom checks
+  the answer's type, not whether it is true; the build reports effects as
+  `UNVERIFIED`. The language has no error values: a failed answer leaves the
+  page unchanged, and the transition reads `FAILED`.
+- **Headless runs need Node.js.** `axiom run <project> --action` runs the
+  generated page under Node.js and rebuilds the project on each run.
 - **Not validated with real users.** Ergonomics and error messages reflect
   internal testing only.

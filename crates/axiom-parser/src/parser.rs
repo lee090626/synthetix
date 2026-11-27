@@ -136,8 +136,15 @@ impl<'a> Parser<'a> {
         self.expect(Token::LBrace)?;
 
         let mut names = Vec::new();
+        let mut aliases = Vec::new();
         while self.current != Token::RBrace && self.current != Token::Eof {
             names.push(self.expect_ident()?);
+            aliases.push(if self.current == Token::As {
+                self.advance()?;
+                Some(self.expect_ident()?)
+            } else {
+                None
+            });
             match self.current {
                 Token::Comma => {
                     self.advance()?;
@@ -170,7 +177,12 @@ impl<'a> Parser<'a> {
             return Err(self.error("import list cannot be empty"));
         }
 
-        Ok(Import { names, path, span })
+        Ok(Import {
+            names,
+            aliases,
+            path,
+            span,
+        })
     }
 
     fn parse_record(&mut self) -> Result<RecordDef, String> {
@@ -267,6 +279,9 @@ impl<'a> Parser<'a> {
             list: None,
             hints: Vec::new(),
             repeat: None,
+            choices: Vec::new(),
+            answer_choice: None,
+            record_answer: None,
         })
     }
 
@@ -390,6 +405,9 @@ impl<'a> Parser<'a> {
             list: None,
             hints,
             repeat: None,
+            choices: Vec::new(),
+            answer_choice: None,
+            record_answer: None,
         })
     }
 

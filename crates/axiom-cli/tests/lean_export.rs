@@ -130,6 +130,15 @@ fn repeat_steps_are_proven_by_lean() {
     );
 }
 
+/// A rule that calls itself (#225): the answer for 0 and the step from `n - 1`.
+#[test]
+fn recursive_steps_are_proven_by_lean() {
+    project_golden(
+        "recursion",
+        &["triangle__start", "triangle__step", "stairs__step"],
+    );
+}
+
 /// With `--lean`, a rule Lean cannot take fails the build (issue #211):
 /// here a `hint` naming a lemma that does not exist.
 #[test]
