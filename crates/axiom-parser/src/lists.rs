@@ -18,7 +18,10 @@
 //! `max_bounds`).
 //! Emitted code runs that loop, then calls the core.
 
+use std::collections::BTreeMap;
+
 use crate::ast::{BinaryOp, Fold, ListRule, SpecExpr};
+use crate::repeat::rename;
 use crate::simple::{check_ranges, strip_comment};
 
 /// The rewritten source (same lines, item rules appended) and, for each
@@ -250,8 +253,38 @@ fn times(length: &str, v: i128) -> String {
 
 pub(crate) fn expand(source: &str) -> Result<Option<Expanded>, String> {
     let mut lines: Vec<String> = source.lines().map(String::from).collect();
+    let blocks = top_blocks(&lines)?;
+    let callees = callees_of(&lines, &blocks)?;
+    if !callees.is_empty() {
+        for (start, end, head) in &blocks {
+            let lists = list_names(&head.params);
+            for line in &mut lines[start + 1..*end] {
+                *line = rewrite_calls(line, &lists, &head.name, &callees)?;
+            }
+        }
+    }
     let mut appended = String::new();
     let mut rules = Vec::new();
+    for (start, end, head) in blocks {
+        let (item_rules, core_text, rule) = split(&head, &lines[start..end], start + 1)?;
+        for (offset, line) in core_text.into_iter().enumerate() {
+            lines[start + offset] = line;
+        }
+        appended += &item_rules;
+        rules.push((format!("{}__core", head.name), rule));
+    }
+    if rules.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Expanded {
+        source: lines.join("\n") + "\n" + &appended,
+        rules,
+    }))
+}
+
+/// Top-level list rules: first line, end line (exclusive) and head.
+fn top_blocks(lines: &[String]) -> Result<Vec<(usize, usize, Head)>, String> {
+    let mut blocks = Vec::new();
     let mut index = 0;
     while index < lines.len() {
         let text = strip_comment(&lines[index]).to_string();
@@ -278,21 +311,142 @@ pub(crate) fn expand(source: &str) -> Result<Option<Expanded>, String> {
             }
             end += 1;
         }
-        let (item_rules, core_text, rule) = split(&head, &lines[start..end], start + 1)?;
-        for (offset, line) in core_text.into_iter().enumerate() {
-            lines[start + offset] = line;
-        }
-        appended += &item_rules;
-        rules.push((format!("{}__core", head.name), rule));
+        blocks.push((start, end, head));
         index = end;
     }
-    if rules.is_empty() {
-        return Ok(None);
+    Ok(blocks)
+}
+
+fn list_names(params: &[(String, bool)]) -> Vec<&str> {
+    params
+        .iter()
+        .filter(|(_, list)| *list)
+        .map(|(p, _)| p.as_str())
+        .collect()
+}
+
+/// A list rule that another list rule of this file may call: its inputs, and
+/// the one `sum(...)` its core takes, written in terms of its list.
+struct Callee {
+    params: Vec<(String, bool)>,
+    list: String,
+    sum: String,
+}
+
+/// The list rules whose answer is one plain sum over their items (and no
+/// `each`/`position`). A caller computes that sum over its own list and calls
+/// the core, so the callee's loop is not repeated per call.
+fn callees_of(
+    lines: &[String],
+    blocks: &[(usize, usize, Head)],
+) -> Result<BTreeMap<String, Callee>, String> {
+    let mut found = BTreeMap::new();
+    for (start, end, head) in blocks {
+        let lists = list_names(&head.params);
+        let [list] = lists.as_slice() else {
+            continue;
+        };
+        let Ok((_, _, rule)) = split(head, &lines[*start..*end], start + 1) else {
+            continue;
+        };
+        if rule.each || rule.position || rule.folds != [Fold::Sum] || rule.items.len() != 1 {
+            continue;
+        }
+        let mut sums: Vec<String> = Vec::new();
+        for raw in &lines[start + 1..*end] {
+            replace_calls(strip_comment(raw), "sum", &mut |inner: &str| {
+                sums.push(inner.to_string());
+                Ok(String::new())
+            })?;
+        }
+        sums.sort();
+        sums.dedup();
+        let [sum] = sums.as_slice() else {
+            continue;
+        };
+        if head
+            .params
+            .iter()
+            .filter(|(_, is_list)| !*is_list)
+            .any(|(p, _)| mentions(sum, p))
+        {
+            continue;
+        }
+        found.insert(
+            head.name.clone(),
+            Callee {
+                params: head.params.clone(),
+                list: list.to_string(),
+                sum: sum.clone(),
+            },
+        );
     }
-    Ok(Some(Expanded {
-        source: lines.join("\n") + "\n" + &appended,
-        rules,
-    }))
+    Ok(found)
+}
+
+/// Rewrites each call `R(args)` to `R__core(scalars, count(list), sum(...))`,
+/// where `list` is a list of the caller and the sum is `R`'s over it. Calls
+/// that do not match stay as written.
+fn rewrite_calls(
+    text: &str,
+    lists: &[&str],
+    own: &str,
+    callees: &BTreeMap<String, Callee>,
+) -> Result<String, String> {
+    let mut out = text.to_string();
+    for (name, callee) in callees {
+        if name == own {
+            continue;
+        }
+        out = replace_calls(&out, name, &mut |inner: &str| {
+            let original = format!("{name}({inner})");
+            let args = top_args(inner);
+            if args.len() != callee.params.len() {
+                return Ok(original);
+            }
+            let mut scalars: Vec<&str> = Vec::new();
+            let mut ours: Option<&str> = None;
+            for ((_, is_list), arg) in callee.params.iter().zip(&args) {
+                if !*is_list {
+                    scalars.push(arg);
+                } else if lists.contains(arg) {
+                    ours = Some(arg);
+                } else {
+                    return Ok(original);
+                }
+            }
+            let Some(list) = ours else {
+                return Ok(original);
+            };
+            let mut core_args: Vec<String> = scalars.iter().map(|s| s.to_string()).collect();
+            core_args.push(format!("count({list})"));
+            core_args.push(format!("sum({})", rename(&callee.sum, &callee.list, list)));
+            Ok(format!("{name}__core({})", core_args.join(", ")))
+        })?;
+    }
+    Ok(out)
+}
+
+/// The arguments of a call, split at commas outside parentheses and quotes.
+fn top_args(inner: &str) -> Vec<&str> {
+    let mut args = Vec::new();
+    let mut depth = 0;
+    let mut quoted = false;
+    let mut start = 0;
+    for (i, c) in inner.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '(' if !quoted => depth += 1,
+            ')' if !quoted => depth -= 1,
+            ',' if !quoted && depth == 0 => {
+                args.push(inner[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    args.push(inner[start..].trim());
+    args
 }
 
 /// Splits one list rule (its lines, the first at `first_line`) into the item
@@ -999,6 +1153,22 @@ mod tests {
             .find(|c| c.name == "cart__item1")
             .unwrap();
         assert_eq!(item.params.len(), 2);
+    }
+
+    #[test]
+    fn a_call_to_a_list_rule_sums_the_callers_list_once_and_calls_the_core() {
+        let expanded = super::expand(
+            "total(prices[n])\n  need n <= 10\n  need prices <= 1000\n  always -> sum(prices)\n  promise answer <= 10000\n\ncopy(items[n])\n  need n <= 10\n  need items <= 1000\n  always -> total(items) * 2 + total(items)\n  promise answer <= 30000\n",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!expanded.source.contains("total(items)"));
+        let (_, copy) = expanded
+            .rules
+            .iter()
+            .find(|(name, _)| name == "copy__core")
+            .unwrap();
+        assert_eq!(copy.items, ["copy__item1"]);
     }
 
     #[test]

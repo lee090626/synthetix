@@ -152,6 +152,7 @@ What you can write:
 | `sum(total * weights / sum(weights))` | A sum of items that use a list's own sum; the inner sum is added up first | Items at least 0 |
 | `need prices <= 100000` | Holds for every item | Keep it apart from lines about `n` or `sum(...)` |
 | `balance(paid[n], share[n])`, `order(prices[n], fee)` | Lists share one length; other inputs work as usual | |
+| `total(items) * 2` in a rule over `items[n]`, where `total` is a rule over `prices[n]` whose answer is one `sum(prices)` | The caller adds up `items` once and calls `total`'s core; repeated calls share that sum | The caller's own `need`s for `items` and `n` (the callee's `need`s) |
 
 What a `promise` can prove:
 
@@ -395,7 +396,7 @@ More types:
 | A promise naming two fields of a record answer (`answer.tax <= answer.goods`) | A promise on each field |
 | A record answer whose field is a record | Answer the inner record from its own rule |
 | Lists of a fixed size holding a type (`sizes[3]: Size`) | A list of any length (`sizes[n]`) |
-| Calling a rule with a list, `repeat` or recursion answer from another rule, in one file or several | Call it from `--emit` or `axiom run` |
+| Calling a rule from another rule when it takes a list and its answer is not one `sum`: `repeat`, recursion, `min`, `max`, a list answer, or a rule in another file | Call it from `--emit` or `axiom run` |
 | A promise about `sum(lines.price * lines.qty)` (as for two lists, above) | A promise that follows from the ranges |
 
 ### Numbers must stay in range
