@@ -223,7 +223,7 @@ fn check_for(name: &str, ty: &Type, var: &str, wide: bool) -> Result<String, Str
             "  if (typeof {var} !== \"number\" || ({var} >>> 0) !== {var}) throw new TypeError(\"{name}: expected u32\");\n"
         ),
         Type::I32 => format!(
-            "  if (!Number.isInteger({var}) || {var} < -0x80000000 || {var} > 0x7fffffff) throw new TypeError(\"{name}: expected i32\");\n"
+            "  if (typeof {var} !== \"number\" || ({var} | 0) !== {var}) throw new TypeError(\"{name}: expected i32\");\n"
         ),
         Type::Bool => format!(
             "  if (typeof {var} !== \"boolean\") throw new TypeError(\"{name}: expected bool\");\n"
