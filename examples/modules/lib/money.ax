@@ -1,0 +1,9 @@
+# 주문 한 건: 물건값과 개수
+type Order
+  price
+  quantity
+
+# 수수료: 물건값의 1%
+fee(price)
+  need price <= 10000
+  always -> price / 100

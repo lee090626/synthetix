@@ -221,7 +221,10 @@ impl Fold {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Import {
+    /// Names as the other file declares them.
     pub names: Vec<String>,
+    /// For each name, the name it has here (`fee as price_fee`), if any.
+    pub aliases: Vec<Option<String>>,
     pub path: String,
     pub span: Span,
 }

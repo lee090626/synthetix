@@ -379,13 +379,23 @@ More types:
   rule with other places is an error.
 - **Types from another file**: `from shop: Order, Size, fee` brings the types
   and the rules. A type the named rules take comes too. Calls to `fee` are
-  checked, and an `Order` is passed whole.
+  checked, and an `Order` is passed whole. A `from` line names a file next to
+  the one it is in: `from lib/tax: charge` in `rules.ax`, `from money: fee` in
+  `lib/tax.ax`. A type reaches a file through the files that name it, and the
+  answer range of an imported rule bounds arithmetic on its answer, as inside
+  one file (`fee(p) + p` needs `fee` to answer a bounded value). `as` gives
+  a name here: `from shop: Order as Purchase, fee as price_fee`. Two files may
+  not both define a rule of the same name, even with `as`. A rule that
+  answers a record (`quote(price, qty) -> Bill`) comes with its fields, so
+  `quote(price, qty).goods` works in the file that names it. Example:
+  `examples/modules`.
 
 | Not yet | Instead |
 |---|---|
 | A promise naming two fields of a record answer (`answer.tax <= answer.goods`) | A promise on each field |
 | A record answer whose field is a record | Answer the inner record from its own rule |
 | Lists of a fixed size holding a type (`sizes[3]: Size`) | A list of any length (`sizes[n]`) |
+| Calling a rule with a list, `repeat` or recursion answer from another rule, in one file or several | Call it from `--emit` or `axiom run` |
 | A promise about `sum(lines.price * lines.qty)` (as for two lists, above) | A promise that follows from the ranges |
 
 ### Numbers must stay in range

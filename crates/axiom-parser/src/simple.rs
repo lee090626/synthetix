@@ -515,18 +515,32 @@ fn import(rest: &str, line_no: usize) -> Result<String, String> {
     ))
 }
 
+/// Names of a `from` line, each `name` or `name as other`.
 fn names_list(text: &str, line_no: usize) -> Result<Vec<String>, String> {
-    let names: Vec<String> = text
+    let items: Vec<Vec<&str>> = text
         .split(',')
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
+        .map(|item| item.split_whitespace().collect::<Vec<_>>())
+        .filter(|words| !words.is_empty())
         .collect();
-    if names.is_empty() {
+    if items.is_empty() {
         return Err(format!("line {line_no}: expected at least one name"));
     }
-    for name in &names {
-        check_name(name, line_no)?;
+    let mut names = Vec::new();
+    for words in &items {
+        match words.as_slice() {
+            [name] => check_name(name, line_no)?,
+            [name, "as", other] => {
+                check_name(name, line_no)?;
+                check_name(other, line_no)?;
+            }
+            _ => {
+                return Err(format!(
+                    "line {line_no}: write `name` or `name as other`, not `{}`",
+                    words.join(" ")
+                ));
+            }
+        }
+        names.push(words.join(" "));
     }
     Ok(names)
 }
@@ -1508,7 +1522,7 @@ impl Block {
     }
 }
 
-pub(crate) fn strip_comment(line: &str) -> &str {
+pub fn strip_comment(line: &str) -> &str {
     let mut in_quotes = false;
     for (index, c) in line.char_indices() {
         match c {

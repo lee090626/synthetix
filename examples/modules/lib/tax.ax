@@ -1,0 +1,11 @@
+from money: fee, Order
+
+# 부가세: 물건값의 10%
+vat(price)
+  need price <= 10000
+  always -> price / 10
+
+# 주문 한 건에 붙는 수수료와 부가세
+charge(order: Order)
+  need order.price <= 10000
+  always -> fee(order.price) + vat(order.price)

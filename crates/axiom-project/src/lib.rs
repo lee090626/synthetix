@@ -1,14 +1,16 @@
 //! Project loading and module linking for Synthetix v2.
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axiom_ami::Expr;
 use axiom_parser::{
-    Component, Contract, Import, Module, Page, PageElement, RecordDef, Reducer, Span, SpecExpr,
-    Type,
+    Component, Contract, Import, ImportCache, Module, Page, PageElement, RecordDef, Reducer, Span,
+    SpecExpr, Type,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +112,7 @@ impl RetainedProjectLoader {
         let mut modules = Vec::new();
         let mut visiting = Vec::new();
         let mut stats = RetainedLoadStats::default();
+        let mut caches = LoadCaches::default();
         visit_module_retained(
             &config.entry,
             &mut modules,
@@ -117,7 +120,11 @@ impl RetainedProjectLoader {
             previous.map(|state| &state.modules),
             &mut stats,
             &mut self.watch_paths,
+            &mut caches,
         )?;
+        for path in caches.fingerprints.keys() {
+            push_watch_path(&mut self.watch_paths, path.clone());
+        }
 
         let current_modules = modules
             .iter()
@@ -304,6 +311,8 @@ struct ModuleInfo {
     path: PathBuf,
     module: Module,
     source_contents: Arc<[u8]>,
+    /// See [`file_fingerprint`]: the module's parse can only change with it.
+    fingerprint: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -318,7 +327,8 @@ pub fn load(config_path: impl AsRef<Path>) -> Result<Project, String> {
     let config = parse_config(config_path)?;
     let mut modules = Vec::new();
     let mut visiting = Vec::new();
-    visit_module(&config.entry, &mut modules, &mut visiting)?;
+    let mut imports = ImportCache::default();
+    visit_module(&config.entry, &mut modules, &mut visiting, &mut imports)?;
     link_project(config, modules)
 }
 
@@ -450,6 +460,7 @@ fn visit_module(
     path: &Path,
     modules: &mut Vec<ModuleInfo>,
     visiting: &mut Vec<PathBuf>,
+    cache: &mut ImportCache<PathBuf>,
 ) -> Result<(), String> {
     let path = canonical(path)?;
     if modules.iter().any(|module| module.path == path) {
@@ -470,21 +481,77 @@ fn visit_module(
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     axiom_parser::simple::check_user_syntax(&source)
         .map_err(|error| format!("{}: {error}", path.display()))?;
-    let module = axiom_parser::parse_module_with(&source, &|file| read_from(&path, file))
-        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let module = parse_at(&path, &source, cache)?;
     let source_contents = Arc::<[u8]>::from(source.as_bytes());
     let imports = module.imports.clone();
     for import in &imports {
         let imported = resolve_import(&path, import)?;
-        visit_module(&imported, modules, visiting)?;
+        visit_module(&imported, modules, visiting, cache)?;
     }
     visiting.pop();
     modules.push(ModuleInfo {
         path,
         module,
         source_contents,
+        fingerprint: 0,
     });
     Ok(())
+}
+
+/// What one load keeps between modules: file fingerprints and expanded `from`
+/// files. Both are valid for one load only.
+#[derive(Default)]
+struct LoadCaches {
+    fingerprints: HashMap<PathBuf, u64>,
+    imports: ImportCache<PathBuf>,
+}
+
+/// Parses the module at `path` from `source`; its `from` lines resolve from
+/// its folder.
+fn parse_at(
+    path: &Path,
+    source: &str,
+    imports: &mut ImportCache<PathBuf>,
+) -> Result<Module, String> {
+    axiom_parser::parse_module_with(
+        source,
+        &path.to_path_buf(),
+        &|base: &PathBuf, file: &str| read_from(base, file),
+        imports,
+    )
+    .map_err(|error| format!("{}: {error}", path.display()))
+}
+
+/// A hash of the text of `path` and, transitively, of the files its `from`
+/// lines name, read from disk. A module's parse can only change when its
+/// fingerprint does. `memo` keeps each file's hash for one load, so each file
+/// is read once per load.
+fn file_fingerprint(
+    path: &Path,
+    memo: &mut HashMap<PathBuf, u64>,
+    visiting: &mut Vec<PathBuf>,
+) -> u64 {
+    if let Some(known) = memo.get(path) {
+        return *known;
+    }
+    let text = fs::read_to_string(path).ok();
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    if let Some(text) = &text
+        && !visiting.iter().any(|item| item == path)
+    {
+        visiting.push(path.to_path_buf());
+        for file in axiom_parser::from_files(text) {
+            if let Ok(target) = from_path(path, &file) {
+                let target = fs::canonicalize(&target).unwrap_or(target);
+                file_fingerprint(&target, memo, visiting).hash(&mut hasher);
+            }
+        }
+        visiting.pop();
+    }
+    let value = hasher.finish();
+    memo.insert(path.to_path_buf(), value);
+    value
 }
 
 fn visit_module_retained(
@@ -494,6 +561,7 @@ fn visit_module_retained(
     previous: Option<&HashMap<PathBuf, ModuleInfo>>,
     stats: &mut RetainedLoadStats,
     watch_paths: &mut Vec<PathBuf>,
+    caches: &mut LoadCaches,
 ) -> Result<(), String> {
     push_watch_path(watch_paths, path.to_path_buf());
     let path = canonical(path)?;
@@ -514,10 +582,10 @@ fn visit_module_retained(
     visiting.push(path.clone());
     let source = fs::read_to_string(&path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-    let source_bytes = source.as_bytes();
+    let fingerprint = file_fingerprint(&path, &mut caches.fingerprints, &mut Vec::new());
     let cached = previous
         .and_then(|cache| cache.get(&path))
-        .filter(|module| module.source_contents.as_ref() == source_bytes);
+        .filter(|module| module.fingerprint == fingerprint);
     let (module, source_contents) = if let Some(cached) = cached {
         stats.modules_reused += 1;
         (cached.module.clone(), Arc::clone(&cached.source_contents))
@@ -525,20 +593,28 @@ fn visit_module_retained(
         stats.modules_parsed += 1;
         axiom_parser::simple::check_user_syntax(&source)
             .map_err(|error| format!("{}: {error}", path.display()))?;
-        let module = axiom_parser::parse_module_with(&source, &|file| read_from(&path, file))
-            .map_err(|error| format!("{}: {error}", path.display()))?;
-        (module, Arc::<[u8]>::from(source_bytes))
+        let module = parse_at(&path, &source, &mut caches.imports)?;
+        (module, Arc::<[u8]>::from(source.as_bytes()))
     };
     for import in &module.imports {
         push_watch_path(watch_paths, import_candidate_path(&path, import)?);
         let imported = resolve_import(&path, import)?;
-        visit_module_retained(&imported, modules, visiting, previous, stats, watch_paths)?;
+        visit_module_retained(
+            &imported,
+            modules,
+            visiting,
+            previous,
+            stats,
+            watch_paths,
+            caches,
+        )?;
     }
     visiting.pop();
     modules.push(ModuleInfo {
         path,
         module,
         source_contents,
+        fingerprint,
     });
     Ok(())
 }
@@ -560,10 +636,10 @@ fn affected_modules(
     let old = &previous.modules;
     let mut affected = HashSet::new();
     for (path, module) in current {
-        if old
-            .get(path)
-            .is_none_or(|cached| cached.source_contents.as_ref() != module.source_contents.as_ref())
-        {
+        if old.get(path).is_none_or(|cached| {
+            cached.source_contents.as_ref() != module.source_contents.as_ref()
+                || cached.fingerprint != module.fingerprint
+        }) {
             affected.insert(path.clone());
         }
     }
@@ -629,6 +705,23 @@ fn global_declarations(modules: &HashMap<PathBuf, ModuleInfo>) -> Vec<String> {
     declarations
 }
 
+/// The field rules of the rule `name` in `target` when it answers a record
+/// (`quote` is `quote__goods`, `quote__tax`); none otherwise.
+fn record_answer_fields(modules: &[ModuleInfo], target: &Path, name: &str) -> Vec<String> {
+    modules
+        .iter()
+        .filter(|module| module.path.as_path() == target)
+        .flat_map(|module| module.module.contracts.iter())
+        .find_map(|contract| {
+            contract
+                .record_answer
+                .as_ref()
+                .filter(|answer| answer.name == name)
+        })
+        .map(|answer| answer.fields.iter().map(|(_, rule)| rule.clone()).collect())
+        .unwrap_or_default()
+}
+
 fn resolve_import(source: &Path, import: &Import) -> Result<PathBuf, String> {
     let path = import_candidate_path(source, import)?;
     if !path.is_file() {
@@ -642,8 +735,8 @@ fn resolve_import(source: &Path, import: &Import) -> Result<PathBuf, String> {
     canonical(&path)
 }
 
-/// The source of `file`, written after `from` in the file at `source`.
-fn read_from(source: &Path, file: &str) -> Result<String, String> {
+/// Where `file`, written after `from` in the file at `source`, is.
+fn from_path(source: &Path, file: &str) -> Result<PathBuf, String> {
     let mut path = source
         .parent()
         .ok_or_else(|| format!("cannot determine parent of {}", source.display()))?
@@ -651,7 +744,16 @@ fn read_from(source: &Path, file: &str) -> Result<String, String> {
     if path.extension().is_none() {
         path.set_extension("ax");
     }
-    fs::read_to_string(&path).map_err(|error| format!("cannot read {}: {error}", path.display()))
+    Ok(path)
+}
+
+/// The source of `file`, written after `from` in the file at `source`, and
+/// that file's own path: its `from` lines resolve from its folder.
+fn read_from(source: &Path, file: &str) -> Result<(String, PathBuf), String> {
+    let path = from_path(source, file)?;
+    let text = fs::read_to_string(&path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    Ok((text, canonical(&path)?))
 }
 
 fn import_candidate_path(source: &Path, import: &Import) -> Result<PathBuf, String> {
@@ -748,28 +850,41 @@ fn link_project_retained(
                     target.display()
                 ));
             }
-            // A rule with an answer per item (`to_pay`) is `to_pay_1` .. `to_pay_N`.
-            let names: Vec<String> = import
+            // Each entry is (name here, name in `target`). A rule with an answer
+            // per item (`to_pay`) is `to_pay_1` .. `to_pay_N`; a rule answering a
+            // record is one rule per field (`quote__goods`), named after the alias.
+            let names: Vec<(String, String)> = import
                 .names
                 .iter()
-                .flat_map(|name| {
+                .zip(&import.aliases)
+                .flat_map(|(name, alias)| {
+                    let local = alias.clone().unwrap_or_else(|| name.clone());
                     if definitions.contains_key(&(target.clone(), name.clone())) {
-                        return vec![name.clone()];
+                        return vec![(local, name.clone())];
                     }
-                    let items: Vec<String> = (1..)
-                        .map(|item| format!("{name}_{item}"))
-                        .take_while(|item| {
-                            definitions.contains_key(&(target.clone(), item.clone()))
+                    let items: Vec<(String, String)> = (1..)
+                        .map(|item| (format!("{local}_{item}"), format!("{name}_{item}")))
+                        .take_while(|(_, original)| {
+                            definitions.contains_key(&(target.clone(), original.clone()))
                         })
                         .collect();
-                    if items.is_empty() {
-                        vec![name.clone()]
-                    } else {
-                        items
+                    if !items.is_empty() {
+                        return items;
                     }
+                    let fields = record_answer_fields(&modules, &target, name);
+                    if fields.is_empty() {
+                        return vec![(local, name.clone())];
+                    }
+                    fields
+                        .into_iter()
+                        .map(|field| {
+                            let suffix = field.strip_prefix(name.as_str()).unwrap_or_default();
+                            (format!("{local}{suffix}"), field)
+                        })
+                        .collect()
                 })
                 .collect();
-            for name in &names {
+            for (local, name) in &names {
                 let key = (target.clone(), name.clone());
                 let Some(definition) = definitions.get(&key) else {
                     return Err(format!(
@@ -785,9 +900,9 @@ fn link_project_retained(
                         import.span.line
                     ));
                 }
-                if scope.insert(name.clone(), key).is_some() {
+                if scope.insert(local.clone(), key).is_some() {
                     return Err(format!(
-                        "{}:{}: duplicate imported name: {name}",
+                        "{}:{}: duplicate imported name: {local}",
                         module.path.display(),
                         import.span.line
                     ));
@@ -2507,6 +2622,90 @@ mod tests {
         assert_eq!(stats.contracts_relinked, 2);
         assert_eq!(stats.contracts_reused, 0);
         assert_eq!(stats.affected_modules.len(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retained_loader_follows_a_record_answer_across_files() {
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-retained-record-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let quote = |goods: &str| {
+            format!(
+                "type Bill\n  goods\n  tax\n\nquote(price, qty) -> Bill\n  need price <= 10000\n  need qty <= 100\n  goods:\n    always -> {goods}\n    promise answer <= 1000000\n  tax:\n    always -> price * qty / 10\n    promise answer <= 100000\n"
+            )
+        };
+        fs::write(root.join("lib.ax"), quote("price * qty")).unwrap();
+        fs::write(
+            root.join("main.ax"),
+            "from lib: quote, Bill\n\npay(price, qty)\n  need price <= 10000\n  need qty <= 100\n  always -> quote(price, qty).goods + quote(price, qty).tax\n  promise answer <= 1100000\n",
+        )
+        .unwrap();
+        let config = root.join("synthetix.toml");
+        fs::write(&config, "[project]\nentry = \"main.ax\"\n").unwrap();
+        let mut loader = RetainedProjectLoader::default();
+        let (project, _) = loader.load(&config).unwrap();
+        assert_same_project(&project, &load(&config).unwrap());
+
+        // The field rule changes in its own file; `pay` reads the new field.
+        fs::write(root.join("lib.ax"), quote("price * qty + 1")).unwrap();
+        let (project, stats) = loader.load(&config).unwrap();
+        assert_same_project(&project, &load(&config).unwrap());
+        assert_eq!(stats.modules_parsed, 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retained_loader_reparses_a_caller_when_an_imported_rule_changes() {
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-retained-ranges-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("money.ax"),
+            "fee(price)\n  need price <= 10000\n  always -> price\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("main.ax"),
+            "from money: fee\n\nvat(p)\n  need p <= 10000\n  always -> fee(p) + p\n",
+        )
+        .unwrap();
+        let config = root.join("synthetix.toml");
+        fs::write(&config, "[project]\nentry = \"main.ax\"\n").unwrap();
+        let mut loader = RetainedProjectLoader::default();
+        let (project, first) = loader.load(&config).unwrap();
+        assert_same_project(&project, &load(&config).unwrap());
+        assert_eq!(first.modules_parsed, 2);
+        let (_, noop) = loader.load(&config).unwrap();
+        assert_eq!(noop.modules_parsed, 0);
+        assert_eq!(noop.modules_reused, 2);
+
+        // `fee` now answers any number: `main` must be checked again.
+        fs::write(root.join("money.ax"), "fee(price)\n  always -> price\n").unwrap();
+        let error = loader.load(&config).unwrap_err();
+        assert!(error.contains("may go outside"), "{error}");
+        assert!(load(&config).unwrap_err().contains("may go outside"));
+
+        fs::write(
+            root.join("money.ax"),
+            "fee(price)\n  need price <= 10000\n  always -> price\n",
+        )
+        .unwrap();
+        // Back to the bytes of the last good load: nothing is parsed again.
+        let (project, restored) = loader.load(&config).unwrap();
+        assert_same_project(&project, &load(&config).unwrap());
+        assert_eq!(restored.modules_parsed, 0);
+        assert_eq!(restored.modules_reused, 2);
         fs::remove_dir_all(root).unwrap();
     }
 
