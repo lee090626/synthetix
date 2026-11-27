@@ -33,6 +33,7 @@ pub fn is_simple(source: &str) -> bool {
         || line.starts_with("page ")
         || line.starts_with("use settle for ")
         || line.starts_with("type ")
+        || line.starts_with("effect ")
     {
         return true;
     }
@@ -210,6 +211,8 @@ pub fn translate_with_decimals(source: &str) -> Result<(String, Decimals), Strin
     let lines: Vec<&str> = source.lines().collect();
     let mut out: Vec<String> = vec![String::new(); lines.len()];
     let mut current: Option<Current> = None;
+    // The `effect` line that has no body (indented lines under it are an error).
+    let mut effect_line: Option<usize> = None;
 
     for (index, raw) in lines.iter().enumerate() {
         let line_no = index + 1;
@@ -223,8 +226,12 @@ pub fn translate_with_decimals(source: &str) -> Result<(String, Decimals), Strin
             if let Some(block) = current.take() {
                 block.finish(&mut out, &mut decimals)?;
             }
+            effect_line = None;
             if let Some(rest) = trimmed.strip_prefix("from ") {
                 out[index] = import(rest, line_no)?;
+            } else if let Some(rest) = trimmed.strip_prefix("effect ") {
+                out[index] = effect(rest, line_no)?;
+                effect_line = Some(line_no);
             } else if let Some(size) = trimmed.strip_prefix("use settle for ") {
                 // shortcut: a file may not also have a page using settle (lemmas would repeat).
                 let size = size
@@ -301,6 +308,11 @@ pub fn translate_with_decimals(source: &str) -> Result<(String, Decimals), Strin
                     &mut decimals.states,
                 )?;
                 *last_index = index;
+            }
+            None if effect_line.is_some() => {
+                return Err(format!(
+                    "line {line_no}: an `effect` line has no body; put these lines under a rule or page"
+                ));
             }
             None => {
                 return Err(format!(
@@ -513,6 +525,52 @@ fn import(rest: &str, line_no: usize) -> Result<String, String> {
         "import {{ {} }} from \"{path}\";",
         names.join(", ")
     ))
+}
+
+/// `effect read_count(key: u32) -> u32`: a host effect. Its inputs and answer
+/// are typed (`u32`, `i32` or `bool`) because the host's answer is checked
+/// against that type only. It is declared as an extern: no proof covers it.
+fn effect(rest: &str, line_no: usize) -> Result<String, String> {
+    let usage = format!("line {line_no}: write `effect name(key: u32) -> u32`");
+    let (signature, answer) = rest.rsplit_once("->").ok_or_else(|| usage.clone())?;
+    let (name, inputs) = signature
+        .trim()
+        .split_once('(')
+        .ok_or_else(|| usage.clone())?;
+    let inputs = inputs
+        .trim()
+        .strip_suffix(')')
+        .ok_or_else(|| usage.clone())?;
+    let name = name.trim();
+    check_name(name, line_no)?;
+    let answer = effect_type(answer.trim(), line_no)?;
+    let mut typed = Vec::new();
+    for input in inputs
+        .split(',')
+        .map(str::trim)
+        .filter(|input| !input.is_empty())
+    {
+        let (input_name, ty) = input.split_once(':').ok_or_else(|| usage.clone())?;
+        let input_name = input_name.trim();
+        check_name(input_name, line_no)?;
+        typed.push(format!(
+            "{input_name}: {}",
+            effect_type(ty.trim(), line_no)?
+        ));
+    }
+    Ok(format!(
+        "export extern fn {name}({}) -> {answer};",
+        typed.join(", ")
+    ))
+}
+
+fn effect_type(text: &str, line_no: usize) -> Result<&str, String> {
+    match text {
+        "u32" | "i32" | "bool" => Ok(text),
+        _ => Err(format!(
+            "line {line_no}: an effect takes and answers `u32`, `i32` or `bool`, not `{text}`"
+        )),
+    }
 }
 
 /// Names of a `from` line, each `name` or `name as other`.
@@ -2468,6 +2526,45 @@ mod tests {
     use super::*;
 
     const FIT: &str = "# note\nfit_price(price, min, max)\n  need min <= max\n\n  price < min -> min\n  price > max -> max\n  else -> price\n";
+
+    /// M5: `effect` declares a typed host call (an extern), outside every proof.
+    #[test]
+    fn effect_line_declares_a_typed_extern() {
+        let source = format!("effect lookup_price(id: u32, sign: i32) -> bool\n{FIT}");
+        let out = translate(&source).unwrap();
+        assert!(
+            out.starts_with("export extern fn lookup_price(id: u32, sign: i32) -> bool;\n"),
+            "{out}"
+        );
+        let module = crate::parse_module(&source).unwrap();
+        let effect = module
+            .contracts
+            .iter()
+            .find(|contract| contract.name == "lookup_price")
+            .unwrap();
+        assert_eq!(effect.kind, crate::ast::DeclarationKind::Extern);
+        assert!(effect.exported);
+    }
+
+    /// M5: an effect needs a type on every input and on its answer, and no body.
+    #[test]
+    fn effect_line_rejects_untyped_text_and_bodies() {
+        for (source, message) in [
+            (
+                "effect lookup(id) -> u32\n",
+                "write `effect name(key: u32) -> u32`",
+            ),
+            ("effect lookup(id: u32) -> text\n", "not `text`"),
+            ("effect lookup(id: [u32; 2]) -> u32\n", "not `[u32; 2]`"),
+            (
+                "effect lookup(id: u32) -> u32\n  always -> 1\n",
+                "has no body",
+            ),
+        ] {
+            let error = translate(source).unwrap_err();
+            assert!(error.contains(message), "{source}: {error}");
+        }
+    }
 
     /// #151: `need used <= days` with `need days <= 31` bounds `used`, in either order.
     #[test]

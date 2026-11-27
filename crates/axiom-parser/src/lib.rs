@@ -17,7 +17,13 @@ pub use parser::Parser;
 pub fn parse(input: &str) -> Result<Contract, String> {
     if simple::is_simple(input) {
         let module = parse_module(input)?;
-        let [contract] = <[Contract; 1]>::try_from(module.contracts)
+        // An `effect` is a host call, not a rule: a file may declare one beside its rule.
+        let rules: Vec<Contract> = module
+            .contracts
+            .into_iter()
+            .filter(|contract| contract.kind != DeclarationKind::Extern)
+            .collect();
+        let [contract] = <[Contract; 1]>::try_from(rules)
             .map_err(|_| "expected exactly one rule in this file".to_string())?;
         validate_source(&contract, input)?;
         return Ok(contract);

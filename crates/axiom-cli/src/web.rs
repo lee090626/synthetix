@@ -262,6 +262,16 @@ fn build_project(
     println!("synthesis_result: FOUND");
     println!("proof_result: VERIFIED");
     println!("verified: {} contract(s)", compiled.len());
+    // Effects run host code that no proof covers, so they are counted apart from rules.
+    let effects = project
+        .verification_summaries
+        .iter()
+        .filter(|linked| linked.contract.kind == DeclarationKind::Extern)
+        .count();
+    println!(
+        "proof: {} rule(s) VERIFIED, {effects} effect(s) UNVERIFIED",
+        compiled.len()
+    );
     println!("wrote: {}", output_dir.display());
     if lean {
         prove_with_lean(&compiled, &output_dir.join("lean"))?;
@@ -1345,7 +1355,9 @@ fn expr_json(expr: &SpecExpr) -> Result<String, String> {
             expr_json(lhs)?,
             expr_json(rhs)?
         )),
-        SpecExpr::Call(name, _) => Err(format!("page expressions cannot call contract {name}")),
+        SpecExpr::Call(name, _) => Err(format!(
+            "page expressions cannot call {name}; set a value with `x = {name}(...)` on a `when` line"
+        )),
     }
 }
 
@@ -3599,6 +3611,209 @@ async function launch(storage, migration = null) {
         );
         assert!(lines.next().is_none());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// M5: an effect cannot be part of a rule or shown on a page; the error says where it may go.
+    #[test]
+    fn effect_cannot_be_used_in_a_rule_or_a_page_expression() {
+        for (body, message) in [
+            (
+                "bad(n)\n  need n < 100\n  always -> lookup_price(n)\n",
+                "effect lookup_price cannot be used in a rule",
+            ),
+            (
+                "double(n)\n  need n < 100\n  always -> n * 2\n\npage Shop\n  item = 0\n  show lookup_price(item)\n",
+                "page expressions cannot call lookup_price; set a value with `x = lookup_price(...)`",
+            ),
+        ] {
+            let root = std::env::temp_dir().join(format!(
+                "synthetix-web-effect-misuse-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(
+                root.join("main.ax"),
+                format!("effect lookup_price(id: u32) -> u32\n{body}"),
+            )
+            .unwrap();
+            let config = root.join("synthetix.toml");
+            std::fs::write(
+                &config,
+                "[project]\nentry = \"main.ax\"\ntarget = \"web\"\n",
+            )
+            .unwrap();
+            let error = build(&config, &root.join("dist")).unwrap_err();
+            assert!(error.contains(message), "{error}");
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    /// M5: an `effect` line in a page's `when` runs the host adapter; the page
+    /// state changes only when the answer is valid for its declared type.
+    #[test]
+    fn effect_buttons_commit_only_valid_host_answers() {
+        let root = std::env::temp_dir().join(format!(
+            "synthetix-web-effect-button-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("main.ax"),
+            "effect lookup_price(id: u32) -> u32\n\
+             double(n)\n\
+             \x20 need n < 1000\n\
+             \x20 always -> n * 2\n\
+             \n\
+             page Shop\n\
+             \x20 item = 0\n\
+             \x20 price = 0\n\
+             \x20 count = 0\n\
+             \n\
+             \x20 ask \"Item\" for item\n\
+             \x20 show price\n\
+             \x20 when \"Load\" is clicked\n\
+             \x20   price = lookup_price(item)\n\
+             \x20 when \"Add\" is clicked\n\
+             \x20   count = double(count)\n",
+        )
+        .unwrap();
+        let config = root.join("synthetix.toml");
+        std::fs::write(
+            &config,
+            "[project]\nentry = \"main.ax\"\ntarget = \"web\"\n",
+        )
+        .unwrap();
+        let output = root.join("dist");
+        build(&config, &output).unwrap();
+
+        let script = r#"
+const fs = require('node:fs');
+const vm = require('node:vm');
+const bytes = fs.readFileSync(process.env.AXIOM_TEST_WASM);
+class Element {
+  constructor(tagName) { this.tagName = tagName; this.children = []; this.listeners = {}; this.dataset = {}; this.hidden = true; this.textContent = ''; }
+  append(...items) { this.children.push(...items); }
+  replaceChildren() { this.children = []; }
+  addEventListener(name, callback) { this.listeners[name] = callback; }
+}
+const root = new Element('main');
+const error = new Element('div');
+global.window = {};
+global.location = { reload() {} };
+global.localStorage = { getItem() { return null; }, setItem() {} };
+global.document = {
+  querySelector(selector) { return selector === '#app' ? root : error; },
+  createElement(tagName) { return new Element(tagName); },
+};
+global.setInterval = () => 0;
+global.fetch = async (url) => url === './app.wasm'
+  ? { ok: true, arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) }
+  : { ok: false, text: async () => '' };
+vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
+const sleep = () => new Promise((resolve) => setTimeout(resolve, 0));
+const findButton = (node, label) => {
+  if (node.tagName === 'button' && node.textContent === label) return node;
+  for (const child of node.children) {
+    const found = findButton(child, label);
+    if (found) return found;
+  }
+  return null;
+};
+(async () => {
+  for (let attempt = 0; attempt < 100 && !window.synthetix?.state; attempt++) await sleep();
+  if (!window.synthetix?.state) throw new Error('runtime did not instantiate verified WASM');
+  const clickLoad = async () => {
+    const before = window.synthetix.lastTransition;
+    findButton(root, 'Load').listeners.click();
+    for (let attempt = 0; attempt < 200 && window.synthetix.lastTransition === before; attempt++) await sleep();
+    return window.synthetix.lastTransition;
+  };
+  const summary = (transition) => [transition.status, transition.error?.category ?? '-', window.synthetix.state.price, window.synthetix.lastEffect.status].join('|');
+
+  window.synthetix.state.item = 2;
+  const noAdapter = await clickLoad();
+  const noAdapterResult = summary(noAdapter);
+
+  const requests = [];
+  window.synthetix.registerEffectAdapter(async (request) => {
+    requests.push(request);
+    return request.inputs[0] + 40;
+  });
+  const applied = await clickLoad();
+  const appliedResult = [summary(applied), requests[0].name, JSON.stringify(requests[0].inputs), requests[0].responseType, requests[0].source].join('|');
+
+  window.synthetix.registerEffectAdapter(async () => -1);
+  const outOfRange = await clickLoad();
+  const outOfRangeResult = summary(outOfRange);
+
+  window.synthetix.registerEffectAdapter(async () => { throw new Error('upstream unavailable'); });
+  const adapterFailed = await clickLoad();
+  const adapterFailedResult = [summary(adapterFailed), adapterFailed.error?.message ?? '-'].join('|');
+
+  let firstSignal = null;
+  let calls = 0;
+  window.synthetix.registerEffectAdapter(async (_request, { signal }) => {
+    calls++;
+    if (calls === 1) {
+      firstSignal = signal;
+      return new Promise(() => {});
+    }
+    return 7;
+  });
+  const first = findButton(root, 'Load');
+  first.listeners.click();
+  const second = await clickLoad();
+  for (let attempt = 0; attempt < 20; attempt++) await sleep();
+  const supersededResult = [summary(second), String(firstSignal.aborted), window.synthetix.state.price].join('|');
+
+  // A rule button clicked while an effect is pending keeps its change when the effect commits.
+  let releaseFirst;
+  window.synthetix.registerEffectAdapter(async () => new Promise((resolve) => { releaseFirst = resolve; }));
+  window.synthetix.state.count = 5;
+  findButton(root, 'Load').listeners.click();
+  for (let attempt = 0; attempt < 100 && !releaseFirst; attempt++) await sleep();
+  findButton(root, 'Add').listeners.click();
+  const countWhilePending = window.synthetix.state.count;
+  const beforePending = window.synthetix.lastTransition;
+  releaseFirst(9);
+  for (let attempt = 0; attempt < 200 && window.synthetix.lastTransition === beforePending; attempt++) await sleep();
+  const pendingResult = [summary(window.synthetix.lastTransition), countWhilePending, window.synthetix.state.count].join('|');
+
+  process.stdout.write([noAdapterResult, appliedResult, outOfRangeResult, adapterFailedResult, supersededResult, pendingResult].join('\n'));
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"#;
+        let result = std::process::Command::new("node")
+            .arg("-e")
+            .arg(script)
+            .env("AXIOM_TEST_JS", output.join("app.js"))
+            .env("AXIOM_TEST_WASM", output.join("app.wasm"))
+            .output()
+            .expect("Node.js is required to execute the generated browser runtime");
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let stdout = String::from_utf8(result.stdout).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(
+            stdout,
+            [
+                "FAILED|APPLICATION_TRANSITION_FAILURE|0|ERROR",
+                "APPLIED|-|42|SUCCEEDED|lookup_price|[2]|u32|main.ax",
+                "FAILED|APPLICATION_TRANSITION_FAILURE|42|ERROR",
+                "FAILED|APPLICATION_TRANSITION_FAILURE|42|ERROR|main.ax: upstream unavailable",
+                "APPLIED|-|7|SUCCEEDED|true|7",
+                "APPLIED|-|9|SUCCEEDED|10|10",
+            ]
+            .join("\n")
+        );
     }
 
     #[test]

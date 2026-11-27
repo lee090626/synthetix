@@ -490,6 +490,53 @@ negative are only shown or compared, and calculated in a rule. A whole number
 up to 2147483647 may go into a `can be negative` rule. A rule with text answers
 sets a text value: `grade = grade_of(score)`.
 
+## Effects
+
+An effect asks the host for a value: an API, a stored number, a clock. Declare
+it with its input and answer types:
+
+```
+effect lookup_price(id: u32) -> u32
+```
+
+Inputs and the answer are `u32`, `i32` or `bool`. An effect runs only from a
+`when` line, as `price = lookup_price(item)`; a rule or a `show` line cannot
+call it.
+
+Axiom does not run or prove an effect. The host answers through an adapter,
+and Axiom checks only that the answer has the declared type. A missing or
+refused answer leaves the page as it was, and the button's transition is
+`FAILED`. `axiom build` counts the effects apart from the rules:
+
+```text
+proof: 1 rule(s) VERIFIED, 1 effect(s) UNVERIFIED
+```
+
+`axiom run` presses one button without a browser, with Node.js installed. It
+starts from the declared values and does not read or write saved ones:
+
+```bash
+axiom run . --action Load --set item=2 --adapter effects.js
+```
+
+`--wait-ms N` (default 5000) bounds how long an effect may take to answer.
+
+The adapter is a JavaScript file. It exports one function that gets the request
+(`name`, `inputs`, `responseType`, `source`, and the trust-boundary fields) and
+returns the answer:
+
+```js
+module.exports = async (request) => request.inputs[0] + 40;
+```
+
+The output lists the transition, the effect, and the state:
+
+```text
+transition: APPLIED
+effect: SUCCEEDED lookup_price
+state: {"item":2,"price":42}
+```
+
 ## When it fails
 
 | Message | What to do |
@@ -505,6 +552,10 @@ sets a text value: `grade = grade_of(score)`.
 | `call-site precondition ... is not established` | The values passed to another rule may break its `need` lines; add `need` lines or a condition |
 | `UNSATISFIABLE_PRECONDITION` | The `need` lines contradict each other |
 | `old syntax, which is no longer supported` | Rewrite the file in the forms above |
+| `an effect line has no body` | Put the lines under a rule or page, or delete them |
+| `effect ... cannot be used in a rule` | Call the effect from a page's `when` line (`x = name(...)`) |
+| `page expressions cannot call name` | Set the value with `x = name(...)` on a `when` line |
+| `an effect takes and answers u32, i32 or bool` | Use one of the three types |
 
 On a failed build, earlier verified output is removed, so a broken rule never
 keeps serving an old result. Fix the file and save; `axiom dev` rebuilds and
@@ -587,7 +638,8 @@ axiom dev        # live app; edits to .ax files rebuild it
 axiom build      # static output in dist/
 ```
 
-Use `axiom run file.ax -- <inputs>` to try a single rule.
+Use `axiom run file.ax -- <inputs>` to try a single rule, and
+`axiom run . --action "Label"` to press one button of a project (see Effects).
 
 ## Using rules from JavaScript, TypeScript, Rust, Python or Go
 

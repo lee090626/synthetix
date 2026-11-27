@@ -281,6 +281,17 @@ adapter errors remain application runtime failures; they are never proof
 counterexamples. A type-valid external result is still unverified application
 data, not a proof of its factual correctness.
 
+## v6.0 Page Effects
+
+An `effect` line compiles to an `extern` declaration. A page button or reducer
+that calls one goes through `requestExtern`: the page commits its updates only
+after each answer arrives and matches its declared type. A superseded or
+cancelled effect commits nothing and reports `CANCELLED`; a refused answer
+reports `FAILED` and keeps the state. `external_boundaries` and
+`verification_scope` in `app.proof.json` mark each effect `UNVERIFIED`.
+`axiom run <project> --action` runs the same runtime under Node.js; its adapter
+file is host code that Axiom does not verify.
+
 ## v5.0 Scope
 
 This baseline does not implement full records, lists, strings, state

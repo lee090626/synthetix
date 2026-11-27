@@ -1496,6 +1496,11 @@ fn expand_expr(
             let Some(definition) = definitions.get(target) else {
                 return Err(format!("contract not found: {name}"));
             };
+            if definition.contract.kind == axiom_parser::DeclarationKind::Extern {
+                return Err(format!(
+                    "effect {name} cannot be used in a rule; call it from a page's `when` line (`x = {name}(...)`)"
+                ));
+            }
             if definition.contract.params.len() != args.len() {
                 return Err(format!(
                     "contract {name} expects {} arguments, got {}",
@@ -2123,7 +2128,7 @@ fn page_expr_type(
             }
         }
         SpecExpr::Call(name, _) => Err(format!(
-            "{}: page expressions cannot call contract {name}",
+            "{}: page expressions cannot call {name}; set a value with `x = {name}(...)` on a `when` line",
             source.display()
         )),
     }
