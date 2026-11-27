@@ -35,6 +35,9 @@
 
 use crate::ast::{ChoiceType, RecordAnswer};
 use crate::simple::{check_name, strip_comment};
+use std::hash::Hash;
+
+use crate::{AnswerRange, FromReader, ImportCache};
 
 pub(crate) struct Expanded {
     pub source: String,
@@ -447,27 +450,34 @@ fn record_answer(
 const FROM_MARK: &str = "__from ";
 
 /// Adds to `source` the types its `from file: ...` lines name, and the
-/// name lines of the rules they name. `read` gives a file's source from the
-/// path written after `from`. The added lines go after the last line, so
-/// line numbers stay the user's. Types a named rule takes come too.
-pub fn with_imported_types(
+/// name lines of the rules they name. `base` is where `source` is, and
+/// `read` gives a file's source and place from the path written after
+/// `from`. The added lines go after the last line, so line numbers stay the
+/// user's. Types a named rule takes come too. Also returns the answer ranges
+/// of the named rules, so calls to them are range-checked.
+pub fn with_imported_types<B: Clone + PartialEq + Eq + Hash>(
     source: &str,
-    read: &dyn Fn(&str) -> Result<String, String>,
-) -> Result<String, String> {
-    imported(source, read, 0)
+    base: &B,
+    read: &FromReader<'_, B>,
+    cache: &mut ImportCache<B>,
+) -> Result<(String, Vec<AnswerRange>), String> {
+    imported(source, base, read, &mut Vec::new(), cache)
 }
 
-fn imported(
+/// `chain` holds the files whose `from` lines are being read: a file that is
+/// already in it closes a circle.
+fn imported<B: Clone + PartialEq + Eq + Hash>(
     source: &str,
-    read: &dyn Fn(&str) -> Result<String, String>,
-    depth: usize,
-) -> Result<String, String> {
-    if depth > 16 {
-        return Err("`from` lines import each other in a circle".to_string());
-    }
+    base: &B,
+    read: &FromReader<'_, B>,
+    chain: &mut Vec<B>,
+    cache: &mut ImportCache<B>,
+) -> Result<(String, Vec<AnswerRange>), String> {
+    chain.push(base.clone());
     let mut lines: Vec<String> = source.lines().map(String::from).collect();
     let mut added: Vec<String> = Vec::new();
     let mut added_types: Vec<String> = Vec::new();
+    let mut known: Vec<AnswerRange> = Vec::new();
     for line in &mut lines {
         let text = strip_comment(line).to_string();
         let Some(rest) = text.strip_prefix("from ") else {
@@ -476,7 +486,37 @@ fn imported(
         let Some((file, names)) = rest.split_once(':') else {
             continue;
         };
-        let other = imported(&read(file.trim())?, read, depth + 1)?;
+        // The other file, expanded once per load for each file that names it.
+        let key = (base.clone(), file.trim().to_string());
+        let (other, ranges) = match cache.0.get(&key) {
+            Some(hit) => hit.clone(),
+            None => {
+                // The other file's own `from` lines resolve from its own place.
+                let (other_source, other_base) = read(base, file.trim())?;
+                if chain.contains(&other_base) {
+                    return Err("`from` lines import each other in a circle".to_string());
+                }
+                let (other, other_known) =
+                    imported(&other_source, &other_base, read, chain, cache)?;
+                let (_, ranges) = crate::parse_module_known(&other, &other_known)
+                    .map_err(|error| format!("{}: {error}", file.trim()))?;
+                cache.0.insert(key, (other.clone(), ranges.clone()));
+                (other, ranges)
+            }
+        };
+        let items = import_items(names);
+        for (name, local) in &items {
+            // A rule answering a record is one rule per field (`quote__goods`).
+            for (rule, low, high) in ranges.iter().filter(|(rule, _, _)| {
+                rule == name
+                    || rule
+                        .strip_prefix(name.as_str())
+                        .is_some_and(|rest| rest.starts_with("__"))
+            }) {
+                let field = &rule[name.len()..];
+                known.push((format!("{local}{field}"), *low, *high));
+            }
+        }
         let mut other_lines: Vec<String> = other.lines().map(String::from).collect();
         // Each `type` block of the other file, as written, with the types it names.
         let mut blocks: Vec<(String, String, Vec<String>)> = Vec::new();
@@ -505,16 +545,23 @@ fn imported(
         if blocks.is_empty() {
             continue;
         }
+        // Types brought in under another name (`Order as Purchase`) are renamed
+        // wherever this file's added text mentions them.
+        let type_renames: Vec<(String, String)> = items
+            .iter()
+            .filter(|(name, local)| name != local && blocks.iter().any(|(n, _, _)| n == name))
+            .cloned()
+            .collect();
         let types = read_types(&mut other_lines)?;
         let signatures = signatures(&other_lines, &types)?;
         let mut need: Vec<String> = Vec::new();
-        let mut rules = Vec::new();
-        for name in names.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+        let mut rules: Vec<(String, String)> = Vec::new();
+        for (name, local) in &items {
             if blocks.iter().any(|(n, _, _)| n == name) {
                 need.push(name.to_string());
                 continue;
             }
-            rules.push(name.to_string());
+            rules.push((name.clone(), local.clone()));
             if let Some((_, params, answer, _)) = signatures.iter().find(|(n, _, _, _)| n == name) {
                 need.extend(params.iter().flatten().cloned());
                 need.extend(answer.iter().cloned());
@@ -535,10 +582,10 @@ fn imported(
         for (name, block, _) in &blocks {
             if need.contains(name) && !added_types.contains(name) {
                 added_types.push(name.clone());
-                added.push(block.clone());
+                added.push(rename_words(block, &type_renames));
             }
         }
-        for rule in &rules {
+        for (rule, local) in &rules {
             let Some((_, params, answer, places)) =
                 signatures.iter().find(|(n, _, _, _)| n == rule)
             else {
@@ -551,7 +598,7 @@ fn imported(
                 .iter()
                 .enumerate()
                 .map(|(k, t)| match t {
-                    Some(t) => format!("v{k}: {t}"),
+                    Some(t) => format!("v{k}: {}", rename_words(t, &type_renames)),
                     None => format!("v{k}"),
                 })
                 .collect();
@@ -560,13 +607,31 @@ fn imported(
             } else {
                 String::new()
             };
-            let mut sig = format!("{FROM_MARK}{rule}({}){decimals}", params.join(", "));
-            if let Some(Def::Choice(values)) = answer.as_deref().and_then(|a| types.get(a)) {
-                sig += &format!("\n  -> {}", values[0]);
+            let mut sig = format!("{FROM_MARK}{local}({}){decimals}", params.join(", "));
+            match answer
+                .as_deref()
+                .and_then(|a| types.get(a).map(|def| (a, def)))
+            {
+                Some((_, Def::Choice(values))) => sig += &format!("\n  -> {}", values[0]),
+                // `quote(price) -> Bill`: the caller reads its fields as `quote(price).goods`.
+                Some((record, Def::Record(_))) => {
+                    sig += &format!(" -> {}", rename_words(record, &type_renames));
+                }
+                _ => {}
             }
             added.push(sig);
         }
         let file = file.trim();
+        let rules: Vec<String> = rules
+            .iter()
+            .map(|(name, local)| {
+                if name == local {
+                    name.clone()
+                } else {
+                    format!("{name} as {local}")
+                }
+            })
+            .collect();
         let rules = rules.join(", ");
         *line = if rules.is_empty() {
             String::new()
@@ -574,10 +639,61 @@ fn imported(
             format!("from {file}: {rules}")
         };
     }
+    chain.pop();
     if added.is_empty() {
-        return Ok(source.to_string());
+        return Ok((source.to_string(), known));
     }
-    Ok(format!("{}\n\n{}\n", lines.join("\n"), added.join("\n\n")))
+    Ok((
+        format!("{}\n\n{}\n", lines.join("\n"), added.join("\n\n")),
+        known,
+    ))
+}
+
+/// The names a `from` line brings in, each with the name it has here:
+/// `fee` is (`fee`, `fee`), `fee as price` is (`fee`, `price`).
+fn import_items(names: &str) -> Vec<(String, String)> {
+    names
+        .split(',')
+        .map(|item| item.split_whitespace().collect::<Vec<_>>())
+        .filter(|words| !words.is_empty())
+        .map(|words| match words.as_slice() {
+            [name, "as", local] => ((*name).to_string(), (*local).to_string()),
+            [name, ..] => ((*name).to_string(), (*name).to_string()),
+            [] => unreachable!("empty items are filtered out"),
+        })
+        .collect()
+}
+
+/// `text` with each word that `renames` names replaced, outside quotes.
+fn rename_words(text: &str, renames: &[(String, String)]) -> String {
+    if renames.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut word = String::new();
+    let mut quoted = false;
+    for c in text.chars() {
+        if c.is_alphanumeric() || c == '_' {
+            word.push(c);
+            continue;
+        }
+        push_word(&mut out, &mut word, quoted, renames);
+        if c == '"' {
+            quoted = !quoted;
+        }
+        out.push(c);
+    }
+    push_word(&mut out, &mut word, quoted, renames);
+    out
+}
+
+/// Appends `word` to `out`, renamed unless it is inside quotes.
+fn push_word(out: &mut String, word: &mut String, quoted: bool, renames: &[(String, String)]) {
+    match renames.iter().find(|(from, _)| from == word) {
+        Some((_, to)) if !quoted => out.push_str(to),
+        _ => out.push_str(word),
+    }
+    word.clear();
 }
 
 fn rule_name(head: &str) -> String {
@@ -1566,6 +1682,7 @@ fn check_calls(
 
 #[cfg(test)]
 mod tests {
+    use crate::ImportCache;
     use crate::parse_module;
 
     const TYPES: &str =
@@ -1675,12 +1792,18 @@ mod tests {
         let shop = format!(
             "{TYPES}fee(order: Order)\n  need order.price <= 100\n  always -> order.price\n\nsize_of(w)\n  w < 5 -> small\n  else -> large\n"
         );
-        let read = |file: &str| {
+        let read = |_: &String, file: &str| {
             assert_eq!(file, "shop");
-            Ok(shop.clone())
+            Ok((shop.clone(), file.to_string()))
         };
         let main = "from shop: Order, fee, size_of\n\nf(o: Order)\n  need o.price <= 100\n  always -> fee(o)\n";
-        let module = crate::parse_module_with(main, &read).unwrap();
+        let module = crate::parse_module_with(
+            main,
+            &"main".to_string(),
+            &read,
+            &mut ImportCache::default(),
+        )
+        .unwrap();
         let f = module.contracts.iter().find(|c| c.name == "f").unwrap();
         let names: Vec<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["o__price", "o__quantity", "o__size"]);
@@ -1693,13 +1816,86 @@ mod tests {
         assert_eq!(f.choices[0].1.name, "Size");
         let e = crate::parse_module_with(
             "from shop: Order, fee, size_of\n\ng(w)\n  always -> fee(size_of(w))\n",
+            &"g".to_string(),
             &read,
+            &mut ImportCache::default(),
         )
         .unwrap_err();
         assert!(
             e.contains("takes a `Order` as input 1, got a `Size`"),
             "{e}"
         );
+    }
+
+    #[test]
+    fn from_lines_resolve_from_the_file_that_writes_them() {
+        // `lib/tax` names `money` next to itself, so `main` reaches `Order`
+        // through it, and the `from` line in `lib/tax` finds `lib/money`.
+        let files = [
+            (
+                "lib/money",
+                "type Size = small | large\ntype Order\n  price\n  size: Size\n",
+            ),
+            (
+                "lib/tax",
+                "from money: Order\n\nvat(o: Order)\n  need o.price <= 100\n  always -> o.price\n",
+            ),
+        ];
+        let read = |base: &String, file: &str| -> Result<(String, String), String> {
+            let dir = base.rsplit_once('/').map_or("", |(dir, _)| dir);
+            let key = if dir.is_empty() {
+                file.to_string()
+            } else {
+                format!("{dir}/{file}")
+            };
+            let text = files
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, text)| text.to_string())
+                .ok_or_else(|| format!("no file {key}"))?;
+            Ok((text, key))
+        };
+        let main =
+            "from lib/tax: vat, Order\n\nf(o: Order)\n  need o.price <= 100\n  always -> vat(o)\n";
+        let module = crate::parse_module_with(
+            main,
+            &"main".to_string(),
+            &read,
+            &mut ImportCache::default(),
+        )
+        .unwrap();
+        let f = module.contracts.iter().find(|c| c.name == "f").unwrap();
+        assert_eq!(f.choices[0].1.name, "Size");
+    }
+
+    #[test]
+    fn answer_ranges_of_an_imported_rule_bound_the_callers_arithmetic() {
+        // As in one file: `fee` answers 0 to 10000 here, so `fee(p) + p`
+        // with `p` up to 10000 stays in range; unbounded, it does not.
+        let caller = "from money: fee\n\nvat(p)\n  need p <= 10000\n  always -> fee(p) + p\n";
+        let bounded = "fee(price)\n  need price <= 10000\n  always -> price\n";
+        let unbounded = "fee(price)\n  always -> price\n";
+        let ok = crate::parse_module_with(
+            caller,
+            &"vat".to_string(),
+            &|_: &String, file: &str| {
+                assert_eq!(file, "money");
+                Ok((bounded.to_string(), file.to_string()))
+            },
+            &mut ImportCache::default(),
+        );
+        assert!(ok.is_ok(), "{ok:?}");
+        let e = crate::parse_module_with(
+            caller,
+            &"vat".to_string(),
+            &|_: &String, file: &str| {
+                assert_eq!(file, "money");
+                Ok((unbounded.to_string(), file.to_string()))
+            },
+            &mut ImportCache::default(),
+        )
+        .unwrap_err();
+        assert!(e.contains("may go outside"), "{e}");
     }
 
     #[test]

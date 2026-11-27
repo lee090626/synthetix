@@ -4,6 +4,8 @@
 //! wrapping semantics. Equivalence with the AMI evaluator is checked by the
 //! differential test in `tests/js_emit.rs`, not proven.
 
+use std::collections::HashMap;
+
 use axiom_ami::Expr;
 use axiom_parser::{Contract, Type};
 
@@ -218,10 +220,10 @@ fn check_for(name: &str, ty: &Type, var: &str, wide: bool) -> Result<String, Str
             "  if (typeof {var} !== \"bigint\" || {var} < -0x8000000000000000n || {var} > 0x7fffffffffffffffn) throw new TypeError(\"{name}: expected i64 bigint\");\n"
         ),
         Type::U32 => format!(
-            "  if (!Number.isInteger({var}) || {var} < 0 || {var} > 0xffffffff) throw new TypeError(\"{name}: expected u32\");\n"
+            "  if (typeof {var} !== \"number\" || ({var} >>> 0) !== {var}) throw new TypeError(\"{name}: expected u32\");\n"
         ),
         Type::I32 => format!(
-            "  if (!Number.isInteger({var}) || {var} < -0x80000000 || {var} > 0x7fffffff) throw new TypeError(\"{name}: expected i32\");\n"
+            "  if (typeof {var} !== \"number\" || ({var} | 0) !== {var}) throw new TypeError(\"{name}: expected i32\");\n"
         ),
         Type::Bool => format!(
             "  if (typeof {var} !== \"boolean\") throw new TypeError(\"{name}: expected bool\");\n"
@@ -271,9 +273,13 @@ pub fn emit_modules(
             dts += &declaration;
         }
     }
+    let inlinable: HashMap<&str, (&Contract, &Expr, Option<&Expr>)> = items
+        .iter()
+        .map(|&(contract, candidate, guard)| (contract.name.as_str(), (contract, candidate, guard)))
+        .collect();
     for contract in &contracts {
         if let Some(rule) = &contract.list {
-            let (function, declaration) = any_length_wrapper(contract, rule)?;
+            let (function, declaration) = any_length_wrapper(contract, rule, &inlinable)?;
             js += "\n";
             js += &function;
             dts += &declaration;
@@ -509,6 +515,7 @@ fn record_wrapper(
 fn any_length_wrapper(
     core: &Contract,
     rule: &axiom_parser::ListRule,
+    items: &HashMap<&str, (&Contract, &Expr, Option<&Expr>)>,
 ) -> Result<(String, String), String> {
     let wide = core.wide;
     let item_ty = ts_type(&core.params[0].ty, wide)?;
@@ -552,16 +559,29 @@ fn any_length_wrapper(
         // An item taking list totals (`sum(w / sum(w))`) runs in a second loop.
         let mut args = item_args.clone();
         args.extend(rule.uses[k].iter().map(|j| format!("sum{}", j + 1)));
-        let call = format!("{item}({})", args.join(", "));
+        // Inlined when the item is in this module with as many inputs as args:
+        // no call per item.
+        let (pre, value) = match items.get(item.as_str()) {
+            Some(&(contract, candidate, guard)) if contract.params.len() == args.len() => {
+                let (pre, value) = inline_item(contract, candidate, guard, &args)?;
+                (
+                    pre.lines().map(|line| format!("  {line}\n")).collect(),
+                    value,
+                )
+            }
+            _ => (String::new(), format!("{item}({})", args.join(", "))),
+        };
         let body = if rule.uses[k].is_empty() {
             &mut loop_body
         } else {
             &mut second_loop
         };
         *body += &match fold {
-            axiom_parser::Fold::Sum => format!("    sum{} += {call};\n", k + 1),
+            axiom_parser::Fold::Sum => {
+                format!("    {{\n{pre}    sum{} += {value};\n    }}\n", k + 1)
+            }
             axiom_parser::Fold::Min | axiom_parser::Fold::Max => format!(
-                "    {{ const v = {call}; if (i === 0 || v {} sum{1}) sum{1} = v; }}\n",
+                "    {{\n{pre}    const v = {value}; if (i === 0 || v {} sum{1}) sum{1} = v;\n    }}\n",
                 if *fold == axiom_parser::Fold::Min {
                     "<"
                 } else {
@@ -704,7 +724,6 @@ fn emit_function(
     guard: Option<&Expr>,
 ) -> Result<(String, String), String> {
     let wide = contract.wide;
-    let print = if wide { expr64 } else { expr };
     let ret = ts_type(&contract.return_type, wide)?;
     if RESERVED.contains(&contract.name.as_str()) || contract.name.starts_with('$') {
         return Err(format!(
@@ -712,27 +731,53 @@ fn emit_function(
             contract.name
         ));
     }
-    let mut checks = String::new();
-    let mut lowered = String::new();
     let mut names = Vec::new();
     let mut dts_params = Vec::new();
     for (i, p) in contract.params.iter().enumerate() {
         let ty = ts_type(&p.ty, wide)?;
-        let var = format!("p{i}");
-        checks += &check_for(&contract.name, &p.ty, &var, wide)?;
-        lowered += &match (&p.ty, wide) {
-            (Type::Bool, false) => format!("  const a{i} = {var} ? 1 : 0;\n"),
-            (Type::Bool, true) => format!("  const a{i} = {var} ? 1n : 0n;\n"),
-            (_, false) => format!("  const a{i} = {var} >>> 0;\n"),
-            (_, true) => format!("  const a{i} = BigInt.asUintN(64, {var});\n"),
-        };
-        names.push(var);
+        names.push(format!("p{i}"));
         let doc_name = if RESERVED.contains(&p.name.as_str()) {
             format!("p{i}")
         } else {
             p.name.clone()
         };
         dts_params.push(format!("{doc_name}: {ty}"));
+    }
+    let (body, result) = body_parts(contract, &names, candidate, guard)?;
+    Ok((
+        format!(
+            "export function {name}({params}) {{\n{body}  return {result};\n}}\n",
+            name = contract.name,
+            params = names.join(", "),
+        ),
+        format!(
+            "export function {}({}): {ret};\n",
+            contract.name,
+            dts_params.join(", ")
+        ),
+    ))
+}
+
+/// A scalar contract's input checks, lowered inputs and requires guard (the
+/// first string), and its result expression, reading the inputs from `vars`.
+fn body_parts(
+    contract: &Contract,
+    vars: &[String],
+    candidate: &Expr,
+    guard: Option<&Expr>,
+) -> Result<(String, String), String> {
+    let wide = contract.wide;
+    let print = if wide { expr64 } else { expr };
+    let mut checks = String::new();
+    let mut lowered = String::new();
+    for (i, (p, var)) in contract.params.iter().zip(vars).enumerate() {
+        checks += &check_for(&contract.name, &p.ty, var, wide)?;
+        lowered += &match (&p.ty, wide) {
+            (Type::Bool, false) => format!("  const a{i} = {var} ? 1 : 0;\n"),
+            (Type::Bool, true) => format!("  const a{i} = {var} ? 1n : 0n;\n"),
+            (_, false) => format!("  const a{i} = {var} >>> 0;\n"),
+            (_, true) => format!("  const a{i} = BigInt.asUintN(64, {var});\n"),
+        };
     }
     let guard_js = guard
         .map(|g| {
@@ -751,18 +796,24 @@ fn emit_function(
         (Type::I32, true) => format!("BigInt.asIntN(64, {result})"),
         _ => result,
     };
-    Ok((
-        format!(
-            "export function {name}({params}) {{\n{checks}{lowered}{guard_js}  return {result};\n}}\n",
-            name = contract.name,
-            params = names.join(", "),
-        ),
-        format!(
-            "export function {}({}): {ret};\n",
-            contract.name,
-            dts_params.join(", ")
-        ),
-    ))
+    Ok((format!("{checks}{lowered}{guard_js}"), result))
+}
+
+/// One item of a list rule, inlined into the loop: the statements that bind
+/// its arguments (`args`) and check them like its own function, then its value.
+fn inline_item(
+    item: &Contract,
+    candidate: &Expr,
+    guard: Option<&Expr>,
+    args: &[String],
+) -> Result<(String, String), String> {
+    let vars: Vec<String> = (0..args.len()).map(|i| format!("it{i}")).collect();
+    let mut binds = String::new();
+    for (arg, var) in args.iter().zip(&vars) {
+        binds += &format!("  const {var} = {arg};\n");
+    }
+    let (body, value) = body_parts(item, &vars, candidate, guard)?;
+    Ok((format!("{binds}{body}"), value))
 }
 
 #[cfg(test)]

@@ -17,7 +17,13 @@ pub use parser::Parser;
 pub fn parse(input: &str) -> Result<Contract, String> {
     if simple::is_simple(input) {
         let module = parse_module(input)?;
-        let [contract] = <[Contract; 1]>::try_from(module.contracts)
+        // An `effect` is a host call, not a rule: a file may declare one beside its rule.
+        let rules: Vec<Contract> = module
+            .contracts
+            .into_iter()
+            .filter(|contract| contract.kind != DeclarationKind::Extern)
+            .collect();
+        let [contract] = <[Contract; 1]>::try_from(rules)
             .map_err(|_| "expected exactly one rule in this file".to_string())?;
         validate_source(&contract, input)?;
         return Ok(contract);
@@ -29,24 +35,72 @@ pub fn parse(input: &str) -> Result<Contract, String> {
     Ok(contract)
 }
 
-/// [`parse_module`] for a file whose `from` lines may name types: `read`
-/// gives the source of the file written after `from`.
-pub fn parse_module_with(
+/// The file names the `from` lines of `source` name, as written (the same
+/// lines [`parse_module_with`] reads).
+pub fn from_files(source: &str) -> Vec<String> {
+    source
+        .lines()
+        .filter_map(|line| {
+            let text = simple::strip_comment(line);
+            let (file, _) = text.strip_prefix("from ")?.split_once(':')?;
+            Some(file.trim().to_string())
+        })
+        .collect()
+}
+
+/// The answer range of a rule: its name, and its lowest and highest value.
+pub(crate) type AnswerRange = (String, i128, i128);
+
+/// Reads a file written after `from`: its source, and its place (see
+/// [`parse_module_with`]).
+pub type FromReader<'a, B> = dyn Fn(&B, &str) -> Result<(String, B), String> + 'a;
+
+/// The `from` files a load has expanded, keyed by the file that names them:
+/// a file named by many files is expanded once. Keep one per load, since the
+/// files may change between loads.
+#[derive(Debug)]
+pub struct ImportCache<B>(
+    pub(crate) std::collections::HashMap<(B, String), (String, Vec<AnswerRange>)>,
+);
+
+impl<B> Default for ImportCache<B> {
+    fn default() -> Self {
+        Self(std::collections::HashMap::new())
+    }
+}
+
+/// [`parse_module`] for a file whose `from` lines may name types or rules.
+/// `base` is where the file is; `read` gives the source of a file written
+/// after `from`, and the place of that file, so its own `from` lines resolve
+/// from its own folder.
+pub fn parse_module_with<B: Clone + PartialEq + Eq + std::hash::Hash>(
     input: &str,
-    read: &dyn Fn(&str) -> Result<String, String>,
+    base: &B,
+    read: &FromReader<'_, B>,
+    cache: &mut ImportCache<B>,
 ) -> Result<Module, String> {
     if !simple::is_simple(input) {
         return parse_module(input);
     }
-    parse_module(&types::with_imported_types(input, read)?)
+    let (text, known) = types::with_imported_types(input, base, read, cache)?;
+    parse_module_known(&text, &known).map(|(module, _)| module)
 }
 
 pub fn parse_module(input: &str) -> Result<Module, String> {
+    parse_module_known(input, &[]).map(|(module, _)| module)
+}
+
+/// [`parse_module`], given the answer ranges of the rules `from` lines
+/// bring in (`known`). Also returns the answer range of each rule of `input`.
+pub(crate) fn parse_module_known(
+    input: &str,
+    known: &[AnswerRange],
+) -> Result<(Module, Vec<AnswerRange>), String> {
     if simple::is_simple(input) {
         if let Some(expanded) =
             types::expand(input).map_err(|e| simple::show_source_line(e, input))?
         {
-            let mut module = parse_module(&expanded.source)?;
+            let (mut module, ranges) = parse_module_known(&expanded.source, known)?;
             for record in expanded.records {
                 let first = &record.fields[0].1;
                 for contract in module.contracts.iter_mut().filter(|c| &c.name == first) {
@@ -74,29 +128,29 @@ pub fn parse_module(input: &str) -> Result<Module, String> {
                     }
                 }
             }
-            return Ok(module);
+            return Ok((module, ranges));
         }
         if let Some(expanded) =
             repeat::expand(input).map_err(|e| simple::show_source_line(e, input))?
         {
-            let mut module = parse_module(&expanded.source)?;
+            let (mut module, ranges) = parse_module_known(&expanded.source, known)?;
             for (step, rule) in expanded.rules {
                 if let Some(contract) = module.contracts.iter_mut().find(|c| c.name == step) {
                     contract.repeat = Some(rule);
                 }
             }
-            return Ok(module);
+            return Ok((module, ranges));
         }
         if let Some(expanded) =
             lists::expand(input).map_err(|e| simple::show_source_line(e, input))?
         {
-            let mut module = parse_module(&expanded.source)?;
+            let (mut module, ranges) = parse_module_known(&expanded.source, known)?;
             for (core, rule) in expanded.rules {
                 if let Some(contract) = module.contracts.iter_mut().find(|c| c.name == core) {
                     contract.list = Some(rule);
                 }
             }
-            return Ok(module);
+            return Ok((module, ranges));
         }
         let with_line = |error: String| simple::show_source_line(error, input);
         let (translated, decimals) = simple::translate_with_decimals(input).map_err(with_line)?;
@@ -107,7 +161,8 @@ pub fn parse_module(input: &str) -> Result<Module, String> {
         // A rule may use the answer range of a rule written after it (the
         // fields of a rule answering a record come last): check until no
         // rule is left, or none can be checked; then that rule's error.
-        let mut known = Vec::new();
+        let mut known = known.to_vec();
+        let mut ranges = Vec::new();
         let mut left: Vec<&Contract> = module.contracts.iter().collect();
         while !left.is_empty() {
             let mut first_error = None;
@@ -115,6 +170,7 @@ pub fn parse_module(input: &str) -> Result<Module, String> {
             left.retain(|contract| match simple::check_ranges(contract, &known) {
                 Ok((low, high)) => {
                     known.push((contract.name.clone(), low, high));
+                    ranges.push((contract.name.clone(), low, high));
                     false
                 }
                 Err(error) => {
@@ -126,11 +182,11 @@ pub fn parse_module(input: &str) -> Result<Module, String> {
                 return Err(first_error.unwrap());
             }
         }
-        return Ok(module);
+        return Ok((module, ranges));
     }
     let lexer = Lexer::new(input);
     let mut parser = Parser::new(lexer)?;
-    parser.parse_module()
+    parser.parse_module().map(|module| (module, Vec::new()))
 }
 
 /// Like [`validate`], but on simple syntax the error names the user's line

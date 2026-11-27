@@ -21,6 +21,7 @@ type SynthesisOutput = (
 );
 
 mod go;
+mod headless;
 mod js;
 mod lean;
 mod py;
@@ -37,6 +38,7 @@ usage:
   axiom build <contract.ax> [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N] [--max-memory-bytes N] [--emit js] [--lean]
   axiom build [--emit js|rust|python|go] [--lean]
   axiom run <contract.ax> [--] [<value>...] [-o output.wasm] [--report report.json] [--timeout-ms N] [--max-candidates N] [--max-memory-bytes N]
+  axiom run <project> --action <button> [--set name=value]... [--adapter effects.js] [--wait-ms N]
   axiom app-run <contract.ax> [--] [<application-value>...]
   axiom <contract.ax> [-o output.wasm]
 ";
@@ -377,6 +379,10 @@ fn dev_command(args: &[String]) -> Result<(), String> {
 }
 
 fn run_command(args: &[String]) -> Result<(), String> {
+    // A project folder runs one of its page actions (M6), not a single rule.
+    if args.first().is_some_and(|first| Path::new(first).is_dir()) {
+        return headless::run(args);
+    }
     let options = parse_run_args(args)?;
     if let Ok(source) = fs::read_to_string(options.input)
         && let Ok(module) = axiom_parser::parse_module(&source)
