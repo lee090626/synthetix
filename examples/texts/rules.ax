@@ -1,0 +1,22 @@
+# 등급 종류: 점수로 정한 A, B, C 중 하나
+type Grade = "A" | "B" | "C"
+
+# 등급별 보너스: A는 10, B는 5, C는 0
+bonus(grade: Grade)
+  grade is "A" -> 10
+  grade is "B" -> 5
+  else -> 0
+  promise answer <= 10
+
+# 점수 0~100에서 등급
+letter(score)
+  need score <= 100
+  score >= 90 -> "A"
+  score >= 80 -> "B"
+  else -> "C"
+
+# 점수로 보너스: 등급을 거쳐 계산
+total(score)
+  need score <= 100
+  always -> bonus(letter(score))
+  promise answer <= 10

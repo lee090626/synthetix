@@ -220,6 +220,17 @@ function validateEffectResponse(value, type = null) {
   return value;
 }
 
+// A text given to a type's input is the type's value; its place is passed on.
+// This mapping is not verified: the rule is proven for every place.
+function choicePlace(contract, value, index) {
+  const choice = contract.choices?.[index];
+  if (!choice || typeof value !== 'string') return value;
+  const place = choice.values.indexOf(value);
+  if (place < 0)
+    throw new TypeError(`argument ${index + 1}: "${value}" is not a value of ${choice.name} (${choice.values.join(', ')})`);
+  return place;
+}
+
 function callContract(name, args) {
   try {
     const contract = __contracts[name];
@@ -228,7 +239,8 @@ function callContract(name, args) {
       throw new TypeError(`${name}: expected ${contract.params.length} arguments`);
     const fn = __exports?.[name];
     if (typeof fn !== 'function') throw new Error(`Missing WASM export: ${name}`);
-    const lowered = args.map((value, index) => lowerArgument(value, contract.params[index], index));
+    const lowered = args.map((value, index) =>
+      lowerArgument(choicePlace(contract, value, index), contract.params[index], index));
     if (contract.requires) {
       const check = __exports?.[contract.requires];
       if (typeof check !== 'function') throw new Error(`Missing WASM precondition check: ${name}`);
@@ -448,6 +460,28 @@ function renderElement(element, root, scope) {
       message.textContent = element.text;
       root.append(message);
     }
+    return;
+  }
+  if (element.kind === 'input' && element.options) {
+    // A text state a rule takes as a type: a box of the type's values.
+    const select = document.createElement('select');
+    const blank = document.createElement('option');
+    blank.value = '';
+    blank.textContent = element.placeholder;
+    select.append(blank);
+    for (const value of element.options) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = value;
+      select.append(option);
+    }
+    select.value = getPath(__state, element.state) ?? '';
+    select.addEventListener('change', () => {
+      setPath(__state, element.state, select.value);
+      saveState();
+      clearApplicationError();
+    });
+    root.append(select);
     return;
   }
   if (element.kind === 'input') {

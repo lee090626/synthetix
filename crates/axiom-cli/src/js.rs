@@ -307,7 +307,7 @@ pub fn emit_modules(
             .values
             .iter()
             .enumerate()
-            .map(|(at, value)| format!("{value}: {at}{big}"))
+            .map(|(at, value)| format!("{}: {at}{big}", axiom_parser::value_ident(value)))
             .collect();
         js += &format!(
             "\n/** Values of `type {}`: each is its place, from 0. */\nexport const {} = Object.freeze({{ {} }});\n",
@@ -435,6 +435,10 @@ fn repeat_wrapper(
         typed.push(format!("p{i}: {}", ts_type(&param.ty, step.wide)?));
     }
     let ret = ts_type(&step.return_type, step.wide)?;
+    let mut step_args = args.clone();
+    if rule.counted {
+        step_args[rule.count] = "i".to_string();
+    }
     let zero = if step.wide { "0n" } else { "0" };
     let one = if step.wide { "1n" } else { "1" };
     Ok((
@@ -446,7 +450,7 @@ fn repeat_wrapper(
             args.join(", "),
             rule.count,
             step.name,
-            args.join(", "),
+            step_args.join(", "),
         ),
         format!(
             "export function {}({}): {ret};\n",

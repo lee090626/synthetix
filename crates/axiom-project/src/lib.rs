@@ -44,6 +44,9 @@ impl From<&LinkedContract> for ContractId {
 pub struct LinkedPage {
     pub source: PathBuf,
     pub page: Page,
+    /// Text states a rule takes as a type (`bonus(grade)`): the page shows
+    /// the type's values for them and passes each text as its place.
+    pub text_choices: Vec<(String, axiom_parser::ChoiceType)>,
 }
 
 #[derive(Debug, Clone)]
@@ -893,7 +896,7 @@ fn link_project_retained(
             stats.pages_relinked += 1;
             let mut page = page.clone();
             expand_components(&mut page, &components, &module.path)?;
-            validate_page(
+            let text_choices = validate_page(
                 &page,
                 &module.path,
                 scopes.get(&module.path),
@@ -903,6 +906,7 @@ fn link_project_retained(
             pages.push(LinkedPage {
                 source: module.path.clone(),
                 page,
+                text_choices,
             });
         }
     }
@@ -1520,7 +1524,7 @@ fn validate_page(
     scope: Option<&HashMap<String, ContractKey>>,
     definitions: &HashMap<ContractKey, Definition>,
     records: &HashMap<String, RecordDef>,
-) -> Result<(), String> {
+) -> Result<Vec<(String, axiom_parser::ChoiceType)>, String> {
     let mut states = HashMap::new();
     for state in &page.states {
         if matches!(state.ty, Type::FixedArray(_, _)) {
@@ -1620,7 +1624,77 @@ fn validate_page(
         source,
     )?;
     validate_decimals(page, scope, definitions, source)?;
-    Ok(())
+    text_choices(page, &states, scope, definitions, source)
+}
+
+/// The page calls (buttons and reducer updates, in lists too) in order.
+fn page_calls<'a>(elements: &'a [PageElement], out: &mut Vec<(&'a str, &'a [SpecExpr])>) {
+    for element in elements {
+        match element {
+            PageElement::Button { function, args, .. } => out.push((function, args)),
+            PageElement::List { elements, .. } => page_calls(elements, out),
+            _ => {}
+        }
+    }
+}
+
+/// Text states that a rule takes as a type: the page shows the type's
+/// values for them. A state gives one type.
+fn text_choices(
+    page: &Page,
+    states: &HashMap<String, Type>,
+    scope: Option<&HashMap<String, ContractKey>>,
+    definitions: &HashMap<ContractKey, Definition>,
+    source: &Path,
+) -> Result<Vec<(String, axiom_parser::ChoiceType)>, String> {
+    let mut calls = Vec::new();
+    page_calls(&page.elements, &mut calls);
+    for reducer in &page.reducers {
+        for update in &reducer.updates {
+            if table_update(update).is_none() {
+                calls.push((&update.function, &update.args));
+            }
+        }
+    }
+    let mut out: Vec<(String, axiom_parser::ChoiceType)> = Vec::new();
+    for (function, args) in calls {
+        let Some(definition) = scope
+            .and_then(|scope| scope.get(function))
+            .and_then(|key| definitions.get(key))
+        else {
+            continue;
+        };
+        for (index, arg) in args.iter().enumerate() {
+            let SpecExpr::Ident(name) = arg else { continue };
+            if states.get(name) != Some(&Type::Text) {
+                continue;
+            }
+            let Some(param) = definition.contract.params.get(index) else {
+                continue;
+            };
+            let Some((_, choice)) = definition
+                .contract
+                .choices
+                .iter()
+                .find(|(n, _)| n == &param.name)
+            else {
+                continue;
+            };
+            match out.iter().find(|(state, _)| state == name) {
+                Some((_, other)) if other.name != choice.name => {
+                    return Err(format!(
+                        "{}: text state {name} is passed to {} and {}; give it one type",
+                        source.display(),
+                        other.name,
+                        choice.name
+                    ));
+                }
+                Some(_) => {}
+                None => out.push((name.clone(), choice.clone())),
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Values with decimals are stored times 10^places, so a button passes them
@@ -2032,7 +2106,14 @@ fn validate_call(
         // A whole number may go into a `can be negative` rule; the runtime
         // rejects values above i32::MAX before the call.
         let widens = actual_type == Type::U32 && expected_type == &Type::I32;
-        if !widens && !types_compatible_expr(&actual_type, expected_type, arg) {
+        // Text goes into a type's input; the runtime turns it into the place.
+        let text_choice = actual_type == Type::Text
+            && definition
+                .contract
+                .choices
+                .iter()
+                .any(|(n, _)| n == &definition.contract.params[index].name);
+        if !widens && !text_choice && !types_compatible_expr(&actual_type, expected_type, arg) {
             return Err(format!(
                 "{}: argument {} of {} has type {:?}, expected {:?}",
                 source.display(),

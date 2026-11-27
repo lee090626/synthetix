@@ -194,7 +194,10 @@ pub fn emit_module(items: &[(&Contract, &Expr, Option<&Expr>)]) -> Result<String
             ident(&choice.name)?
         );
         for (at, value) in choice.values.iter().enumerate() {
-            out += &format!("    pub const {}: {word} = {at};\n", ident(value)?);
+            out += &format!(
+                "    pub const {}: {word} = {at};\n",
+                ident(&axiom_parser::value_ident(value))?
+            );
         }
         out += "}\n";
     }
@@ -426,16 +429,21 @@ fn repeat_wrapper(step: &Contract, rule: &axiom_parser::RepeatRule) -> Result<St
     }
     let ret = rs_type(&step.return_type, step.wide)?;
     let names: Vec<&str> = inputs.iter().map(|p| p.name.as_str()).collect();
+    let mut step_args = args.clone();
+    if rule.counted {
+        step_args[rule.count] = "i".to_string();
+    }
     Ok(format!(
-        "/// Inputs: {}.\npub fn {}({}) -> Result<{ret}, AxiomError> {{\n    let mut value = {}({})?;\n    for _ in 0..p{} {{\n        value = {}({}, value)?;\n    }}\n    Ok(value)\n}}\n",
+        "/// Inputs: {}.\npub fn {}({}) -> Result<{ret}, AxiomError> {{\n    let mut value = {}({})?;\n    for {} in 0..p{} {{\n        value = {}({}, value)?;\n    }}\n    Ok(value)\n}}\n",
         names.join(", "),
         ident(&rule.name)?,
         params.join(", "),
         ident(&rule.start)?,
         args.join(", "),
+        if rule.counted { "i" } else { "_" },
         rule.count,
         ident(&step.name)?,
-        args.join(", "),
+        step_args.join(", "),
     ))
 }
 

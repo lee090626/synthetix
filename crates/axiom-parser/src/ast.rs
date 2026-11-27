@@ -157,6 +157,9 @@ pub struct RepeatRule {
     pub count: usize,
     /// The `need count <= max` limit.
     pub max: u64,
+    /// Set for a rule that calls itself (`f(n - 1)`): the step takes its
+    /// place, from 0, as the counted input.
+    pub counted: bool,
 }
 
 /// A `hint` line: a lemma from `axiom_verify::lean::LEMMAS` and its arguments.

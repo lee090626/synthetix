@@ -210,6 +210,35 @@ number of steps (`loop_inv` in `proofs/lean/Repeat.lean`). The promises are
 also what keeps the step's numbers in range, so bound `value` from above.
 `repeat` does not work with lists yet.
 
+### A rule that calls itself
+
+A rule may call itself with one less. The first `->` line answers for 0;
+the other lines may call the rule with the same inputs and `n - 1` for `n`:
+
+```
+triangle(n)
+  need n <= 1000
+  n is 0 -> 0
+  else -> n + triangle(n - 1)
+  promise answer * 2 is n * (n + 1)
+  promise answer <= 1000000
+```
+
+A `need n <= limit` line and at least one `promise` are required. Each
+promise must hold for 0, and for `n` whenever it holds for the call's answer
+(for `n - 1`); Synthetix proves those two, and then it holds for every `n`
+(`rec_inv` in `proofs/lean/Repeat.lean`). As with `repeat`, the promises keep
+the numbers in range, so bound the answer from above. A failing input names
+`n__prev` (that is `n - 1`) and `value` (the call's answer). Example:
+`examples/recursion`.
+
+| Not yet | Instead |
+|---|---|
+| Calls with other inputs changed, or `n - 2` | Keep the other inputs; one less each call |
+| A `need` about `n` other than `n <= limit` (`need n >= 3`) | A condition line (`n < 3 -> ...`) |
+| Named values, lists, decimals, `can be negative`, a record answer | `->` lines on numbers |
+| Calling the rule from another rule, or from a page | `--emit` or `axiom run` |
+
 ### Decimals
 
 Add `with 2 decimals` (1 to 6 places) to the name line. Every value in the rule,
@@ -242,6 +271,30 @@ grade(score)
 
 Every `->` line then needs a text answer. A page shows it (below); other rules
 cannot use it.
+
+To use texts in rules, name them in a type. Each text is a value, like a
+word value, so it is proven like any choice:
+
+```
+type Grade = "A" | "B" | "C"
+
+bonus(grade: Grade)
+  grade is "A" -> 10
+  grade is "B" -> 5
+  else -> 0
+```
+
+`bonus("B")` gives 5. A `->` line that answers a text of the type makes the
+rule answer that type, so another rule can use it. A type holds either words
+or quoted texts, not both. A text may hold `|`. Texts are fixed in the type: a
+rule cannot take any text.
+
+A page uses it with a text state: `save grade = ""` and `ask "Grade" for grade`
+show a box of the values (the first line is blank), and `result = bonus(grade)`
+passes the chosen text. A literal works too: `result = bonus("B")`. A text that
+is not a value is an error. A state given
+to two types is an error. The page passes the value's place, which the browser
+maps from the text; that mapping is checked by tests, not proven.
 
 ### Types
 
@@ -334,7 +387,6 @@ More types:
 | A record answer whose field is a record | Answer the inner record from its own rule |
 | Lists of a fixed size holding a type (`sizes[3]: Size`) | A list of any length (`sizes[n]`) |
 | A promise about `sum(lines.price * lines.qty)` (as for two lists, above) | A promise that follows from the ranges |
-| Types on pages | A rule that takes numbers |
 
 ### Numbers must stay in range
 

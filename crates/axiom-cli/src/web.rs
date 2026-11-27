@@ -867,7 +867,7 @@ fn page_json(linked: &LinkedPage, root: &Path, storage_schema_version: u32) -> S
     let elements = page
         .elements
         .iter()
-        .map(|element| element_json(element, &page.reducers, &page.states))
+        .map(|element| element_json(element, &page.reducers, &page.states, &linked.text_choices))
         .collect::<Vec<_>>();
     let reducers = page
         .reducers
@@ -929,6 +929,7 @@ fn element_json(
     element: &PageElement,
     reducers: &[Reducer],
     states: &[axiom_parser::State],
+    choices: &[(String, axiom_parser::ChoiceType)],
 ) -> String {
     match element {
         PageElement::Show { state } => {
@@ -1014,11 +1015,19 @@ fn element_json(
                 updates
             )
         }
-        PageElement::Input { state, placeholder } => format!(
-            "{{\"kind\":\"input\",\"state\":{},\"placeholder\":{}}}",
-            json_string(state),
-            json_string(placeholder)
-        ),
+        PageElement::Input { state, placeholder } => {
+            // A text state a rule takes as a type offers the type's values.
+            let options = choices
+                .iter()
+                .find(|(name, _)| name == state)
+                .map(|(_, choice)| format!(",\"options\":[{}]", choice_values_json(&choice.values)))
+                .unwrap_or_default();
+            format!(
+                "{{\"kind\":\"input\",\"state\":{},\"placeholder\":{}{options}}}",
+                json_string(state),
+                json_string(placeholder)
+            )
+        }
         PageElement::List {
             state,
             item,
@@ -1029,7 +1038,7 @@ fn element_json(
             json_string(item),
             elements
                 .iter()
-                .map(|element| element_json(element, reducers, states))
+                .map(|element| element_json(element, reducers, states, choices))
                 .collect::<Vec<_>>()
                 .join(",")
         ),
@@ -1047,6 +1056,15 @@ fn element_json(
             format!("{{\"kind\":\"text\",\"text\":{}}}", json_string(name))
         }
     }
+}
+
+/// Choice values as text, in order (a value's text, not its quotes).
+fn choice_values_json(values: &[String]) -> String {
+    values
+        .iter()
+        .map(|value| json_string(axiom_parser::value_text(value)))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn error_json(error: &str) -> String {
@@ -1140,6 +1158,33 @@ fn contracts_json(project: &Project) -> String {
                 .map(|line| json_string(line.trim()))
                 .collect::<Vec<_>>()
                 .join(",");
+            // Each input that is a type: its name and values, for text to place.
+            let choice_field = if linked.contract.choices.is_empty() {
+                String::new()
+            } else {
+                let choices = linked
+                    .contract
+                    .params
+                    .iter()
+                    .map(|param| {
+                        match linked
+                            .contract
+                            .choices
+                            .iter()
+                            .find(|(name, _)| name == &param.name)
+                        {
+                            Some((_, choice)) => format!(
+                                "{{\"name\":{},\"values\":[{}]}}",
+                                json_string(&choice.name),
+                                choice_values_json(&choice.values)
+                            ),
+                            None => "null".to_string(),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!(",\"choices\":[{choices}]")
+            };
             let labels = if linked.contract.labels.is_empty() {
                 String::new()
             } else {
@@ -1155,7 +1200,7 @@ fn contracts_json(project: &Project) -> String {
                 )
             };
             format!(
-                "{}:{{\"source\":{},\"params\":[{}],\"result\":{},\"requires\":{},\"needs\":[{needs}]{labels}}}",
+                "{}:{{\"source\":{},\"params\":[{}],\"result\":{},\"requires\":{},\"needs\":[{needs}]{labels}{choice_field}}}",
                 json_string(&linked.contract.name),
                 json_string(&source_label(&project.config.root, &linked.source)),
                 params,
@@ -2914,6 +2959,7 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
             pages: vec![LinkedPage {
                 source: PathBuf::from("/tmp/synthetix/main.ax"),
                 page,
+                text_choices: Vec::new(),
             }],
             files: Vec::new(),
         };
