@@ -1660,6 +1660,13 @@ fn json_string(value: &str) -> String {
             '\n' => result.push_str("\\n"),
             '\r' => result.push_str("\\r"),
             '\t' => result.push_str("\\t"),
+            // Escaped so the text cannot close a <script> block or a tag when
+            // embedded in HTML; JSON readers decode these the same way.
+            '<' => result.push_str("\\u003c"),
+            '>' => result.push_str("\\u003e"),
+            '&' => result.push_str("\\u0026"),
+            '\u{2028}' => result.push_str("\\u2028"),
+            '\u{2029}' => result.push_str("\\u2029"),
             character if character.is_control() => {
                 result.push_str(&format!("\\u{:04x}", character as u32));
             }
@@ -3992,5 +3999,15 @@ vm.runInThisContext(fs.readFileSync(process.env.AXIOM_TEST_JS, 'utf8'));
             Box::new(expected),
         )];
         point
+    }
+}
+
+#[cfg(test)]
+mod json_escape_tests {
+    #[test]
+    fn html_sensitive_characters_are_escaped_in_json_text() {
+        let text = super::json_string("</script>&\u{2028}");
+        assert_eq!(text, "\"\\u003c/script\\u003e\\u0026\\u2028\"");
+        assert!(!text.contains(['<', '>', '&']));
     }
 }
