@@ -326,16 +326,18 @@ fn list_names(params: &[(String, bool)]) -> Vec<&str> {
 }
 
 /// A list rule that another list rule of this file may call: its inputs, and
-/// the one `sum(...)` its core takes, written in terms of its list.
+/// the one fold (`sum`, `min` or `max`) its core takes, written in terms of
+/// its list.
 struct Callee {
     params: Vec<(String, bool)>,
     list: String,
-    sum: String,
+    fold: Fold,
+    expr: String,
 }
 
-/// The list rules whose answer is one plain sum over their items (and no
-/// `each`/`position`). A caller computes that sum over its own list and calls
-/// the core, so the callee's loop is not repeated per call.
+/// The list rules whose answer is one plain fold (`sum`, `min` or `max`) over
+/// their items (and no `each`/`position`). A caller computes that fold over its
+/// own list and calls the core, so the callee's loop is not repeated per call.
 fn callees_of(
     lines: &[String],
     blocks: &[(usize, usize, Head)],
@@ -349,26 +351,29 @@ fn callees_of(
         let Ok((_, _, rule)) = split(head, &lines[*start..*end], start + 1) else {
             continue;
         };
-        if rule.each || rule.position || rule.folds != [Fold::Sum] || rule.items.len() != 1 {
+        let [fold] = rule.folds.as_slice() else {
+            continue;
+        };
+        if rule.each || rule.position || rule.items.len() != 1 {
             continue;
         }
-        let mut sums: Vec<String> = Vec::new();
+        let mut exprs: Vec<String> = Vec::new();
         for raw in &lines[start + 1..*end] {
-            replace_calls(strip_comment(raw), "sum", &mut |inner: &str| {
-                sums.push(inner.to_string());
+            replace_calls(strip_comment(raw), fold.word(), &mut |inner: &str| {
+                exprs.push(inner.to_string());
                 Ok(String::new())
             })?;
         }
-        sums.sort();
-        sums.dedup();
-        let [sum] = sums.as_slice() else {
+        exprs.sort();
+        exprs.dedup();
+        let [expr] = exprs.as_slice() else {
             continue;
         };
         if head
             .params
             .iter()
             .filter(|(_, is_list)| !*is_list)
-            .any(|(p, _)| mentions(sum, p))
+            .any(|(p, _)| mentions(expr, p))
         {
             continue;
         }
@@ -377,7 +382,8 @@ fn callees_of(
             Callee {
                 params: head.params.clone(),
                 list: list.to_string(),
-                sum: sum.clone(),
+                fold: *fold,
+                expr: expr.clone(),
             },
         );
     }
@@ -420,7 +426,11 @@ fn rewrite_calls(
             };
             let mut core_args: Vec<String> = scalars.iter().map(|s| s.to_string()).collect();
             core_args.push(format!("count({list})"));
-            core_args.push(format!("sum({})", rename(&callee.sum, &callee.list, list)));
+            core_args.push(format!(
+                "{}({})",
+                callee.fold.word(),
+                rename(&callee.expr, &callee.list, list)
+            ));
             Ok(format!("{name}__core({})", core_args.join(", ")))
         })?;
     }

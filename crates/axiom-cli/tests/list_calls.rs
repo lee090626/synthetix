@@ -51,3 +51,26 @@ fn a_list_call_without_the_callee_needs_is_rejected_by_the_caller() {
     assert!(!ok, "{output}");
     assert!(output.contains("can reach"), "{output}");
 }
+
+const LOWEST: &str = "lowest(prices[n])\n  need n >= 1\n  need n <= 10\n  need prices <= 1000\n  always -> min(prices)\n  promise answer <= 1000\n\n";
+
+#[test]
+fn a_list_rule_can_call_a_min_rule_with_the_same_needs() {
+    let text = format!(
+        "{LOWEST}copy_low(items[n])\n  need n >= 1\n  need n <= 10\n  need items <= 1000\n  always -> lowest(items) + 1\n  promise answer <= 1001\n"
+    );
+    let dir = project("min-ok", &text);
+    let (ok, output) = check(&dir);
+    assert!(ok, "{output}");
+    assert!(output.contains("verified: copy_low__core"), "{output}");
+}
+
+#[test]
+fn a_min_call_without_the_at_least_one_item_need_is_rejected() {
+    let text = format!(
+        "{LOWEST}copy_low(items[n])\n  need n <= 10\n  need items <= 1000\n  always -> lowest(items) + 1\n  promise answer <= 1001\n"
+    );
+    let dir = project("min-missing-need", &text);
+    let (ok, output) = check(&dir);
+    assert!(!ok, "{output}");
+}
