@@ -112,7 +112,10 @@ impl RetainedProjectLoader {
         let mut modules = Vec::new();
         let mut visiting = Vec::new();
         let mut stats = RetainedLoadStats::default();
-        let mut caches = LoadCaches::default();
+        let mut caches = LoadCaches {
+            root: canonical(&config.root)?,
+            ..LoadCaches::default()
+        };
         visit_module_retained(
             &config.entry,
             &mut modules,
@@ -328,7 +331,14 @@ pub fn load(config_path: impl AsRef<Path>) -> Result<Project, String> {
     let mut modules = Vec::new();
     let mut visiting = Vec::new();
     let mut imports = ImportCache::default();
-    visit_module(&config.entry, &mut modules, &mut visiting, &mut imports)?;
+    let root = canonical(&config.root)?;
+    visit_module(
+        &config.entry,
+        &mut modules,
+        &mut visiting,
+        &mut imports,
+        &root,
+    )?;
     link_project(config, modules)
 }
 
@@ -462,8 +472,10 @@ fn visit_module(
     modules: &mut Vec<ModuleInfo>,
     visiting: &mut Vec<PathBuf>,
     cache: &mut ImportCache<PathBuf>,
+    root: &Path,
 ) -> Result<(), String> {
     let path = canonical(path)?;
+    within(root, &path)?;
     if modules.iter().any(|module| module.path == path) {
         return Ok(());
     }
@@ -482,12 +494,12 @@ fn visit_module(
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     axiom_parser::simple::check_user_syntax(&source)
         .map_err(|error| format!("{}: {error}", path.display()))?;
-    let module = parse_at(&path, &source, cache)?;
+    let module = parse_at(&path, &source, cache, root)?;
     let source_contents = Arc::<[u8]>::from(source.as_bytes());
     let imports = module.imports.clone();
     for import in &imports {
         let imported = resolve_import(&path, import)?;
-        visit_module(&imported, modules, visiting, cache)?;
+        visit_module(&imported, modules, visiting, cache, root)?;
     }
     visiting.pop();
     modules.push(ModuleInfo {
@@ -503,6 +515,8 @@ fn visit_module(
 /// files. Both are valid for one load only.
 #[derive(Default)]
 struct LoadCaches {
+    /// The project folder, canonical: every file read must resolve inside it.
+    root: PathBuf,
     fingerprints: HashMap<PathBuf, u64>,
     imports: ImportCache<PathBuf>,
 }
@@ -513,11 +527,12 @@ fn parse_at(
     path: &Path,
     source: &str,
     imports: &mut ImportCache<PathBuf>,
+    root: &Path,
 ) -> Result<Module, String> {
     axiom_parser::parse_module_with(
         source,
         &path.to_path_buf(),
-        &|base: &PathBuf, file: &str| read_from(base, file),
+        &|base: &PathBuf, file: &str| read_from(root, base, file),
         imports,
     )
     .map_err(|error| format!("{}: {error}", path.display()))
@@ -566,6 +581,7 @@ fn visit_module_retained(
 ) -> Result<(), String> {
     push_watch_path(watch_paths, path.to_path_buf());
     let path = canonical(path)?;
+    within(&caches.root, &path)?;
     push_watch_path(watch_paths, path.clone());
     if modules.iter().any(|module| module.path == path) {
         return Ok(());
@@ -594,7 +610,7 @@ fn visit_module_retained(
         stats.modules_parsed += 1;
         axiom_parser::simple::check_user_syntax(&source)
             .map_err(|error| format!("{}: {error}", path.display()))?;
-        let module = parse_at(&path, &source, &mut caches.imports)?;
+        let module = parse_at(&path, &source, &mut caches.imports, &caches.root)?;
         (module, Arc::<[u8]>::from(source.as_bytes()))
     };
     for import in &module.imports {
@@ -768,11 +784,21 @@ fn from_path(source: &Path, file: &str) -> Result<PathBuf, String> {
 
 /// The source of `file`, written after `from` in the file at `source`, and
 /// that file's own path: its `from` lines resolve from its folder.
-fn read_from(source: &Path, file: &str) -> Result<(String, PathBuf), String> {
-    let path = from_path(source, file)?;
+fn read_from(root: &Path, source: &Path, file: &str) -> Result<(String, PathBuf), String> {
+    let path = canonical(&from_path(source, file)?)?;
+    within(root, &path)?;
     let text = fs::read_to_string(&path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-    Ok((text, canonical(&path)?))
+    Ok((text, path))
+}
+
+/// Rejects a file whose real location (symlinks resolved) is outside `root`,
+/// the canonical project folder.
+fn within(root: &Path, real: &Path) -> Result<(), String> {
+    if real.starts_with(root) {
+        return Ok(());
+    }
+    Err(format!("{} is outside the project folder", real.display()))
 }
 
 fn import_candidate_path(source: &Path, import: &Import) -> Result<PathBuf, String> {

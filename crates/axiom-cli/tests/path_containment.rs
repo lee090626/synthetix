@@ -92,3 +92,33 @@ fn a_from_line_inside_the_project_still_works() {
     let (ok, output) = check(&dir);
     assert!(ok, "{output}");
 }
+
+#[test]
+fn a_symlink_from_file_cannot_read_outside_the_project() {
+    let dir = setup(
+        "symlink-from",
+        &format!("from lib/link: x\n\n{USE_X}"),
+        "rules.ax",
+    );
+    fs::create_dir_all(dir.join("lib")).unwrap();
+    std::os::unix::fs::symlink("../../outside/notes.txt", dir.join("lib/link.ax")).unwrap();
+    let (ok, output) = check(&dir);
+    assert!(!ok, "{output}");
+    assert!(output.contains("outside the project folder"), "{output}");
+    assert!(!output.contains(SECRET), "{output}");
+}
+
+#[test]
+fn a_symlink_entry_cannot_read_outside_the_project() {
+    let dir = setup("symlink-entry", USE_X, "rules.ax");
+    std::os::unix::fs::symlink("../outside/notes.txt", dir.join("linked.ax")).unwrap();
+    fs::write(
+        dir.join("synthetix.toml"),
+        "[project]\nentry = \"linked.ax\"\n",
+    )
+    .unwrap();
+    let (ok, output) = check(&dir);
+    assert!(!ok, "{output}");
+    assert!(output.contains("outside the project folder"), "{output}");
+    assert!(!output.contains(SECRET), "{output}");
+}
