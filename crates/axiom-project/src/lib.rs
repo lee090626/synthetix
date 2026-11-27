@@ -447,6 +447,7 @@ fn parse_config(path: &Path) -> Result<ProjectConfig, String> {
         ));
     }
 
+    inside_folder(&entry)?;
     let entry = root.join(entry);
     Ok(ProjectConfig {
         root,
@@ -735,8 +736,26 @@ fn resolve_import(source: &Path, import: &Import) -> Result<PathBuf, String> {
     canonical(&path)
 }
 
+/// Rejects a name that leaves its folder (`..`, a root or a drive prefix), so
+/// `from` lines and the entry read only files inside the project.
+fn inside_folder(name: &str) -> Result<(), String> {
+    let leaves = Path::new(name).components().any(|part| {
+        matches!(
+            part,
+            std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        )
+    });
+    if leaves {
+        return Err(format!("`{name}` must name a file inside its folder"));
+    }
+    Ok(())
+}
+
 /// Where `file`, written after `from` in the file at `source`, is.
 fn from_path(source: &Path, file: &str) -> Result<PathBuf, String> {
+    inside_folder(file)?;
     let mut path = source
         .parent()
         .ok_or_else(|| format!("cannot determine parent of {}", source.display()))?
@@ -757,6 +776,7 @@ fn read_from(source: &Path, file: &str) -> Result<(String, PathBuf), String> {
 }
 
 fn import_candidate_path(source: &Path, import: &Import) -> Result<PathBuf, String> {
+    inside_folder(&import.path)?;
     let mut path = source
         .parent()
         .ok_or_else(|| format!("cannot determine parent of {}", source.display()))?
